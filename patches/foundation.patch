@@ -1,0 +1,69 @@
+diff --git a/include/Foundation/NSProcessInfo.h b/include/Foundation/NSProcessInfo.h
+index b3742a82e..f4d7b4d6d 100644
+--- a/include/Foundation/NSProcessInfo.h
++++ b/include/Foundation/NSProcessInfo.h
+@@ -50,6 +50,14 @@ NSOperatingSystemVersion;
+ - (NSOperatingSystemVersion)operatingSystemVersion;
+ - (BOOL)isOperatingSystemAtLeastVersion:(NSOperatingSystemVersion)version;
+ 
++typedef NS_ENUM(NSInteger, NSProcessInfoThermalState) {
++    NSProcessInfoThermalStateNominal = 0,
++    NSProcessInfoThermalStateFair = 1,
++    NSProcessInfoThermalStateSerious = 2,
++    NSProcessInfoThermalStateCritical = 3,
++};
++- (NSProcessInfoThermalState)thermalState;
++
+ @end
+ 
+ @interface NSProcessInfo (NSProcessInfoPlatform)
+@@ -62,3 +70,5 @@ NSOperatingSystemVersion;
+ #ifdef DARLING
+ FOUNDATION_EXPORT void __NSInitializeProcess(int argc,const char *argv[]);
+ #endif
++
++FOUNDATION_EXPORT NSString *const NSProcessInfoThermalStateDidChangeNotification;
+diff --git a/include/Foundation/NSUserActivity.h b/include/Foundation/NSUserActivity.h
+index 80c92bc07..2a80df649 100644
+--- a/include/Foundation/NSUserActivity.h
++++ b/include/Foundation/NSUserActivity.h
+@@ -21,3 +21,5 @@
+ 
+ @interface NSUserActivity : NSObject
+ @end
++
++FOUNDATION_EXPORT NSString *const NSUserActivityTypeBrowsingWeb;
+diff --git a/src/NSProcessInfo.m b/src/NSProcessInfo.m
+index 1c21f176d..f9f354c80 100644
+--- a/src/NSProcessInfo.m
++++ b/src/NSProcessInfo.m
+@@ -305,6 +305,13 @@ SINGLETON_RR()
+     return t.tv_sec + t.tv_usec / (NSTimeInterval)USEC_PER_SEC;
+ }
+ 
++- (NSProcessInfoThermalState)thermalState
++{
++    /* No thermal-pressure source on Linux; report Nominal so clients
++     * (e.g. Chromium's ThermalStateObserverMac) proceed normally. */
++    return NSProcessInfoThermalStateNominal;
++}
++
+ - (NSOperatingSystemVersion)operatingSystemVersion
+ {
+ 	NSOperatingSystemVersion version = { 0, 0, 0 };
+@@ -396,3 +403,5 @@ void __NSInitializeProcess(int argc,const char *argv[]) {
+     }
+ }
+ #endif
++
++NSString *const NSProcessInfoThermalStateDidChangeNotification = @"NSProcessInfoThermalStateDidChangeNotification";
+diff --git a/src/NSUserActivity.m b/src/NSUserActivity.m
+index 09c0a732b..53649d20b 100644
+--- a/src/NSUserActivity.m
++++ b/src/NSUserActivity.m
+@@ -34,3 +34,5 @@
+ }
+ 
+ @end
++
++NSString *const NSUserActivityTypeBrowsingWeb = @"com.apple.coreservices.useractivity.browser";

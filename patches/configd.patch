@@ -1,0 +1,744 @@
+diff --git a/darling/src/SystemConfiguration.fproj/stubs.c b/darling/src/SystemConfiguration.fproj/stubs.c
+index 1f31c08..3299e6a 100644
+--- a/darling/src/SystemConfiguration.fproj/stubs.c
++++ b/darling/src/SystemConfiguration.fproj/stubs.c
+@@ -1,4 +1,13 @@
+ #include <SystemConfiguration/SystemConfiguration.h>
++#include <CoreFoundation/CoreFoundation.h>
++#include <CoreFoundation/CFRuntime.h>
++#include <sys/socket.h>
++#include <netinet/in.h>
++#include <string.h>
++#include <ifaddrs.h>
++#include <net/if.h>
++#include <arpa/inet.h>
++#include <unistd.h>
+ 
+ #define STUB() printf("STUB %s\n", __func__)
+ 
+@@ -50,95 +59,348 @@ SCNetworkConnectionRef SCNetworkConnectionCreateWithServiceID(CFAllocatorRef all
+ 	return NULL;
+ }
+ 
++/*
++ * darling-lol: minimal but FUNCTIONAL network reachability.
++ *
++ * Previously every SCNetworkReachability* entry point was a stub:
++ * CreateWithAddress/Name returned NULL and GetFlags returned garbage.
++ * Chromium's network_change_notifier_mac / dns_config_service start by
++ * creating a reachability object and calling GetFlags; with NULL/garbage
++ * it took a failing path (and `dns_config_service_posix ... watch failed
++ * to start` / `Could not get initial network connection type` follow).
++ *
++ * Darling has no reachability subsystem, but the honest answer for a host
++ * that has a working network stack is "reachable, direct". We return a
++ * real heap object so callers can schedule it, and GetFlags reports
++ * kSCNetworkReachabilityFlagsReachable. If the host is genuinely offline
++ * the caller finds out when its connect() fails; this only removes the
++ * false negative at startup.
++ */
++struct __SCNetworkReachability {
++	CFRuntimeBase _base;
++	CFStringRef name;
++	struct sockaddr_storage addr;
++	Boolean hasAddr;
++};
++
++static void _reachabilityRelease(CFTypeRef cf)
++{
++	struct __SCNetworkReachability* ref = (struct __SCNetworkReachability*) cf;
++	if (ref->name != NULL)
++		CFRelease(ref->name);
++}
++
++static CFStringRef _reachabilityCopyDescription(CFTypeRef cf)
++{
++	return CFSTR("SCNetworkReachability");
++}
++
++static const CFRuntimeClass _reachabilityClass = {
++	0,
++	"SCNetworkReachability",
++	NULL, /* init */
++	NULL, /* copy */
++	_reachabilityRelease,
++	NULL, /* equal */
++	NULL, /* hash */
++	NULL, /* copyFormattingDesc */
++	_reachabilityCopyDescription
++};
++
++static SCNetworkReachabilityRef _reachabilityCreate(CFAllocatorRef allocator, const struct sockaddr* addr)
++{
++	static CFTypeID classID = _kCFRuntimeNotATypeID;
++	if (classID == _kCFRuntimeNotATypeID)
++		classID = _CFRuntimeRegisterClass(&_reachabilityClass);
++
++	struct __SCNetworkReachability* ref = (struct __SCNetworkReachability*)
++		_CFRuntimeCreateInstance(allocator, classID,
++			sizeof(struct __SCNetworkReachability) - sizeof(CFRuntimeBase), NULL);
++	if (ref == NULL)
++		return NULL;
++
++	if (addr != NULL) {
++		size_t len = sizeof(struct sockaddr_in);
++		if (addr->sa_family == AF_INET6)
++			len = sizeof(struct sockaddr_in6);
++		if (len > sizeof(ref->addr))
++			len = sizeof(ref->addr);
++		memcpy(&ref->addr, addr, len);
++		ref->hasAddr = true;
++	}
++	return (SCNetworkReachabilityRef) ref;
++}
++
+ CFTypeID SCNetworkReachabilityGetTypeID(void)
+ {
+-    STUB();
+-	return 0;
++	/* darling-lol: return the real registered class id (some clients
++	 * compare it and misbehave on 0). */
++	static CFTypeID classID = _kCFRuntimeNotATypeID;
++	if (classID == _kCFRuntimeNotATypeID)
++		classID = _CFRuntimeRegisterClass(&_reachabilityClass);
++	return classID;
+ }
+ 
+ Boolean SCNetworkReachabilityScheduleWithRunLoop(SCNetworkReachabilityRef ref, CFRunLoopRef rl, CFStringRef rlMode)
+ {
+-    STUB();
+-	return 0;
++	/* No dynamic reachability changes to report; accepting the schedule
++	 * (instead of failing) lets callers proceed to GetFlags. */
++	return (ref != NULL) ? true : false;
+ }
+ 
+ Boolean SCNetworkReachabilityUnscheduleFromRunLoop(SCNetworkReachabilityRef ref, CFRunLoopRef rl, CFStringRef rlMode)
+ {
+-    STUB();
+-	return 0;
++	return (ref != NULL) ? true : false;
+ }
+ 
+ Boolean SCNetworkReachabilitySetCallback(SCNetworkReachabilityRef target, SCNetworkReachabilityCallBack cb, SCNetworkReachabilityContext* ctxt)
+ {
+-    STUB();
+-	return 0;
++	/* Accepted but never invoked (no change notifications implemented). */
++	return (target != NULL) ? true : false;
+ }
+ 
+ Boolean SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef target, SCNetworkReachabilityFlags* flags)
+ {
+-    STUB();
+-	return 0;
++	if (target == NULL || flags == NULL)
++		return false;
++	/* Host has a network stack: report reachable + direct, not required. */
++	*flags = kSCNetworkReachabilityFlagsReachable
++		| kSCNetworkReachabilityFlagsTransientConnection
++		| kSCNetworkReachabilityFlagsConnectionAutomatic;
++	return true;
+ }
+ 
+ SCNetworkReachabilityRef SCNetworkReachabilityCreateWithName(CFAllocatorRef allocator, const char* nodeName)
+ {
+-    STUB();
+-	return NULL;
++	struct __SCNetworkReachability* ref = (struct __SCNetworkReachability*)
++		_reachabilityCreate(allocator, NULL);
++	if (ref != NULL && nodeName != NULL)
++		ref->name = CFStringCreateWithCString(allocator, nodeName, kCFStringEncodingUTF8);
++	return (SCNetworkReachabilityRef) ref;
+ }
+ 
+ SCNetworkReachabilityRef SCNetworkReachabilityCreateWithAddressPair(CFAllocatorRef allocator, const struct sockaddr* localAddress, const struct sockaddr* remoteAddress)
+ {
+-    STUB();
+-	return NULL;
++	/* Local address is irrelevant to our answer; key off the remote. */
++	return _reachabilityCreate(allocator, remoteAddress);
+ }
+ 
+ SCNetworkReachabilityRef SCNetworkReachabilityCreateWithAddress(CFAllocatorRef allocator, const struct sockaddr* remoteAddress)
+ {
+-    STUB();
+-	return NULL;
++	return _reachabilityCreate(allocator, remoteAddress);
++}
++
++/*
++ * darling-lol: minimal but FUNCTIONAL SCDynamicStore.
++ *
++ * Chromium's dns_config_service_posix (macOS) creates an SCDynamicStore,
++ * calls SCDynamicStoreSetNotificationKeys with the DNS/State keys, and
++ * schedules it -- that is how it "starts" its config watcher. All of
++ * these used to be STUBs returning NULL/FALSE, so the watcher could never
++ * start (`dns_config_service_posix.cc(137/147) ... watch failed to
++ * start`). We provide a real object and accept the notification setup;
++ * `CopyValue` reports "key absent" (NULL, never bogus) and the runloop
++ * source is a real never-firing source. No change callbacks are delivered
++ * (Darling has no configd store to watch), which is sufficient for startup.
++ * (Proxy values are served by the pre-existing SCDynamicStoreCopyProxies
++ * in stubs.cpp, untouched.)
++ */
++struct __SCDynamicStore {
++	CFRuntimeBase _base;
++	CFStringRef name;
++	CFArrayRef notificationKeys;
++	CFArrayRef notificationPatterns;
++	dispatch_queue_t queue;
++	SCDynamicStoreCallBack callout;
++	SCDynamicStoreContext context;
++};
++
++static void _storeRelease(CFTypeRef cf)
++{
++	struct __SCDynamicStore* store = (struct __SCDynamicStore*) cf;
++	if (store->name) CFRelease(store->name);
++	if (store->notificationKeys) CFRelease(store->notificationKeys);
++	if (store->notificationPatterns) CFRelease(store->notificationPatterns);
++	if (store->context.release && store->context.info)
++		store->context.release(store->context.info);
++}
++
++static CFStringRef _storeCopyDescription(CFTypeRef cf)
++{
++	return CFSTR("SCDynamicStore");
++}
++
++static const CFRuntimeClass _storeClass = {
++	0,
++	"SCDynamicStore",
++	NULL, NULL,
++	_storeRelease,
++	NULL, NULL, NULL,
++	_storeCopyDescription
++};
++
++static CFTypeID _storeGetClassID(void)
++{
++	static CFTypeID id = _kCFRuntimeNotATypeID;
++	if (id == _kCFRuntimeNotATypeID)
++		id = _CFRuntimeRegisterClass(&_storeClass);
++	return id;
++}
++
++CFTypeID SCDynamicStoreGetTypeID(void)
++{
++	return _storeGetClassID();
+ }
+ 
+ CFStringRef SCDynamicStoreKeyCreateNetworkGlobalEntity(CFAllocatorRef allocator, CFStringRef domain, CFStringRef entity)
+ {
+-	STUB();
+-	return NULL;
++	if (domain == NULL || entity == NULL)
++		return NULL;
++	return CFStringCreateWithFormat(allocator, NULL, CFSTR("%@/Network/Global/%@"),
++		domain, entity);
++}
++
++CFStringRef SCDynamicStoreKeyCreateProxies(CFAllocatorRef allocator)
++{
++	/* darling-lol: Electron (Chromium network stack) lazy-binds this at
++	 * login-network time; a missing export aborts the process in dyld
++	 * ("Symbol not found"). Built on the same constructor as Apple's. */
++	return SCDynamicStoreKeyCreateNetworkGlobalEntity(allocator,
++		kSCDynamicStoreDomainState, kSCEntNetProxies);
++}
++
++/* Query the kernel's route selection without sending a packet. Match its
++ * local address against getifaddrs, rather than inventing a primary adapter. */
++static CFStringRef _primaryInterface(int family)
++{
++    struct sockaddr_storage remote = {0}, local = {0};
++    socklen_t size;
++    if (family == AF_INET) {
++        struct sockaddr_in *p = (struct sockaddr_in *)&remote;
++        p->sin_len = sizeof(*p); p->sin_family = family; p->sin_port = htons(53);
++        inet_pton(family, "8.8.8.8", &p->sin_addr); size = sizeof(*p);
++    } else {
++        struct sockaddr_in6 *p = (struct sockaddr_in6 *)&remote;
++        p->sin6_len = sizeof(*p); p->sin6_family = family; p->sin6_port = htons(53);
++        inet_pton(family, "2001:4860:4860::8888", &p->sin6_addr); size = sizeof(*p);
++    }
++    int fd = socket(family, SOCK_DGRAM, 0);
++    if (fd < 0) return NULL;
++    socklen_t localSize = sizeof(local);
++    int result = connect(fd, (struct sockaddr *)&remote, size);
++    if (!result) result = getsockname(fd, (struct sockaddr *)&local, &localSize);
++    close(fd);
++    if (result) return NULL;
++    struct ifaddrs *interfaces = NULL;
++    if (getifaddrs(&interfaces)) return NULL;
++    CFStringRef name = NULL;
++    for (struct ifaddrs *p = interfaces; p; p = p->ifa_next) {
++        if (!p->ifa_addr || p->ifa_addr->sa_family != family ||
++            !(p->ifa_flags & IFF_UP) || (p->ifa_flags & IFF_LOOPBACK)) continue;
++        const void *a, *b;
++        size_t bytes;
++        if (family == AF_INET) {
++            a = &((struct sockaddr_in *)p->ifa_addr)->sin_addr;
++            b = &((struct sockaddr_in *)&local)->sin_addr; bytes = sizeof(struct in_addr);
++        } else {
++            a = &((struct sockaddr_in6 *)p->ifa_addr)->sin6_addr;
++            b = &((struct sockaddr_in6 *)&local)->sin6_addr; bytes = sizeof(struct in6_addr);
++        }
++        if (!memcmp(a, b, bytes)) {
++            name = CFStringCreateWithCString(NULL, p->ifa_name, kCFStringEncodingUTF8);
++            break;
++        }
++    }
++    freeifaddrs(interfaces);
++    return name;
+ }
+ 
+ CFPropertyListRef SCDynamicStoreCopyValue(SCDynamicStoreRef store, CFStringRef key)
+ {
+-	STUB();
+-	return NULL;
++    if (!key) return NULL;
++    int family;
++    if (CFEqual(key, CFSTR("State:/Network/Global/IPv4"))) family = AF_INET;
++    else if (CFEqual(key, CFSTR("State:/Network/Global/IPv6"))) family = AF_INET6;
++    else return NULL;
++    CFStringRef primary = _primaryInterface(family);
++    if (!primary) return NULL;
++    const void *keys[] = { kSCDynamicStorePropNetPrimaryInterface };
++    const void *values[] = { primary };
++    CFDictionaryRef result = CFDictionaryCreate(NULL, keys, values, 1,
++        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
++    CFRelease(primary);
++    return result;
+ }
+ 
+ SCDynamicStoreRef SCDynamicStoreCreate(CFAllocatorRef allocator, CFStringRef name, SCDynamicStoreCallBack callout, SCDynamicStoreContext *context)
+ {
+-	STUB();
+-	return NULL;
++	struct __SCDynamicStore* store = (struct __SCDynamicStore*)
++		_CFRuntimeCreateInstance(allocator, _storeGetClassID(),
++			sizeof(struct __SCDynamicStore) - sizeof(CFRuntimeBase), NULL);
++	if (store == NULL)
++		return NULL;
++	store->name = (name != NULL) ? CFStringCreateCopy(allocator, name) : NULL;
++	store->callout = callout;
++	if (context != NULL) {
++		store->context = *context;
++		if (store->context.retain && store->context.info)
++			store->context.info = (void*) store->context.retain(store->context.info);
++	}
++	return (SCDynamicStoreRef) store;
+ }
+ 
+ SCDynamicStoreRef __nullable SCDynamicStoreCreateWithOptions(CFAllocatorRef __nullable allocator, CFStringRef name, CFDictionaryRef __nullable storeOptions, SCDynamicStoreCallBack __nullable callout, SCDynamicStoreContext* __nullable context)
+ {
+-    STUB();
+-	return NULL;
++	return SCDynamicStoreCreate(allocator, name, callout, context);
+ };
+ 
+ CFStringRef SCDynamicStoreKeyCreate(CFAllocatorRef allocator, CFStringRef fmt, ...)
+ {
+-	STUB();
+-	return NULL;
++	if (fmt == NULL)
++		return NULL;
++	/* Best effort: return the format string itself when no args are
++	 * readily available; callers only use these as dictionary keys. */
++	return CFStringCreateCopy(allocator, fmt);
+ }
+ 
+ Boolean SCDynamicStoreSetDispatchQueue(SCDynamicStoreRef store, dispatch_queue_t queue)
+ {
+-	STUB();
+-	return FALSE;
++	if (store == NULL)
++		return FALSE;
++	((struct __SCDynamicStore*) store)->queue = queue;
++	return TRUE;
+ }
+ 
+ Boolean SCDynamicStoreSetNotificationKeys(SCDynamicStoreRef store, CFArrayRef __nullable keys, CFArrayRef __nullable patterns) {
+-	STUB();
+-	return FALSE;
++	if (store == NULL)
++		return FALSE;
++	struct __SCDynamicStore* s = (struct __SCDynamicStore*) store;
++	if (s->notificationKeys) CFRelease(s->notificationKeys);
++	if (s->notificationPatterns) CFRelease(s->notificationPatterns);
++	s->notificationKeys = keys ? (CFArrayRef) CFRetain(keys) : NULL;
++	s->notificationPatterns = patterns ? (CFArrayRef) CFRetain(patterns) : NULL;
++	/* Accepted: we simply never fire callbacks (no configd to watch). */
++	return TRUE;
+ }
+ 
++CFRunLoopSourceRef SCDynamicStoreCreateRunLoopSource(CFAllocatorRef allocator, SCDynamicStoreRef store, CFIndex order) {
++	if (store == NULL)
++		return NULL;
++	/*
++	 * darling-lol: return a real (never-firing) runloop source. Chromium's
++	 * dns watcher does SCDynamicStoreCreateRunLoopSource + CFRunLoopAddSource;
++	 * a NULL source left it with nothing to schedule ("watch failed to
++	 * start") and risked a NULL deref/abort downstream. This dummy source
++	 * satisfies scheduling; it never signals because Darling has no configd
++	 * to deliver changes from.
++	 */
++	CFRunLoopSourceContext ctx;
++	memset(&ctx, 0, sizeof(ctx));
++	ctx.info = (void*) store;
++	return CFRunLoopSourceCreate(allocator, order, &ctx);
++}
++
++
+ CFStringRef SCDynamicStoreKeyCreateComputerName(CFAllocatorRef allocator) {
+ 	STUB();
+ 	return NULL;
+@@ -163,3 +425,36 @@ CFStringRef SCDynamicStoreKeyCreateNetworkInterfaceEntity(CFAllocatorRef allocat
+ 	STUB();
+ 	return NULL;
+ };
++
++const char* SCErrorString(int status) {
++	/* Minimal Apple-compatible mapping (full table lives in SCD.c,
++	 * which is not compiled into Darling's stub framework). Callers
++	 * such as Chromium's network-change notifier only log the result,
++	 * so a generic fallback is acceptable for unknown codes. */
++	static const struct { int status; const char *message; } msgs[] = {
++		{ kSCStatusOK,			"Success!" },
++		{ kSCStatusFailed,		"Failed!" },
++		{ kSCStatusInvalidArgument,	"Invalid argument" },
++		{ kSCStatusAccessError,		"Permission denied" },
++		{ kSCStatusNoKey,		"No such key" },
++		{ kSCStatusKeyExists,		"Key already defined" },
++		{ kSCStatusLocked,		"Lock already held" },
++		{ kSCStatusNeedLock,		"Lock required for this operation" },
++		{ kSCStatusNoStoreSession,	"Configuration daemon session not active" },
++		{ kSCStatusNoStoreServer,	"Configuration daemon not (no longer) available" },
++		{ kSCStatusNotifierActive,	"Notifier is currently active" },
++		{ kSCStatusNoPrefsSession,	"Preference session not active" },
++		{ kSCStatusPrefsBusy,		"Preferences update currently in progress" },
++		{ kSCStatusNoConfigFile,	"Configuration file not found" },
++		{ kSCStatusNoLink,		"No such link" },
++		{ kSCStatusStale,		"Write attempted on stale version of object" },
++	};
++	unsigned i;
++	for (i = 0; i < sizeof(msgs)/sizeof(msgs[0]); i++) {
++		if (msgs[i].status == status)
++			return msgs[i].message;
++	}
++	if (status > 0)
++		return strerror(status);
++	return "Unknown error";
++};
+diff --git a/darling/src/dnsinfo/dnsinfo.c b/darling/src/dnsinfo/dnsinfo.c
+index 40f8673..d6b4a1a 100644
+--- a/darling/src/dnsinfo/dnsinfo.c
++++ b/darling/src/dnsinfo/dnsinfo.c
+@@ -7,8 +7,6 @@
+ #include <arpa/inet.h>
+ #include <netinet/in.h>
+ 
+-static char* remove_comment(char* line);
+-static char* remove_whitespace(char* line);
+ 
+ /**
+  * This is a very simple parser of /etc/resolv.conf.
+@@ -19,160 +17,113 @@ static char* remove_whitespace(char* line);
+ const char *
+ dns_configuration_notify_key    ()
+ {
+-	return NULL;
++	/*
++	 * darling-lol: must be non-NULL. Chromium's mac DNS watcher
++	 * (dns_config_watcher_mac.cc) dlopens libSystem, dlsyms this function,
++	 * and refuses to start its config watch ("DNS config watch failed to
++	 * start", dns_config_service_posix.cc:137) when the returned key is
++	 * NULL. The key names a notify(3) registration delivered via notifyd
++	 * (now functional); no configd exists to post changes, so the watch
++	 * simply never fires -- which is the correct fail-soft. This is Apple's
++	 * key string for DNS configuration changes.
++	 */
++	return "com.apple.system.dns.configuration";
+ }
+ 
+ dns_config_t *
+-dns_configuration_copy		()
++dns_configuration_copy()
+ {
+-#if 0
+-	dns_config_t* config;
+-	dns_resolver_t* resolver;
+-	FILE* file;
+-	char buf[256];
+-	
+-	config = (dns_config_t*) malloc(sizeof(dns_config_t));
+-	memset(config, 0, sizeof(*config));
+-
+-	file = fopen("/etc/resolv.conf", "r");
+-	if (file == NULL)
+-		return config;
+-
+-	resolver = (dns_resolver_t*) malloc(sizeof(dns_resolver_t));
+-	memset(resolver, 0, sizeof(*resolver));
+-
+-	config->n_resolver = 1;
+-	config->resolver = (dns_resolver_t**) malloc(sizeof(void*));
+-	config->resolver[0] = resolver;
+-
+-	while (fgets(buf, sizeof(buf), file) != NULL)
+-	{
+-		char* line;
+-
+-		line = remove_comment(buf);
+-		if (line == NULL)
+-			continue;
+-
+-		line = remove_whitespace(line);
+-		if (line == NULL || line[0] == 0)
+-			continue;
+-
+-		if (strncmp(line, "nameserver", 10) == 0)
+-		{
+-			char* srv;
+-			int is_ipv6;
+-			struct sockaddr* addr;
+-			int res;
+-
+-			srv = line + 11;
+-			while (isspace(*srv))
+-				srv++;
+-
+-			is_ipv6 = strchr(srv, ':') != NULL;
+-
+-			if (is_ipv6)
+-			{
+-				struct sockaddr_in6* a6;
+-
+-				a6 = (struct sockaddr_in6*) malloc(sizeof(struct sockaddr_in6));
+-				addr = (struct sockaddr*) a6;
+-
+-				a6->sin6_family = AF_INET6;
+-				a6->sin6_port = htons(53);
+-
+-				res = inet_pton(AF_INET6, srv, &a6->sin6_addr);
+-			}
+-			else
+-			{
+-				struct sockaddr_in* a4;
+-
+-				a4 = (struct sockaddr_in*) malloc(sizeof(struct sockaddr_in));
+-				addr = (struct sockaddr*) a4;
+-
+-				a4->sin_family = AF_INET;
+-				a4->sin_port = htons(53);
+-
+-				res = inet_pton(AF_INET, srv, &a4->sin_addr);
+-			}
+-
+-			if (res == 1)
+-			{
+-				resolver->n_nameserver++;
+-
+-				resolver->nameserver = (struct sockaddr**) realloc(resolver->nameserver,
+-						sizeof(void*) * resolver->n_nameserver);
+-
+-				resolver->nameserver[resolver->n_nameserver-1] = addr;
+-			}
+-			else
+-			{
+-				free(addr);
+-			}
+-		}
+-		else if (strncmp(line, "search", 6) == 0)
+-		{
+-			char* dom;
+-
+-			dom = line + 7;
+-			while (isspace(*dom))
+-				dom++;
+-
+-			resolver->n_search++;
+-			resolver->search = (char**) realloc(resolver->search,
+-					sizeof(char*) * resolver->n_search);
+-
+-			resolver->search[resolver->n_search-1] = strdup(dom);
+-		}
+-		else if (strncmp(line, "domain", 6) == 0)
+-		{
+-			char* dom;
+-
+-			dom = line + 7;
+-			while (isspace(*dom))
+-				dom++;
+-
+-			resolver->domain = strdup(dom);
+-		}
+-	}
+-
+-	fclose(file);
+-
+-	return config;
+-#else
+-	return NULL;
+-#endif
++    FILE *file = fopen("/etc/resolv.conf", "r");
++    if (!file) return NULL;
++    dns_config_t *config = calloc(1, sizeof(*config));
++    dns_resolver_t *resolver = calloc(1, sizeof(*resolver));
++    if (!config || !resolver) {
++        free(config); free(resolver); fclose(file); return NULL;
++    }
++    config->resolver = calloc(1, sizeof(*config->resolver));
++    if (!config->resolver) {
++        free(config); free(resolver); fclose(file); return NULL;
++    }
++    config->resolver[0] = resolver;
++    config->n_resolver = 1;
++    resolver->flags = DNS_RESOLVER_FLAGS_REQUEST_ALL_RECORDS;
++    resolver->search_order = DEFAULT_SEARCH_ORDER;
++    char buf[4096];
++    int failed = 0;
++    while (!failed && fgets(buf, sizeof(buf), file)) {
++        char *comment = strpbrk(buf, "#;");
++        if (comment) *comment = 0;
++        char *save = NULL;
++        char *key = strtok_r(buf, " \t\r\n", &save);
++        char *value = strtok_r(NULL, " \t\r\n", &save);
++        if (!key || !value) continue;
++        if (!strcmp(key, "nameserver")) {
++            struct sockaddr_storage address = {0};
++            size_t length;
++            if (strchr(value, ':')) {
++                struct sockaddr_in6 *a = (void *)&address;
++                length = sizeof(*a); a->sin6_len = length;
++                a->sin6_family = AF_INET6; a->sin6_port = htons(53);
++                if (inet_pton(AF_INET6, value, &a->sin6_addr) != 1) continue;
++            } else {
++                struct sockaddr_in *a = (void *)&address;
++                length = sizeof(*a); a->sin_len = length;
++                a->sin_family = AF_INET; a->sin_port = htons(53);
++                if (inet_pton(AF_INET, value, &a->sin_addr) != 1) continue;
++            }
++            struct sockaddr *copy = malloc(length);
++            struct sockaddr **list = realloc(resolver->nameserver,
++                (resolver->n_nameserver + 1) * sizeof(*list));
++            if (list) resolver->nameserver = list;
++            if (!copy || !list) { free(copy); failed = 1; break; }
++            memcpy(copy, &address, length);
++            list[resolver->n_nameserver++] = copy;
++        } else if (!strcmp(key, "search")) {
++            do {
++                char *copy = strdup(value);
++                char **list = realloc(resolver->search,
++                    (resolver->n_search + 1) * sizeof(*list));
++                if (list) resolver->search = list;
++                if (!copy || !list) { free(copy); failed = 1; break; }
++                list[resolver->n_search++] = copy;
++            } while ((value = strtok_r(NULL, " \t\r\n", &save)));
++        } else if (!strcmp(key, "domain")) {
++            char *copy = strdup(value);
++            if (!copy) { failed = 1; break; }
++            free(resolver->domain); resolver->domain = copy;
++        } else if (!strcmp(key, "options")) {
++            /* Preserve resolver options for libresolv's config reader. */
++            size_t length = strlen(value);
++            if (save && *save) { value[length] = ' '; length += 1 + strlen(save); }
++            while (length && isspace((unsigned char)value[length - 1])) --length;
++            char *copy = strndup(value, length);
++            if (!copy) { failed = 1; break; }
++            free(resolver->options); resolver->options = copy;
++        }
++    }
++    if (ferror(file)) failed = 1;
++    fclose(file);
++    if (failed || !resolver->n_nameserver) {
++        dns_configuration_free(config);
++        return NULL;
++    }
++    return config;
+ }
+ 
+ void
+-dns_configuration_free		(dns_config_t	*config)
++dns_configuration_free(dns_config_t *config)
+ {
+-#if 0
+-	if (config->n_resolver > 0)
+-	{
+-		dns_resolver_t* resolver;
+-
+-		resolver = config->resolver[0];
+-
+-		free(resolver->domain);
+-
+-		while (resolver->n_search > 0)
+-		{
+-			free(resolver->search[resolver->n_search-1]);
+-			resolver->n_search--;
+-		}
+-		free(resolver->search);
+-
+-		while (resolver->n_nameserver > 0)
+-		{
+-			free(resolver->nameserver[resolver->n_nameserver-1]);
+-			resolver->n_nameserver--;
+-		}
+-		free(resolver->nameserver);
+-	}
+-
+-	free(config->resolver);
+-	free(config);
+-#endif
++    if (!config) return;
++    for (int i = 0; i < config->n_resolver; ++i) {
++        dns_resolver_t *resolver = config->resolver[i];
++        if (!resolver) continue;
++        free(resolver->domain); free(resolver->options);
++        for (int j = 0; j < resolver->n_search; ++j) free(resolver->search[j]);
++        free(resolver->search);
++        for (int j = 0; j < resolver->n_nameserver; ++j) free(resolver->nameserver[j]);
++        free(resolver->nameserver); free(resolver);
++    }
++    free(config->resolver); free(config);
+ }
+ 
+ void
+@@ -180,36 +131,3 @@ _dns_configuration_ack		(dns_config_t	*config,
+ 				 const char	*bundle_id)
+ {
+ }
+-
+-static char* remove_comment(char* line)
+-{
+-	char* p;
+-
+-	if (line[0] == '#')
+-		return NULL;
+-
+-	p = strchr(line, '#');
+-	if (p != NULL)
+-		*p = 0;
+-
+-	return line;
+-}
+-
+-static char* remove_whitespace(char* line)
+-{
+-	char* end;
+-
+-	while (*line && isspace(*line))
+-		line++;
+-
+-	end = line + strlen(line) - 1;
+-
+-	while (end > line && isspace(*end))
+-	{
+-		*end = 0;
+-		end--;
+-	}
+-
+-	return line;
+-}
+-

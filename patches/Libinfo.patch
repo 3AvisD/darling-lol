@@ -1,0 +1,67 @@
+diff --git a/darling-resolver/resolver.c b/darling-resolver/resolver.c
+index f3ae33d..75944eb 100644
+--- a/darling-resolver/resolver.c
++++ b/darling-resolver/resolver.c
+@@ -23,6 +23,21 @@
+ #include <stdbool.h>
+ #include <time.h>
+ 
++/* res_query shares the global resolver's sockets. Concurrent lookups must
++ * own their resolver state so they cannot consume each other's replies. */
++static int
++dr_query(const char *name, int dns_class, int type, unsigned char *answer, int length)
++{
++	struct __res_state state = {0};
++	int result;
++
++	if (res_ninit(&state) < 0)
++		return -1;
++	result = res_nquery(&state, name, dns_class, type, answer, length);
++	res_ndestroy(&state);
++	return result;
++}
++
+ static int
+ dr_is_valid(si_mod_t *si, si_item_t *item)
+ {
+@@ -58,7 +73,7 @@ dr_hostbyname(si_mod_t *si, const char *name, int af, const char *interface, uin
+ 	else
+ 		return NULL;
+ 
+-	l = res_query(name, ns_c_in, type, buf, sizeof(buf));
++	l = dr_query(name, ns_c_in, type, buf, sizeof(buf));
+ 	if (l < 0)
+ 		return NULL;
+ 
+@@ -144,7 +159,7 @@ dr_hostbyaddr(si_mod_t *si, const void *addr, int af, const char *interface, uin
+ 	else
+ 		return NULL;
+ 
+-	l = res_query(ptr, ns_c_in, ns_t_ptr, buf, sizeof(buf));
++	l = dr_query(ptr, ns_c_in, ns_t_ptr, buf, sizeof(buf));
+ 	if (l < 0)
+ 		return NULL;
+ 
+@@ -240,7 +255,7 @@ dr_addrinfo(si_mod_t *si, const void *node, const void *serv, uint32_t family, u
+ 		
+ 		if (resolveV6)
+ 		{
+-			l = res_query((const char*) node, ns_c_in, ns_t_aaaa, buf, sizeof(buf));
++			l = dr_query((const char*) node, ns_c_in, ns_t_aaaa, buf, sizeof(buf));
+ 			if (l < 0)
+ 				goto after_v6;
+ 
+@@ -279,7 +294,7 @@ dr_addrinfo(si_mod_t *si, const void *node, const void *serv, uint32_t family, u
+ after_v6:
+ 		if (resolveV4)
+ 		{
+-			l = res_query((const char*) node, ns_c_in, ns_t_a, buf, sizeof(buf));
++			l = dr_query((const char*) node, ns_c_in, ns_t_a, buf, sizeof(buf));
+ 			if (l < 0)
+ 				goto after_v4;
+ 
+@@ -375,4 +390,3 @@ si_mod_t *si_module_static_darling(void)
+ 	return (si_mod_t*)&si;
+ 
+ }
+-

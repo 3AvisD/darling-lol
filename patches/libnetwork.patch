@@ -1,0 +1,24 @@
+diff --git a/include/nw/path.h b/include/nw/path.h
+index 5ac8c9f..99d1489 100644
+--- a/include/nw/path.h
++++ b/include/nw/path.h
+@@ -183,6 +183,7 @@ void* nw_path_nexus_should_use_event_ring(void);
+ void* nw_path_monitor_cancel(void);
+ void* nw_path_monitor_create(void);
+ void* nw_path_monitor_create_with_type(void);
++void* nw_path_monitor_prohibit_interface_type(void);
+ void* nw_path_monitor_set_cancel_handler(void);
+ void* nw_path_monitor_set_queue(void);
+ void* nw_path_monitor_set_update_handler(void);
+diff --git a/src/nw/path.m b/src/nw/path.m
+index faf486a..0030e4d 100644
+--- a/src/nw/path.m
++++ b/src/nw/path.m
+@@ -141,6 +141,7 @@ DARLING_NW_STUB(nw_path_may_span_multiple_interfaces);
+ DARLING_NW_STUB(nw_path_monitor_cancel);
+ DARLING_NW_STUB(nw_path_monitor_create);
+ DARLING_NW_STUB(nw_path_monitor_create_with_type);
++DARLING_NW_STUB(nw_path_monitor_prohibit_interface_type);
+ DARLING_NW_STUB(nw_path_monitor_set_cancel_handler);
+ DARLING_NW_STUB(nw_path_monitor_set_queue);
+ DARLING_NW_STUB(nw_path_monitor_set_update_handler);

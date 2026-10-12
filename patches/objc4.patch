@@ -1,0 +1,25 @@
+diff --git a/runtime/objc-private.h b/runtime/objc-private.h
+index ff2d703..cd887c9 100644
+--- a/runtime/objc-private.h
++++ b/runtime/objc-private.h
+@@ -886,6 +886,9 @@ inline void* operator new(std::size_t size, const std::nothrow_t&) noexcept(true
+ inline void* operator new[](std::size_t size, const std::nothrow_t&) noexcept(true) { return malloc(size); }
+ inline void operator delete(void* p) noexcept(true) { free(p); }
+ inline void operator delete[](void* p) noexcept(true) { free(p); }
++// C++14 sized deallocation must use the same private allocator as new.
++inline void operator delete(void* p, std::size_t) noexcept(true) { free(p); }
++inline void operator delete[](void* p, std::size_t) noexcept(true) { free(p); }
+ inline void operator delete(void* p, const std::nothrow_t&) noexcept(true) { free(p); }
+ inline void operator delete[](void* p, const std::nothrow_t&) noexcept(true) { free(p); }
+ #pragma clang diagnostic pop
+diff --git a/unexported_symbols b/unexported_symbols
+index 73f77a8..a9c3905 100644
+--- a/unexported_symbols
++++ b/unexported_symbols
+@@ -15,3 +15,6 @@ __ZTSSt9bad_alloc
+ __ZTSSt9exception
+ __ZTSSt11logic_error
+ __ZTSSt12length_error
++
++__ZdlPvm
++__ZdaPvm

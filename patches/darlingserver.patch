@@ -1,0 +1,2442 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 4920879..012235e 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -133,6 +133,13 @@ target_compile_options(darlingserver PRIVATE
+ 	-pthread
+ 	-std=c++17
+ )
++# The parent project commonly leaves CMAKE_BUILD_TYPE empty. An unoptimized
++# RPC server spends its event-loop budget in C++ ownership/container helpers.
++# Preserve explicit debug and sanitizer builds; optimize the default runtime.
++if (NOT CMAKE_BUILD_TYPE AND NOT DSERVER_ASAN AND NOT DSERVER_UBSAN)
++    target_compile_options(darlingserver PRIVATE -O2)
++endif()
++
+ target_link_options(darlingserver PRIVATE
+ 	-pthread
+ 	-Wl,--gc-sections
+diff --git a/duct-tape/CMakeLists.txt b/duct-tape/CMakeLists.txt
+index 5950c7f..cf4f1ba 100644
+--- a/duct-tape/CMakeLists.txt
++++ b/duct-tape/CMakeLists.txt
+@@ -268,6 +268,7 @@ add_library(darlingserver_duct_tape STATIC
+ 	src/kqchan.c
+ 	src/semaphore.c
+ 	src/psynch.c
++	src/fileport.c
+ 	src/condvar.c
+ 	src/debug.c
+ 
+@@ -380,3 +381,9 @@ add_dependencies(darlingserver_duct_tape
+ target_link_libraries(darlingserver_duct_tape PUBLIC
+ 	libsimple_darlingserver
+ )
++
++# Match the host server's default optimization while retaining the kernel's
++# pointer-aliasing semantics and explicit debug/sanitizer build policies.
++if (NOT CMAKE_BUILD_TYPE AND NOT DSERVER_ASAN AND NOT DSERVER_UBSAN)
++    target_compile_options(darlingserver_duct_tape PRIVATE -O2 -fno-strict-aliasing)
++endif()
+diff --git a/duct-tape/include/darlingserver/duct-tape.h b/duct-tape/include/darlingserver/duct-tape.h
+index a5ddfc7..607cf17 100644
+--- a/duct-tape/include/darlingserver/duct-tape.h
++++ b/duct-tape/include/darlingserver/duct-tape.h
+@@ -56,6 +56,13 @@ dtape_thread_t* dtape_thread_create(dtape_task_t* task, uint64_t nsid, void* con
+ dtape_kqchan_mach_port_t* dtape_kqchan_mach_port_create(dtape_task_t* owning_task, uint32_t port, uint64_t receive_buffer, uint64_t receive_buffer_size, uint64_t saved_filter_flags, dtape_kqchan_mach_port_notification_callback_f notification_callback, void* context);
+ dtape_semaphore_t* dtape_semaphore_create(dtape_task_t* owning_task, int initial_value);
+ 
++/* darling-lol M54: fileports (Mojo FD-over-Mach transport). Names and
++ * kern_return_t cross as plain ints to keep this header light. */
++int dtape_fileport_makeport(dtape_task_t* task, int fd, uint32_t* name_out);
++int dtape_fileport_makefd(dtape_task_t* task, uint32_t name, int* fd_out);
++struct ipc_port;
++void dtape_fileport_destroy(struct ipc_port* port);
++
+ void dtape_kqchan_mach_port_destroy(dtape_kqchan_mach_port_t* kqchan);
+ void dtape_semaphore_destroy(dtape_semaphore_t* semaphore);
+ 
+diff --git a/duct-tape/include/darlingserver/duct-tape/hooks.h b/duct-tape/include/darlingserver/duct-tape/hooks.h
+index 1dde8b7..f319f1f 100644
+--- a/duct-tape/include/darlingserver/duct-tape/hooks.h
++++ b/duct-tape/include/darlingserver/duct-tape/hooks.h
+@@ -28,6 +28,8 @@ typedef dtape_thread_t* (*dtape_hook_current_thread_f)(void);
+ typedef void (*dtape_hook_timer_arm_f)(uint64_t absolute_ns, bool override);
+ 
+ typedef void (*dtape_hook_log_f)(dtape_log_level_t level, const char* message);
++/* darling-lol: lets dtape_log skip formatting (a 4 KiB vsnprintf per call) when the level would be dropped anyway */
++typedef int (*dtape_hook_log_enabled_f)(dtape_log_level_t level);
+ typedef void (*dtape_hook_get_load_info_f)(dtape_load_info_t* load_info);
+ 
+ typedef void (*dtape_hook_thread_suspend_f)(void* thread_context, dtape_thread_continuation_callback_f continuation_callback, void* continuation_contex, libsimple_lock_t* unlock_me);
+@@ -122,6 +124,8 @@ typedef struct dtape_hooks {
+ 	dtape_hook_task_remove_port_set_member_f task_remove_port_set_member;
+ 	dtape_hook_task_clear_port_set_f task_clear_port_set;
+ #endif
++
++	dtape_hook_log_enabled_f log_enabled;
+ } dtape_hooks_t;
+ 
+ #ifdef __cplusplus
+diff --git a/duct-tape/internal-include/darlingserver/duct-tape/stubs.h b/duct-tape/internal-include/darlingserver/duct-tape/stubs.h
+index 32ebd76..688015e 100644
+--- a/duct-tape/internal-include/darlingserver/duct-tape/stubs.h
++++ b/duct-tape/internal-include/darlingserver/duct-tape/stubs.h
+@@ -12,9 +12,13 @@ void dtape_stub_log(const char* function_name, int safety, const char* subsectio
+ #define dtape_stub_safe(...) (dtape_stub_log(__FUNCTION__, 1, "" __VA_ARGS__))
+ 
+ // for functions that have been confirmed to require an actual implementation (rather than a simple stub)
+-#define dtape_stub_unsafe(...) ({ \
+-		dtape_stub_log(__FUNCTION__, -1, "" __VA_ARGS__); \
+-		__builtin_unreachable(); \
+-	}) \
++//
++// darling-lol: this used to end in __builtin_unreachable(), which is only
++// valid when dtape_stub_log() is guaranteed to abort. With the optional
++// DTAPE_NONFATAL_UNSAFE escape hatch it may return, so we must not tell the
++// compiler the path is dead (that miscompiles the function's fall-through).
++// dtape_stub_log() raises SIGABRT itself in the default (fatal) case, so
++// omitting __builtin_unreachable() preserves the original behavior.
++#define dtape_stub_unsafe(...) (dtape_stub_log(__FUNCTION__, -1, "" __VA_ARGS__))
+ 
+ #endif // _DARLINGSERVER_DUCT_TAPE_STUBS_H_
+diff --git a/duct-tape/internal-include/darlingserver/duct-tape/thread.h b/duct-tape/internal-include/darlingserver/duct-tape/thread.h
+index 633d729..75a3965 100644
+--- a/duct-tape/internal-include/darlingserver/duct-tape/thread.h
++++ b/duct-tape/internal-include/darlingserver/duct-tape/thread.h
+@@ -38,6 +38,8 @@ struct dtape_thread {
+ 	bool processing_signal;
+ 
+ 	bool waiting_suspended;
++	/* Protect the wait check through publication of microthread suspension. */
++	libsimple_lock_t block_suspend_gate;
+ 	dtape_mutex_t suspension_mutex;
+ 	dtape_condvar_t suspension_condvar;
+ 
+diff --git a/duct-tape/pthread/kern_synch.c b/duct-tape/pthread/kern_synch.c
+index aa2b6d3..ab7cdb7 100644
+--- a/duct-tape/pthread/kern_synch.c
++++ b/duct-tape/pthread/kern_synch.c
+@@ -42,6 +42,7 @@
+ #include <sys/param.h>
+ #include <sys/queue.h>
+ #include <sys/resourcevar.h>
++#include <stdint.h> /* darling-lol M58f3: UINT64_MAX */
+ //#include <sys/proc_internal.h>
+ #include <sys/kauth.h>
+ #include <sys/systm.h>
+@@ -1236,8 +1237,22 @@ _psynch_cvwait(__unused proc_t p, user_addr_t cv, uint64_t cvlsgen,
+ 			struct timespec ts;
+ 			ts.tv_sec = (__darwin_time_t)sec;
+ 			ts.tv_nsec = (nsec & 0x3fffffff);
+-			nanoseconds_to_absolutetime(
+-					(uint64_t)ts.tv_sec * NSEC_PER_SEC + ts.tv_nsec, &abstime);
++			/* darling-lol M58f3: saturate the seconds->nanoseconds product.
++			 * Callers legitimately pass near-infinite deadlines (e.g.
++			 * Chromium's base::WaitableEvent uses TimeDelta::Max(), so
++			 * tv_sec can be ~9.2e12); the product overflows uint64 and
++			 * wraps to an arbitrary (sometimes past!) deadline, making
++			 * the wait return ETIMEDOUT instantly or hang indefinitely.
++			 * Clamp to a huge-but-safe interval (UINT64_MAX/2 ns ~ 292
++			 * years) which still cannot wrap after the deadline add. */
++			uint64_t nsecs;
++			uint64_t secs_u = (ts.tv_sec < 0) ? 0 : (uint64_t)ts.tv_sec;
++			if (secs_u > (UINT64_MAX / 2 - (uint64_t)ts.tv_nsec) / NSEC_PER_SEC) {
++				nsecs = UINT64_MAX / 2;
++			} else {
++				nsecs = secs_u * NSEC_PER_SEC + (uint64_t)ts.tv_nsec;
++			}
++			nanoseconds_to_absolutetime(nsecs, &abstime);
+ 			clock_absolutetime_interval_to_deadline(abstime, &abstime);
+ 		}
+ 
+diff --git a/duct-tape/src/fileport.c b/duct-tape/src/fileport.c
+new file mode 100644
+index 0000000..1741d59
+--- /dev/null
++++ b/duct-tape/src/fileport.c
+@@ -0,0 +1,154 @@
++/*
++ * darling-lol M54: fileport support (fileport_makeport/fileport_makefd).
++ *
++ * Chromium's Mojo-on-Mac transports Unix FDs over Mach messages by wrapping
++ * them in fileports (mojo/core/channel_mac.cc, mojo/core/ipcz_driver/
++ * wrapped_platform_handle.cc). Without this, every FD-carrying Mojo message
++ * (e.g. NetworkService startup) dies in the old-LKM-API UD2 trap.
++ *
++ * A fileport is a Mach port whose kobject holds a host FD owned by
++ * darlingserver. The kobject rides the port across IPC transfer
++ * automatically, and ipc_kobject_destroy closes the FD when the port dies,
++ * so no transfer hooks or task-death cleanup are needed. fileport_makefd
++ * dups the held FD back to the caller (independent lifecycle, like XNU).
++ */
++
++#include <darlingserver/duct-tape.h>
++
++#include <kern/debug.h>
++#include <stdlib.h>
++#include <ipc/ipc_object.h>
++#include <ipc/ipc_port.h>
++#include <ipc/ipc_space.h>
++#include <ipc/ipc_entry.h>
++#include <kern/ipc_kobject.h>
++#include <mach/mach_port.h>
++#include <mach/message.h>
++
++/* duct-tape convention (see memory.c): declare libc bits manually rather
++ * than including host <unistd.h>, whose types collide with XNU headers. */
++int close(int fd);
++int dup(int fd);
++
++#include <darlingserver/duct-tape/task.h>
++#include <darlingserver/duct-tape/log.h>
++
++struct dtape_fileport {
++	int fd;
++};
++
++int dtape_fileport_makeport(dtape_task_t* task, int fd, uint32_t* name_out)
++{
++	struct dtape_fileport* fp;
++	ipc_port_t port;
++	mach_port_name_t name;
++
++	if (task == NULL || fd < 0 || name_out == NULL) {
++		return KERN_INVALID_ARGUMENT;
++	}
++	if (task->xnu_task.itk_space == IS_NULL) {
++		return KERN_INVALID_TASK;
++	}
++
++	fp = malloc(sizeof(*fp));
++	if (fp == NULL) {
++		dtape_log_error("fileport_makeport: malloc failed");
++		return KERN_RESOURCE_SHORTAGE;
++	}
++	fp->fd = fd;
++
++	/* Allocate a kernel-owned port holding the fd. As in XNU's
++	 * fileport_alloc(), the port comes back with a send right. */
++	port = ipc_kobject_alloc_port((ipc_kobject_t)fp, IKOT_FILEPORT,
++	    IPC_KOBJECT_ALLOC_MAKE_SEND | IPC_KOBJECT_ALLOC_NSREQUEST);
++	if (!IP_VALID(port)) {
++		dtape_log_error("fileport_makeport: ipc_kobject_alloc_port failed fd=%d", fd);
++		free(fp);
++		return KERN_RESOURCE_SHORTAGE;
++	}
++
++	/* Install the send right into the task's space and get a name.
++	 * ipc_port_copyout_send() is the XNU entry point for exactly this
++	 * (see sys_fileport_makeport); it consumes the send right, so we
++	 * must not release it afterwards. Do NOT go through
++	 * mach_port_insert_right(): its MACH_MSG_TYPE_PORT_ANY_RIGHT() guard
++	 * rejects MACH_MSG_TYPE_MAKE_SEND, which made every fileport fail
++	 * with KERN_INVALID_VALUE and broke all FD-carrying Mojo messages. */
++	name = ipc_port_copyout_send(port, task->xnu_task.itk_space);
++	if (!MACH_PORT_VALID(name)) {
++		dtape_log_error("fileport_makeport: ipc_port_copyout_send failed fd=%d", fd);
++		/* port consumed by copyout; its kobject destroy closes fp->fd */
++		return KERN_RESOURCE_SHORTAGE;
++	}
++
++	*name_out = (uint32_t)name;
++	return KERN_SUCCESS;
++}
++
++int dtape_fileport_makefd(dtape_task_t* task, uint32_t uname, int* fd_out)
++{
++	ipc_object_t object = IO_NULL;
++	mach_msg_type_name_t dtype = 0;
++	mach_port_name_t name = (mach_port_name_t)uname;
++	ipc_port_t port;
++	struct dtape_fileport* fp;
++	int fd;
++
++	if (task == NULL || fd_out == NULL) {
++		return KERN_INVALID_ARGUMENT;
++	}
++	if (task->xnu_task.itk_space == IS_NULL) {
++		return KERN_INVALID_TASK;
++	}
++
++	/* Copyin a send right: validates the name, checks aliveness, and
++	 * enforces that the right is a send right (receive/dead names fail).
++	 * Does not consume the caller's right. */
++	if (ipc_object_copyin(task->xnu_task.itk_space, name,
++	    MACH_MSG_TYPE_COPY_SEND, &object, 0, NULL,
++	    IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_SEND) != KERN_SUCCESS) {
++		return KERN_INVALID_RIGHT;
++	}
++	dtype = ipc_object_copyin_type(MACH_MSG_TYPE_COPY_SEND);
++
++	port = ip_object_to_port(object);
++	if (!IP_VALID(port) || ip_kotype(port) != IKOT_FILEPORT) {
++		ipc_object_destroy(object, dtype);
++		return KERN_INVALID_RIGHT;
++	}
++	fp = (struct dtape_fileport*)ip_get_kobject(port);
++	if (fp == NULL || fp->fd < 0) {
++		ipc_object_destroy(object, dtype);
++		return KERN_INVALID_RIGHT;
++	}
++
++	/* Independent lifecycle: the receiver owns the dup, the kobject
++	 * keeps its own. */
++	fd = dup(fp->fd);
++	ipc_object_destroy(object, dtype);
++	if (fd < 0) {
++		return KERN_RESOURCE_SHORTAGE;
++	}
++
++	*fd_out = fd;
++	return KERN_SUCCESS;
++}
++
++void dtape_fileport_destroy(ipc_port_t port)
++{
++	struct dtape_fileport* fp;
++
++	if (!IP_VALID(port)) {
++		return;
++	}
++	fp = (struct dtape_fileport*)ip_get_kobject(port);
++	if (fp == NULL) {
++		return;
++	}
++	/* Port is dead; just release our resources like
++	 * mach_destroy_memory_entry does. */
++	if (fp->fd >= 0) {
++		close(fp->fd);
++	}
++	free(fp);
++}
+diff --git a/duct-tape/src/kqchan.c b/duct-tape/src/kqchan.c
+index 458e659..2e33f20 100644
+--- a/duct-tape/src/kqchan.c
++++ b/duct-tape/src/kqchan.c
+@@ -138,7 +138,16 @@ static void knote_post(struct knote* kn, long hint) {
+ 
+ 	dtape_log_debug("%s: kn=%p, kqchan=%p, kqchan->callback=%p", __FUNCTION__, kn, kqchan, kqchan->callback);
+ 
+-	if (!kqchan->callback) {
++	/* darling-lol: snapshot callback+context with a SINGLE load.
++	 * The check-then-call used to load kqchan->callback twice; with -O0
++	 * builds there is no CSE, so dtape_kqchan_mach_port_disable_notifications
++	 * (or destroy on another worker) could NULL it between the guard and
++	 * the call, producing call-0x0 -> SIGSEGV in darlingserver whenever a
++	 * port with knotes was torn down (e.g. GPU helpers exiting). A single
++	 * snapshot cannot call NULL. */
++	dtape_kqchan_mach_port_notification_callback_f cb = kqchan->callback;
++	void* ctx = kqchan->context;
++	if (!cb) {
+ 		return;
+ 	}
+ 
+@@ -150,7 +159,7 @@ static void knote_post(struct knote* kn, long hint) {
+ 
+ 	dtape_log_debug("%s: kn=%p, kqchan=%p; invoking callback...", __FUNCTION__, kn, kqchan);
+ 
+-	kqchan->callback(kqchan->context);
++	cb(ctx);
+ };
+ 
+ void knote(struct klist* list, long hint) {
+@@ -193,7 +202,12 @@ static void kqchan_waitq_waiter_entry(void* context, wait_result_t wait_result)
+ 			break;
+ 		} else {
+ 			if (filt_machportpeek(&kqchan->knote) & FILTER_ACTIVE) {
+-				kqchan->callback(kqchan->context);
++				/* darling-lol: single-load snapshot, see knote_post. */
++				dtape_kqchan_mach_port_notification_callback_f wcb = kqchan->callback;
++				void* wctx = kqchan->context;
++				if (wcb) {
++					wcb(wctx);
++				}
+ 			}
+ 			// wait until it's read
+ 			if (!dtape_semaphore_down_simple(kqchan->waiter_read_semaphore)) {
+diff --git a/duct-tape/src/memory.c b/duct-tape/src/memory.c
+index 3114947..fcff461 100644
+--- a/duct-tape/src/memory.c
++++ b/duct-tape/src/memory.c
+@@ -11,6 +11,7 @@
+ 
+ #include <stdlib.h>
+ 
++
+ #include <mach_debug/mach_debug.h>
+ 
+ struct zone {
+@@ -341,7 +342,14 @@ kern_return_t copyoutmap(vm_map_t map, void* fromdata, vm_map_address_t toaddr,
+ 		memmove((void*)toaddr, fromdata, length);
+ 		return KERN_SUCCESS;
+ 	} else {
+-		return dtape_hooks->task_write_memory(map->dtape_task->context, toaddr, fromdata, length) ? KERN_SUCCESS : KERN_FAILURE;
++		/* darling-lol M58dq: name the failing user-copy target behind the M58G
++		 * ipc_kmsg_put "copyout failed" drops. */
++		if (!dtape_hooks->task_write_memory(map->dtape_task->context, toaddr, fromdata, length)) {
++			dtape_log_error("M58DQ copyoutmap FAIL toaddr=0x%llx len=%lu map=%p task=%p",
++			    (unsigned long long) toaddr, (unsigned long) length, (void*) map, (void*) map->dtape_task);
++			return KERN_FAILURE;
++		}
++		return KERN_SUCCESS;
+ 	}
+ };
+ 
+@@ -526,20 +534,212 @@ kern_return_t mach_vm_allocate_kernel(vm_map_t map, mach_vm_offset_t* addr, mach
+ 	}
+ };
+ 
++/*
++ * darling-lol: functional `_mach_make_memory_entry`.
++ *
++ * This used to be `dtape_stub_unsafe()` (abort), so any guest call killed
++ * darlingserver outright. Entries are backed by a SHARED memfd held in a
++ * refcounted descriptor on the entry: every task mapping the entry observes
++ * the same pages (required e.g. for Chromium field-trial shared memory,
++ * where the browser writes after creating and helpers map later).
++ */
++kern_return_t mach_memory_entry_allocate(vm_named_entry_t* user_entry_p, ipc_port_t* user_handle_p) {
++	vm_named_entry_t user_entry;
++	ipc_port_t user_handle;
++
++	user_entry = (vm_named_entry_t) kalloc(sizeof(*user_entry));
++	if (user_entry == NULL) {
++		return KERN_FAILURE;
++	}
++	bzero(user_entry, sizeof(*user_entry));
++
++	named_entry_lock_init(user_entry);
++	user_entry->backing.copy = NULL;
++	user_entry->is_object = FALSE;
++	user_entry->is_sub_map = FALSE;
++	user_entry->is_copy = FALSE;
++	user_entry->internal = FALSE;
++	user_entry->size = 0;
++	user_entry->offset = 0;
++	user_entry->data_offset = 0;
++	user_entry->protection = VM_PROT_NONE;
++	user_entry->ref_count = 1;
++
++	user_handle = ipc_kobject_alloc_port((ipc_kobject_t)user_entry,
++	    IKOT_NAMED_ENTRY,
++	    IPC_KOBJECT_ALLOC_MAKE_SEND | IPC_KOBJECT_ALLOC_NSREQUEST);
++	if (user_handle == IP_NULL) {
++		kfree(user_entry, sizeof(*user_entry));
++		return KERN_FAILURE;
++	}
++
++	*user_entry_p = user_entry;
++	*user_handle_p = user_handle;
++	return KERN_SUCCESS;
++};
++
+ kern_return_t _mach_make_memory_entry(vm_map_t target_map, memory_object_size_t* size, memory_object_offset_t offset, vm_prot_t permission, ipc_port_t* object_handle, ipc_port_t parent_entry) {
+-	dtape_stub_unsafe();
++	vm_map_size_t map_size = (vm_map_size_t)*size;
++	vm_map_offset_t map_start, map_end;
++	vm_map_copy_t copy = NULL;
++	vm_named_entry_t user_entry = NULL;
++	ipc_port_t user_handle = IP_NULL;
++	kern_return_t kr;
++
++	if (object_handle == NULL) {
++		return KERN_INVALID_ARGUMENT;
++	}
++	*object_handle = IP_NULL;
++
++	if (target_map == VM_MAP_NULL) {
++		target_map = current_map();
++	}
++
++	/* round the request out to whole pages, like XNU does */
++	map_start = vm_map_trunc_page(offset, VM_MAP_PAGE_MASK(target_map));
++	map_end = vm_map_round_page(offset + map_size, VM_MAP_PAGE_MASK(target_map));
++	map_size = map_end - map_start;
++
++	if (map_size == 0) {
++		return KERN_INVALID_ARGUMENT;
++	}
++
++	/*
++	 * Backing strategy (darling-lol): a SHARED memfd, so every task that
++	 * maps the entry sees the same pages. The previous snapshot-copy
++	 * approach handed each mapper a private copy of the bytes as of
++	 * creation time; a producer (e.g. Chromium's browser writing field
++	 * trial state) then wrote into pages no consumer ever saw, and
++	 * consumers parsed stale zeros -> garbage strings -> crashes
++	 * (char_traits overlap assert) in every helper.
++	 *
++	 * Two cases, matching XNU:
++	 *
++	 *  - MAP_MEM_NAMED_CREATE: fresh anonymous entry of *size bytes (what
++	 *    Chromium's PlatformSharedMemoryRegion allocation path wants).
++	 *    memfds start zero-filled. A null parent alone does NOT imply this:
++	 *    ordinary extraction calls also pass a null parent.
++	 *
++	 *  - parent_entry != NULL: seed the memfd with a snapshot of the
++	 *    described region (copied once, at creation).
++	 */
++	int memfd = -1;
++	dtape_map_shared_descriptor_t* desc = NULL;
++	if (permission & MAP_MEM_NAMED_CREATE) {
++		memfd = memfd_create("darling-mementry", MFD_CLOEXEC);
++		if (memfd < 0 || ftruncate(memfd, map_size) < 0) {
++			if (memfd >= 0) close(memfd);
++			return KERN_RESOURCE_SHORTAGE;
++		}
++	} else {
++		void* staged = NULL;
++		int source_prot = PROT_READ | PROT_WRITE;
++		uintptr_t remapped;
++		/* snapshot the region, then publish it into the shared object */
++		kr = vm_map_copyin_common(target_map, map_start, map_size,
++		    FALSE /* src_destroy */, FALSE /* src_volatile */, &copy,
++		    FALSE /* use_maxprot */);
++		if (kr != KERN_SUCCESS) {
++			dtape_log_error("mach_make_memory_entry: copyin failed kr=%d map=%p start=%#llx size=%#llx perms=%#x",
++			    kr, (void*)target_map, (unsigned long long)map_start, (unsigned long long)map_size, permission);
++			return kr;
++		}
++		memfd = memfd_create("darling-mementry", MFD_CLOEXEC);
++		if (memfd < 0 || ftruncate(memfd, map_size) < 0) {
++			if (memfd >= 0) close(memfd);
++			vm_map_copy_discard(copy);
++			return KERN_RESOURCE_SHORTAGE;
++		}
++		staged = mmap(NULL, map_size, PROT_READ | PROT_WRITE, MAP_SHARED, memfd, 0);
++		if (staged == MAP_FAILED) {
++			close(memfd);
++			vm_map_copy_discard(copy);
++			return KERN_RESOURCE_SHORTAGE;
++		}
++		memcpy(staged, (char*)copy->cpy_kdata + copy->offset, map_size);
++		munmap(staged, map_size);
++		vm_map_copy_discard(copy);
++		copy = NULL;
++
++		/* Extraction must retain shared-object semantics, not snapshot
++		 * semantics. Replace the source task's pages with a MAP_SHARED view
++		 * of the populated memfd. Future writes by the creator are then
++		 * visible to every process that maps the named entry. */
++		/* The requested permission constrains mappings made from the named
++		 * entry; it does not downgrade the creator's existing mapping. The
++		 * common Chromium extraction path exports a read-only handle from a
++		 * writable region and continues writing through the original view. */
++		if (permission & VM_PROT_EXECUTE)
++			source_prot |= PROT_EXEC;
++		remapped = dtape_hooks->task_map_file(
++		    target_map->dtape_task->context, memfd,
++		    dtape_byte_count_to_page_count_round_up(map_size), source_prot,
++		    map_start, 0,
++		    dtape_memory_flag_fixed | dtape_memory_flag_overwrite);
++		if (remapped != map_start) {
++			close(memfd);
++			return KERN_FAILURE;
++		}
++	}
++
++	desc = dtape_map_shared_descriptor_create(memfd, map_size);
++	if (desc == NULL) {
++		close(memfd);
++		return KERN_RESOURCE_SHORTAGE;
++	}
++	memfd = -1; /* the descriptor now owns the memfd */
++
++	kr = mach_memory_entry_allocate(&user_entry, &user_handle);
++	if (kr != KERN_SUCCESS) {
++		dtape_map_shared_descriptor_release(desc);
++		dtape_log_error("mach_make_memory_entry: allocate failed kr=%d", kr);
++		return kr;
++	}
++
++	named_entry_lock(user_entry);
++	user_entry->backing.copy = NULL;
++	user_entry->is_copy = FALSE;
++	user_entry->dtape_descriptor = desc;
++	user_entry->size = map_size;
++	user_entry->offset = offset - map_start; /* logical offset, memfd base 0 */
++	user_entry->data_offset = 0;
++	user_entry->protection = permission;
++	named_entry_unlock(user_entry);
++
++	*size = (memory_object_size_t)map_size;
++	*object_handle = user_handle;
++	return KERN_SUCCESS;
++};
++
++kern_return_t mach_make_memory_entry_64(vm_map_t target_map, memory_object_size_t* size, memory_object_offset_t offset, vm_prot_t permission, ipc_port_t* object_handle, ipc_port_t parent_handle) {
++	return _mach_make_memory_entry(target_map, size, offset, permission, object_handle, parent_handle);
++};
++
++kern_return_t mach_make_memory_entry(vm_map_t target_map, vm_size_t* size, vm_offset_t offset, vm_prot_t permission, ipc_port_t* object_handle, ipc_port_t parent_entry) {
++	memory_object_size_t mo_size = (memory_object_size_t)*size;
++	kern_return_t kr = _mach_make_memory_entry(target_map, &mo_size, (memory_object_offset_t)offset, permission, object_handle, parent_entry);
++	*size = (vm_size_t)mo_size;
++	return kr;
+ };
+ 
+ kern_return_t mach_memory_entry_access_tracking(ipc_port_t entry_port, int* access_tracking, uint32_t* access_tracking_reads, uint32_t* access_tracking_writes) {
+-	dtape_stub_unsafe();
++	/* No access tracking in duct-tape; report "no tracking" rather than
++	 * aborting the server. */
++	if (access_tracking) *access_tracking = 0;
++	if (access_tracking_reads) *access_tracking_reads = 0;
++	if (access_tracking_writes) *access_tracking_writes = 0;
++	return KERN_SUCCESS;
+ };
+ 
+ kern_return_t mach_memory_entry_ownership(ipc_port_t entry_port, task_t owner, int ledger_tag, int ledger_flags) {
+-	dtape_stub_unsafe();
++	/* Ledger ownership is not modeled; accept and ignore. */
++	return KERN_SUCCESS;
+ };
+ 
+ kern_return_t mach_memory_entry_purgable_control(ipc_port_t entry_port, vm_purgable_t control, int* state) {
+-	dtape_stub_unsafe();
++	/* Not purgable here. */
++	if (state) *state = VM_PURGABLE_NONVOLATILE;
++	return KERN_SUCCESS;
+ };
+ 
+ kern_return_t mach_memory_info(host_priv_t host, mach_zone_name_array_t* namesp, mach_msg_type_number_t* namesCntp, mach_zone_info_array_t* infop, mach_msg_type_number_t* infoCntp, mach_memory_info_array_t* memoryInfop, mach_msg_type_number_t* memoryInfoCntp) {
+@@ -591,8 +791,115 @@ kern_return_t mach_vm_machine_attribute(vm_map_t map, mach_vm_address_t addr, ma
+ };
+ 
+ kern_return_t mach_vm_map_external(vm_map_t target_map, mach_vm_offset_t* address, mach_vm_size_t initial_size, mach_vm_offset_t mask, int flags, ipc_port_t port, vm_object_offset_t offset, boolean_t copy, vm_prot_t cur_protection, vm_prot_t max_protection, vm_inherit_t inheritance) {
+-	dtape_stub_safe();
+-	return KERN_SUCCESS;
++	/*
++	 * darling-lol: real implementation. This used to be a "safe" stub
++	 * returning KERN_SUCCESS without mapping anything or setting
++	 * *address -- so every VM_FLAGS_ANYWHERE caller (notably libplatform's
++	 * os_alloc heap via mach_vm_map, which backs ALL os_alloc_once
++	 * singletons incl. libnotify globals) got success plus a stale address
++	 * and crashed later on the unmapped pointer. Two cases:
++	 *
++	 *  - MEMORY_OBJECT_NULL port: anonymous mapping. Allocate fresh pages
++	 *    in the target task (zero-filled by the host mmap underneath).
++	 *  - named-entry port (from _mach_make_memory_entry): map a duplicate
++	 *    of the entry's kernel-buffer copy at the requested offset. The
++	 *    entry keeps its own copy so it stays mappable (and destroyable)
++	 *    afterwards. NOTE: this gives copy semantics, not true cross-task
++	 *    sharing; sufficient to unblock, revisit if sharing artifacts show.
++	 */
++	int prot = 0;
++	if (cur_protection & VM_PROT_READ)
++		prot |= PROT_READ;
++	if (cur_protection & VM_PROT_WRITE)
++		prot |= PROT_WRITE;
++	if (cur_protection & VM_PROT_EXECUTE)
++		prot |= PROT_EXEC;
++
++	if (target_map == VM_MAP_NULL) {
++		target_map = current_map();
++	}
++	if (target_map == VM_MAP_NULL || address == NULL) {
++		return KERN_INVALID_ARGUMENT;
++	}
++
++	if (port == MEMORY_OBJECT_NULL) {
++		uintptr_t hint = (flags & VM_FLAGS_ANYWHERE) ? 0 : (uintptr_t)*address;
++		uintptr_t addr = dtape_hooks->task_allocate_pages(
++		    target_map->dtape_task->context,
++		    dtape_byte_count_to_page_count_round_up(initial_size),
++		    prot, hint, 0);
++		if (addr == 0) {
++			return KERN_RESOURCE_SHORTAGE;
++		}
++		*address = (mach_vm_offset_t)addr;
++		return KERN_SUCCESS;
++	}
++
++	if (IP_VALID(port) && ip_kotype(port) == IKOT_NAMED_ENTRY) {
++		vm_named_entry_t entry = (vm_named_entry_t)ip_get_kobject(port);
++		dtape_map_shared_descriptor_t* desc = NULL;
++		vm_map_offset_t entry_off = 0;
++		vm_map_size_t entry_size = 0;
++		vm_prot_t entry_prot = VM_PROT_NONE;
++		uintptr_t map_addr;
++		uint64_t page_off;
++
++		named_entry_lock(entry);
++		desc = (dtape_map_shared_descriptor_t*)entry->dtape_descriptor;
++		entry_off = entry->offset;
++		entry_size = entry->size;
++		entry_prot = entry->protection;
++		if (desc != NULL) {
++			dtape_map_shared_descriptor_retain(desc);
++		}
++		named_entry_unlock(entry);
++
++		if (desc == NULL) {
++			return KERN_INVALID_ARGUMENT;
++		}
++		/* darling-lol M53: enforce the entry's max protection. XNU
++		 * refuses a writable mapping of a read-only entry with
++		 * KERN_INVALID_RIGHT, and Chromium's shared-memory Take()
++		 * depends on exactly that signal to detect read-only regions
++		 * (without it, every readonly Mojo SHM probe "succeeds"
++		 * writable and the GPU dies in a CHECK). Mask to VM_PROT bits:
++		 * creation permission carries MAP_MEM_NAMED_CREATE etc. */
++		if ((cur_protection & (VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE) &
++		     ~(entry_prot & (VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE))) != 0) {
++			dtape_map_shared_descriptor_release(desc);
++			return KERN_INVALID_RIGHT;
++		}
++		if ((vm_map_offset_t)offset >= entry_size) {
++			dtape_map_shared_descriptor_release(desc);
++			return KERN_INVALID_ARGUMENT;
++		}
++		/* Map the shared object itself (MAP_SHARED in the target), so
++		 * all tasks mapping the entry observe the same pages. */
++		page_off = ((uint64_t)entry_off + (uint64_t)offset) / 4096;
++		if ((flags & VM_FLAGS_ANYWHERE) != 0) {
++			map_addr = dtape_hooks->task_map_file(
++			    target_map->dtape_task->context,
++			    desc->memfd,
++			    dtape_byte_count_to_page_count_round_up(initial_size),
++			    prot, 0, page_off, dtape_memory_flag_none);
++		} else {
++			map_addr = dtape_hooks->task_map_file(
++			    target_map->dtape_task->context,
++			    desc->memfd,
++			    dtape_byte_count_to_page_count_round_up(initial_size),
++			    prot, (uintptr_t)*address, page_off,
++			    dtape_memory_flag_fixed | dtape_memory_flag_overwrite);
++		}
++		dtape_map_shared_descriptor_release(desc);
++		if (map_addr == 0) {
++			return KERN_FAILURE;
++		}
++		*address = (mach_vm_offset_t)map_addr +
++		    (((uint64_t)entry_off + (uint64_t)offset) % 4096);
++		return KERN_SUCCESS;
++	}
++
++	return KERN_INVALID_ARGUMENT;
+ };
+ 
+ kern_return_t mach_vm_msync(vm_map_t map, mach_vm_offset_t address, mach_vm_size_t size, vm_sync_t sync_flags) {
+@@ -856,7 +1163,7 @@ static kern_return_t mach_vm_remap_external_shared(vm_map_t target_map, mach_vm_
+ 
+ 	src_existing_entry_count = dtape_map_find_shared_entries_locked(src_map, start_memaddr, map_size, src_existing_entries, sizeof(src_existing_entries) / sizeof(*src_existing_entries));
+ 
+-	if (src_existing_entry_count == 1 && src_existing_entries[0]->address == start_memaddr && src_existing_entries[0]->size >= map_size) {
++	if (src_existing_entry_count == 1 && src_existing_entries[0]->address == start_memaddr && src_existing_entries[0]->size == map_size) {
+ 		// special case for what LLDB does with dyld info
+ 		dtape_map_shared_descriptor_retain(src_existing_entries[0]->descriptor);
+ 		descriptor = src_existing_entries[0]->descriptor;
+@@ -1441,6 +1748,10 @@ mach_destroy_memory_entry(
+ 	named_entry->ref_count -= 1;
+ 
+ 	if (named_entry->ref_count == 0) {
++		/* darling-lol: release duct-tape shared backing first. */
++		dtape_map_shared_descriptor_t* desc =
++		    (dtape_map_shared_descriptor_t*)named_entry->dtape_descriptor;
++		named_entry->dtape_descriptor = NULL;
+ 		if (named_entry->is_sub_map) {
+ 			vm_map_deallocate(named_entry->backing.map);
+ 		} else if (named_entry->is_copy) {
+@@ -1456,6 +1767,9 @@ mach_destroy_memory_entry(
+ 
+ 		named_entry_unlock(named_entry);
+ 		named_entry_lock_destroy(named_entry);
++		if (desc != NULL) {
++			dtape_map_shared_descriptor_release(desc);
++		}
+ 
+ #if VM_NAMED_ENTRY_LIST
+ 		lck_mtx_lock_spin(&vm_named_entry_list_lock_data);
+diff --git a/duct-tape/src/misc.c b/duct-tape/src/misc.c
+index afe60fc..02968b2 100644
+--- a/duct-tape/src/misc.c
++++ b/duct-tape/src/misc.c
+@@ -48,6 +48,9 @@ ssize_t getrandom(void* buf, size_t buflen, unsigned int flags);
+ 
+ 
+ void dtape_logv(dtape_log_level_t level, const char* format, va_list args) {
++	if (dtape_hooks->log_enabled && !dtape_hooks->log_enabled(level)) {
++		return;
++	}
+ 	char message[4096];
+ 	vsnprintf(message, sizeof(message), format, args);
+ 	dtape_hooks->log(level, message);
+@@ -87,10 +90,28 @@ int scnprintf(char* buffer, size_t buffer_size, const char* format, ...) {
+ void (ipc_kmsg_trace_send)(ipc_kmsg_t kmsg, mach_msg_option_t option) {
+ 	pid_t dest_pid = -1;
+ 	ipc_port_t dest = kmsg->ikm_header->msgh_remote_port;
++	mach_msg_header_t* h = kmsg->ikm_header;
+ 
+ 	dest_pid = ipc_port_get_receiver_task(dest, NULL);
+ 
+-	dtape_log_debug("sending kmsg %p to pid %d", kmsg, dest_pid);
++	/* darling-lol M58 IPC probe: log enough of the Mach message to identify
++	 * the Chromium/Mojo request or reply. Mojo's ChannelMac puts the Mojo
++	 * message (with its 4-byte interface ordinal) in the Mach payload; the
++	 * offset depends on the message layout, so dump a few words. */
++	{
++		unsigned char* p = (unsigned char*)h;
++		unsigned int size = h->msgh_size;
++		unsigned int w88 = 0, w92 = 0, w96 = 0, w100 = 0, w104 = 0, w108 = 0;
++		if (size >= 92) w88 = *(unsigned int*)(p + 88);
++		if (size >= 96) w92 = *(unsigned int*)(p + 92);
++		if (size >= 100) w96 = *(unsigned int*)(p + 96);
++		if (size >= 104) w100 = *(unsigned int*)(p + 100);
++		if (size >= 108) w104 = *(unsigned int*)(p + 104);
++		if (size >= 112) w108 = *(unsigned int*)(p + 108);
++		dtape_log_debug("sending kmsg to pid %d id=%#x size=%u bits=%#x b88=%08x b92=%08x b96=%08x b100=%08x b104=%08x b108=%08x",
++		    dest_pid, h->msgh_id, size, h->msgh_bits,
++		    w88, w92, w96, w100, w104, w108);
++	}
+ };
+ 
+ void Assert(const char* file, int line, const char* expression) {
+diff --git a/duct-tape/src/stubs.c b/duct-tape/src/stubs.c
+index dc1cfa5..242c6da 100644
+--- a/duct-tape/src/stubs.c
++++ b/duct-tape/src/stubs.c
+@@ -37,9 +37,18 @@ extern char* getenv(const char* name);
+ 
+ static bool log_safe_stubs = false;
+ 
++static bool nonfatal_unsafe_stubs = false;
++
+ __attribute__((constructor))
+ static void init_stubs() {
+ 	log_safe_stubs = getenv("DTAPE_LOG_SAFE_STUBS") != NULL;
++	/* darling-lol: optional escape hatch. When set, an "unsafe" (unimplemented,
++	 * needs-real-impl) duct-tape stub logs but does NOT abort darlingserver.
++	 * Aborting the server is catastrophic: it is a single process serving every
++	 * guest process, so one unimplemented trap (e.g. a Chromium mach call) tears
++	 * down the whole container's RPC, and every guest then fails with -111.
++	 * Default remains fatal so genuine bugs stay loud during development. */
++	nonfatal_unsafe_stubs = getenv("DTAPE_NONFATAL_UNSAFE") != NULL;
+ };
+ 
+ void dtape_stub_log(const char* function_name, int safety, const char* subsection) {
+@@ -57,7 +66,7 @@ void dtape_stub_log(const char* function_name, int safety, const char* subsectio
+ 		kind_info = "";
+ 	} else if (safety < 0) {
+ 		log_level = dtape_log_level_error;
+-		do_abort = true;
++		do_abort = !nonfatal_unsafe_stubs;
+ 		kind_info = " (unsafe)";
+ 	} else {
+ 		if (!log_safe_stubs) {
+@@ -210,7 +219,9 @@ kern_return_t kmod_get_info(host_t host, kmod_info_array_t* kmod_list, mach_msg_
+ };
+ 
+ kern_return_t kext_request(host_priv_t hostPriv, uint32_t clientLogSpec, vm_offset_t requestIn, mach_msg_type_number_t requestLengthIn, vm_offset_t* responseOut, mach_msg_type_number_t* responseLengthOut, vm_offset_t* logDataOut, mach_msg_type_number_t* logDataLengthOut, kern_return_t* op_result) {
+-	dtape_stub_unsafe();
++	// there are no kernel extensions to query or load; fail the request
++	dtape_stub_safe();
++	return KERN_NOT_SUPPORTED;
+ };
+ 
+ uint32_t PE_i_can_has_debugger(uint32_t* something) {
+diff --git a/duct-tape/src/task.c b/duct-tape/src/task.c
+index a9eb4bc..b77187d 100644
+--- a/duct-tape/src/task.c
++++ b/duct-tape/src/task.c
+@@ -521,7 +521,9 @@ kern_return_t task_info(task_t xtask, task_flavor_t flavor, task_info_t task_inf
+ 		};
+ 
+ 		default:
+-			dtape_stub_unsafe("unimplemented flavor");
++			/* Unsupported task-info flavors are guest API errors, not fatal
++			 * host errors. Chromium probes optional power/accounting data. */
++			return KERN_INVALID_ARGUMENT;
+ 	}
+ };
+ 
+diff --git a/duct-tape/src/thread.c b/duct-tape/src/thread.c
+index f4ce909..e14fe79 100644
+--- a/duct-tape/src/thread.c
++++ b/duct-tape/src/thread.c
+@@ -53,6 +53,7 @@ dtape_thread_t* dtape_thread_create(dtape_task_t* task, uint64_t nsid, void* con
+ 	thread->processing_signal = false;
+ 	thread->name = NULL;
+ 	thread->waiting_suspended = false;
++	libsimple_lock_init(&thread->block_suspend_gate);
+ 	LIST_INIT(&thread->user_states);
+ 	dtape_mutex_init(&thread->suspension_mutex);
+ 	dtape_condvar_init(&thread->suspension_condvar);
+@@ -521,11 +522,16 @@ wait_result_t thread_block_parameter(thread_continue_t continuation, void* param
+ 	thread->xnu_thread.parameter = parameter;
+ 
+ 	bool waiting = thread->xnu_thread.state & TH_WAIT;
++    /* A wakeup between this check and Thread::suspend used to be ignored
++     * because the microthread was not suspended yet. Keep the gate locked
++     * until the server has yielded and published the suspended state. */
++    if (waiting)
++        libsimple_lock_lock(&thread->block_suspend_gate);
+ 
+ 	thread_unlock(&thread->xnu_thread);
+ 
+ 	if (waiting) {
+-		dtape_hooks->thread_suspend(thread->context, continuation ? thread_continuation_callback : NULL, thread, NULL);
++		dtape_hooks->thread_suspend(thread->context, continuation ? thread_continuation_callback : NULL, thread, &thread->block_suspend_gate);
+ 	}
+ 
+ 	thread_lock(&thread->xnu_thread);
+@@ -548,8 +554,20 @@ wait_result_t thread_block(thread_continue_t continuation) {
+ // thread locked
+ boolean_t thread_unblock(thread_t xthread, wait_result_t wresult) {
+ 	dtape_thread_t* thread = dtape_thread_for_xnu_thread(xthread);
++	libsimple_lock_lock(&thread->block_suspend_gate);
+ 	thread->xnu_thread.wait_result = wresult;
++	/* Match XNU's thread_unblock: a timer from a previous timed wait must
++	 * not expire during the thread's next, untimed Mach receive. */
++	if (thread->xnu_thread.wait_timer_is_set) {
++		if (timer_call_cancel(&thread->xnu_thread.wait_timer)) {
++			thread->xnu_thread.wait_timer_active--;
++		}
++		thread->xnu_thread.wait_timer_is_set = FALSE;
++	}
++	thread->xnu_thread.state &= ~(TH_WAIT | TH_UNINT);
++	thread->xnu_thread.state |= TH_RUN;
+ 	dtape_hooks->thread_resume(thread->context);
++	libsimple_lock_unlock(&thread->block_suspend_gate);
+ 	return TRUE;
+ };
+ 
+@@ -1324,11 +1342,11 @@ kern_return_t thread_wire(host_priv_t host_priv, thread_t thread, boolean_t wire
+ };
+ 
+ kern_return_t thread_getstatus_to_user(thread_t thread, int flavor, thread_state_t tstate, mach_msg_type_number_t* count) {
+-	dtape_stub_unsafe();
++	return thread_get_state_internal(thread, flavor, tstate, count, TRUE);
+ };
+ 
+ kern_return_t thread_setstatus_from_user(thread_t thread, int flavor, thread_state_t tstate, mach_msg_type_number_t count) {
+-	dtape_stub_unsafe();
++	return thread_set_state_from_user(thread, flavor, tstate, count);
+ };
+ 
+ boolean_t thread_should_abort(thread_t thread) {
+diff --git a/duct-tape/src/timer.c b/duct-tape/src/timer.c
+index bbaab01..4f01234 100644
+--- a/duct-tape/src/timer.c
++++ b/duct-tape/src/timer.c
+@@ -53,8 +53,9 @@ uint64_t _rtc_nanotime_read(pal_rtc_nanotime_t* rntp) {
+ };
+ 
+ void dtape_timer_fired(void) {
+-	uint64_t next_deadline = timer_queue_expire(&timer_queue, mach_absolute_time());
+-	dtape_hooks->timer_arm(next_deadline, true);
++	/* Expiration rearms while holding the queue lock. Rearming here from
++	 * its returned snapshot could overwrite a concurrent insertion. */
++	timer_queue_expire(&timer_queue, mach_absolute_time());
+ };
+ 
+ void timer_call_nosync_cpu(int cpu, void (*fn)(void* arg), void* arg) {
+@@ -62,7 +63,8 @@ void timer_call_nosync_cpu(int cpu, void (*fn)(void* arg), void* arg) {
+ };
+ 
+ mpqueue_head_t* timer_queue_assign(uint64_t deadline) {
+-	dtape_hooks->timer_arm(deadline, false);
++	/* Arm only after insertion, under the queue lock. A short deadline
++	 * can otherwise expire before its call has reached the queue. */
+ 	return &timer_queue;
+ };
+ 
+diff --git a/duct-tape/xnu/osfmk/ipc/ipc_kmsg.c b/duct-tape/xnu/osfmk/ipc/ipc_kmsg.c
+index 7c2559b..712ff8f 100644
+--- a/duct-tape/xnu/osfmk/ipc/ipc_kmsg.c
++++ b/duct-tape/xnu/osfmk/ipc/ipc_kmsg.c
+@@ -77,6 +77,7 @@
+ #include <mach/message.h>
+ #include <mach/port.h>
+ #include <mach/vm_map.h>
++#include <darlingserver/duct-tape/log.h> /* darling-lol M58g1: dtape_log_error */
+ #include <mach/mach_vm.h>
+ #include <mach/vm_statistics.h>
+ 
+@@ -2497,6 +2498,10 @@ ipc_kmsg_put(
+ 	}
+ 
+ 	if (copyoutmsg((const char *) kmsg->ikm_header, rcv_addr, size)) {
++		dtape_log_error("M58G ipc_kmsg_put copyout failed size=%u rcv_size=%u rcv_addr=0x%llx option=0x%x bits=0x%x id=%d task=%p map=%p",
++		    size, (unsigned)rcv_size, (unsigned long long) rcv_addr, (unsigned) option,
++		    (unsigned) kmsg->ikm_header->msgh_bits, (int) kmsg->ikm_header->msgh_id,
++		    (void*) current_task(), (void*) current_map());
+ 		mr = MACH_RCV_INVALID_DATA;
+ 		size = 0;
+ 	} else {
+diff --git a/duct-tape/xnu/osfmk/ipc/ipc_mqueue.c b/duct-tape/xnu/osfmk/ipc/ipc_mqueue.c
+index 98ad438..221a1be 100644
+--- a/duct-tape/xnu/osfmk/ipc/ipc_mqueue.c
++++ b/duct-tape/xnu/osfmk/ipc/ipc_mqueue.c
+@@ -87,6 +87,7 @@
+ #include <ipc/port.h>
+ #include <ipc/ipc_mqueue.h>
+ #include <ipc/ipc_kmsg.h>
++#include <darlingserver/duct-tape/log.h> /* darling-lol M58bc: dtape_log_error */
+ #include <ipc/ipc_port.h>
+ #include <ipc/ipc_pset.h>
+ #include <ipc/ipc_space.h>
+@@ -757,6 +758,25 @@ ipc_mqueue_post(
+ 
+ 	ipc_kmsg_trace_send(kmsg, option);
+ 
++	{
++		/* darling-lol M58bc: mach-message delivery trace. Logs the receiver's
++		 * pid, message id and size for each enqueue, so we can see whether a
++		 * message addressed to the renderer's port is delivered. Capped. */
++		ipc_port_t __m58bc_port = ip_from_mq(mqueue);
++		if (__m58bc_port != IP_NULL && ip_active(__m58bc_port)) {
++			int __m58bc_rpid = ipc_port_get_receiver_task(__m58bc_port, NULL);
++			mach_msg_size_t __m58bc_sz = (kmsg->ikm_header != 0) ? kmsg->ikm_header->msgh_size : 0;
++			int __m58bc_id = (kmsg->ikm_header != 0) ? (int) kmsg->ikm_header->msgh_id : 0;
++#if 0 /* darling-lol M58F173: disabled again (per-message dserver log overhead) */
++			static unsigned long __m58bc_n = 0;
++			if (__m58bc_n++ < 200000) {
++				dtape_log_error("M58BC post rpid=%d id=%d size=%u port=%p",
++				    __m58bc_rpid, __m58bc_id, (unsigned) __m58bc_sz, (void*)__m58bc_port);
++			}
++#endif
++		}
++	}
++
+ 	/*
+ 	 *	While the msg queue	is locked, we have control of the
+ 	 *  kmsg, so the ref in	it for the port is still good.
+@@ -786,6 +806,24 @@ ipc_mqueue_post(
+ 		    WAITQ_KEEP_LOCKED);
+ 		/* waitq still locked, thread locked */
+ 
++		/* darling-lol M58RD: record whether the post found a blocked receiver
++		 * or had to queue. A queued message while a thread is parked in
++		 * ipc_mqueue_receive on the SAME port means a lost wakeup. */
++#if 0 /* darling-lol M58F173: disabled again (per-message dserver log overhead) */
++		{
++			static unsigned long __m58rd_n = 0;
++			if (__m58rd_n++ < 200000) {
++				ipc_port_t __m58rd_port = ip_from_mq(mqueue);
++				int __m58rd_rpid = (__m58rd_port != IP_NULL && ip_active(__m58rd_port))
++				    ? ipc_port_get_receiver_task(__m58rd_port, NULL) : -1;
++				int __m58rd_id = (kmsg->ikm_header != 0) ? (int)kmsg->ikm_header->msgh_id : 0;
++				dtape_log_error("M58RD %s rpid=%d id=%d port=%p rcv=%p",
++				    (receiver == THREAD_NULL) ? "QUEUED" : "HANDOFF",
++				    __m58rd_rpid, __m58rd_id, (void*)__m58rd_port, (void*)receiver);
++			}
++		}
++#endif
++
+ 		if (receiver == THREAD_NULL) {
+ 			/*
+ 			 * no receivers; queue kmsg if space still reserved
+@@ -1222,6 +1260,23 @@ ipc_mqueue_receive_on_thread(
+ 		    TURNSTILE_DELAYED_UPDATE);
+ 	}
+ 
++	/* darling-lol M58RE: receive-side trace. When a thread is about to block
++	 * on a mach-message receive, log the receiver pid and the port it waits on
++	 * (pointer identity). Pair with M58BC posts (same port=) to see whether the
++	 * expected message is enqueued on this exact port. Capped. */
++#if 0 /* darling-lol M58F151: disabled (per-receive dserver log overhead) */
++	{
++		static unsigned long __m58re_n = 0;
++		if (__m58re_n++ < 200000) {
++			ipc_port_t __m58re_port = ip_from_mq(mqueue);
++			int __m58re_rpid = (__m58re_port != IP_NULL && ip_active(__m58re_port))
++			    ? ipc_port_get_receiver_task(__m58re_port, NULL) : -1;
++			dtape_log_error("M58RE recv rpid=%d tid=%p port=%p opt=0x%x",
++			    __m58re_rpid, (void*)thread, (void*)__m58re_port, (unsigned)option);
++		}
++	}
++#endif
++
+ 	thread_set_pending_block_hint(thread, kThreadWaitPortReceive);
+ 	wresult = waitq_assert_wait64_locked(&mqueue->imq_wait_queue,
+ 	    IPC_MQUEUE_RECEIVE,
+diff --git a/duct-tape/xnu/osfmk/ipc/ipc_object.c b/duct-tape/xnu/osfmk/ipc/ipc_object.c
+index 5e2fdb8..2352d43 100644
+--- a/duct-tape/xnu/osfmk/ipc/ipc_object.c
++++ b/duct-tape/xnu/osfmk/ipc/ipc_object.c
+@@ -89,6 +89,7 @@
+ #include <ipc/ipc_hash.h>
+ #include <ipc/ipc_right.h>
+ #include <ipc/ipc_notify.h>
++#include <darlingserver/duct-tape/log.h> /* darling-lol M58DD: copyout diagnostics */
+ #include <ipc/ipc_port.h>
+ #include <ipc/ipc_pset.h>
+ 
+@@ -1016,6 +1017,13 @@ ipc_object_copyout(
+ 	is_write_unlock(space);
+ 
+ out:
++	/* Successful copyouts are a hot path; diagnostic logging here slows
++	 * normal Mach traffic and fills dserver.log during Riot startup. */
++	if (kr != KERN_SUCCESS) {
++		dtape_log_error("M58DD copyout-fail msgt=0x%x kr=%d",
++		    (unsigned) msgt_name, (int) kr);
++	}
++
+ 	if (kr == KERN_SUCCESS) {
+ 		*namep = name;
+ 	} else if (IO_VALID(object)) {
+diff --git a/duct-tape/xnu/osfmk/ipc/mach_msg.c b/duct-tape/xnu/osfmk/ipc/mach_msg.c
+index f073413..0dd19db 100644
+--- a/duct-tape/xnu/osfmk/ipc/mach_msg.c
++++ b/duct-tape/xnu/osfmk/ipc/mach_msg.c
+@@ -76,7 +76,7 @@
+ #include <mach/message.h>
+ #include <mach/mig_errors.h>
+ #include <mach/mach_traps.h>
+-
++#include <darlingserver/duct-tape/log.h> /* darling-lol M58g1: dtape_log_error */
+ #include <kern/kern_types.h>
+ #include <kern/assert.h>
+ #include <kern/cpu_number.h>
+@@ -397,6 +397,14 @@ mach_msg_receive_results(
+ 
+ 	mr = ipc_kmsg_copyout(kmsg, space, map, MACH_MSG_BODY_NULL, option);
+ 
++	/* darling-lol M58g1: log receive-side failures to find the
++	 * waitable-event receive failure (MACH_RCV_INVALID_DATA 5/5 in the
++	 * harness repro, tools/m58g-machmsg-repro.c). */
++	if (mr != MACH_MSG_SUCCESS) {
++		dtape_log_error("M58G recv-err mr=0x%08x msgh_size=%u rcv_size=%u",
++		    mr, kmsg->ikm_header->msgh_size, (unsigned)rcv_size);
++	}
++
+ 	trailer_size = ipc_kmsg_trailer_size(option, self);
+ 
+ 	if (mr != MACH_MSG_SUCCESS) {
+@@ -779,6 +787,9 @@ msg_receive_error(
+ 	    sizeof(trailer_template));
+ 
+ 	trailer_size = ipc_kmsg_trailer_size(option, self);
++	/* darling-lol M58g1: track msg_receive_error's copyout inputs. */
++	dtape_log_error("M58G receive-error trailer_size=%u rcv_size=%u",
++	    (unsigned)trailer_size, (unsigned)rcv_size);
+ 	ipc_kmsg_add_trailer(kmsg, space, option, self,
+ 	    seqno, TRUE, context);
+ 
+diff --git a/duct-tape/xnu/osfmk/ipc/mach_port.c b/duct-tape/xnu/osfmk/ipc/mach_port.c
+index deaa574..3adbde2 100644
+--- a/duct-tape/xnu/osfmk/ipc/mach_port.c
++++ b/duct-tape/xnu/osfmk/ipc/mach_port.c
+@@ -101,6 +101,7 @@
+ 
+ #if IMPORTANCE_INHERITANCE
+ #include <ipc/ipc_importance.h>
++#include <darlingserver/duct-tape/log.h> /* darling-lol M58DB: mod_refs diagnostics */
+ #endif
+ 
+ kern_return_t mach_port_get_attributes(ipc_space_t space, mach_port_name_t name,
+@@ -999,12 +1000,18 @@ mach_port_mod_refs(
+ 	kr = ipc_right_lookup_write(space, name, &entry);
+ 	if (kr != KERN_SUCCESS) {
+ 		mach_port_guard_exception(name, 0, 0, kGUARD_EXC_INVALID_NAME);
++		dtape_log_error("M58DB mod_refs LOOKUP-FAIL name=%u right=%d delta=%d kr=%d",
++		    (unsigned) name, (int) right, (int) delta, (int) kr);
+ 		return kr;
+ 	}
+ 
+ 	/* space is write-locked and active */
+ 
+ 	kr = ipc_right_delta(space, name, entry, right, delta); /* unlocks */
++	if (kr != KERN_SUCCESS) {
++		dtape_log_error("M58DB mod_refs DELTA-FAIL name=%u right=%d delta=%d kr=%d",
++		    (unsigned) name, (int) right, (int) delta, (int) kr);
++	}
+ 	return kr;
+ }
+ 
+diff --git a/duct-tape/xnu/osfmk/kern/ipc_kobject.c b/duct-tape/xnu/osfmk/kern/ipc_kobject.c
+index 408cb36..bbddfca 100644
+--- a/duct-tape/xnu/osfmk/kern/ipc_kobject.c
++++ b/duct-tape/xnu/osfmk/kern/ipc_kobject.c
+@@ -148,6 +148,8 @@
+ #include <kern/sync_sema.h>
+ #include <kern/work_interval.h>
+ #include <kern/suid_cred.h>
++/* darling-lol M54: fileport kobject lives in duct-tape/src/fileport.c */
++extern void dtape_fileport_destroy(struct ipc_port* port);
+ #include <kern/task_ident.h>
+ 
+ #if HYPERVISOR
+@@ -1045,6 +1047,11 @@ ipc_kobject_destroy(
+ 		suid_cred_destroy(port);
+ 		break;
+ 
++	/* darling-lol M54: fileports. */
++	case IKOT_FILEPORT:
++		dtape_fileport_destroy(port);
++		break;
++
+ 	default:
+ 		break;
+ 	}
+diff --git a/duct-tape/xnu/osfmk/kern/ipc_misc.c b/duct-tape/xnu/osfmk/kern/ipc_misc.c
+index 6e7638f..76f680e 100644
+--- a/duct-tape/xnu/osfmk/kern/ipc_misc.c
++++ b/duct-tape/xnu/osfmk/kern/ipc_misc.c
+@@ -127,7 +127,8 @@ fileport_notify(mach_msg_header_t *msg)
+ 	if (port->ip_srights == 0) {
+ 		ip_unlock(port);
+ 
+-		fileport_releasefg(fg);
++		/* Darling stores a host FD kobject, not a BSD fileglob.
++		 * ipc_kobject_destroy performs its one close/free on destruction. */
+ 		ipc_port_dealloc_kernel(port);
+ 	} else {
+ 		ip_unlock(port);
+diff --git a/duct-tape/xnu/osfmk/kern/timer_call.c b/duct-tape/xnu/osfmk/kern/timer_call.c
+index 4983e26..fd37050 100644
+--- a/duct-tape/xnu/osfmk/kern/timer_call.c
++++ b/duct-tape/xnu/osfmk/kern/timer_call.c
+@@ -385,6 +385,13 @@ timer_call_entry_enqueue_deadline(
+ 	}
+ 	new_mpqueue->count++;
+ 
++#ifdef __DARLING__
++	/* Publish the actual queue head after insertion, while serialized with
++	 * expiration and cancellation. The timerfd must never reflect a stale
++	 * pre-insertion or post-expiration snapshot. */
++	timer_queue_cancel(new_mpqueue, deadline, thead->tc_pqlink.deadline);
++#endif
++
+ 	return old_mpqueue;
+ }
+ 
+@@ -1003,6 +1010,9 @@ timer_queue_expire_with_options(
+ 		queue->earliest_soft_deadline = cur_deadline = UINT64_MAX;
+ 	}
+ 
++#ifdef __DARLING__
++	timer_queue_cancel(queue, deadline, cur_deadline);
++#endif
+ 	timer_queue_unlock(queue);
+ 
+ 	return cur_deadline;
+diff --git a/duct-tape/xnu/osfmk/vm/vm_map.h b/duct-tape/xnu/osfmk/vm/vm_map.h
+index 15fa8c8..4321a91 100644
+--- a/duct-tape/xnu/osfmk/vm/vm_map.h
++++ b/duct-tape/xnu/osfmk/vm/vm_map.h
+@@ -205,6 +205,12 @@ struct vm_named_entry {
+ #define NAMED_ENTRY_BT_DEPTH 16
+ 	void                    *named_entry_bt[NAMED_ENTRY_BT_DEPTH];
+ #endif /* VM_NAMED_ENTRY_LIST */
++	/* darling-lol: duct-tape shared backing. XNU's object model is not
++	 * wired up here; instead an entry may carry a shared memfd descriptor
++	 * (see dtape_map_shared_descriptor in duct-tape/src/memory.c) that is
++	 * mapped into tasks on demand, giving true cross-task sharing.
++	 * Opaque pointer to avoid header coupling; NULL when unused. */
++	void                    *dtape_descriptor;
+ };
+ 
+ /*
+diff --git a/internal-include/darlingserver/logging.hpp b/internal-include/darlingserver/logging.hpp
+index d46bdb4..9a58727 100644
+--- a/internal-include/darlingserver/logging.hpp
++++ b/internal-include/darlingserver/logging.hpp
+@@ -41,6 +41,7 @@ namespace DarlingServer {
+ 			Error = 4,
+ 		};
+ 
++		bool _enabled(Type type) const;
+ 		void _log(Type type, std::string message) const;
+ 		static std::string _typeToString(Type type);
+ 
+@@ -57,6 +58,9 @@ namespace DarlingServer {
+ 		class Stream;
+ 		friend class Stream;
+ 
++		/// whether a message of this level (1 = debug .. 4 = error) would be written; cheap, for skipping formatting work
++		bool levelEnabled(int level) const { return _enabled(static_cast<Type>(level)); };
++
+ 		Stream debug() const;
+ 		Stream info() const;
+ 		Stream warning() const;
+@@ -74,7 +78,7 @@ namespace DarlingServer {
+ 	private:
+ 		Type _type;
+ 		const Log& _log;
+-		std::ostringstream _buffer;
++		std::unique_ptr<std::ostringstream> _buffer;
+ 
+ 		Stream(Type type, const Log& log);
+ 
+@@ -91,7 +95,9 @@ namespace DarlingServer {
+ 
+ 		template<class T>
+ 		std::enable_if_t<!std::is_base_of_v<Loggable, T>, Stream&> operator<<(const T& value) {
+-			_buffer << value;
++			if (_buffer) {
++				*_buffer << value;
++			}
+ 			return *this;
+ 		};
+ 	};
+diff --git a/internal-include/darlingserver/message.hpp b/internal-include/darlingserver/message.hpp
+index 708f3f3..56218a5 100644
+--- a/internal-include/darlingserver/message.hpp
++++ b/internal-include/darlingserver/message.hpp
+@@ -71,6 +71,11 @@ namespace DarlingServer {
+ 		void _ensureDescriptorHeader(size_t descriptorSpace);
+ 
+ 	public:
++		/** Called once after the server's final fork/privilege drop, before workers.
++		 * The server does not change its native identity afterwards. Generic Message
++		 * users retain live credentials unless they explicitly initialize this cache.
++		 */
++		static void initializeServerCredentials();
+ 		/**
+ 		 * Default-initializes a Message.
+ 		 *
+diff --git a/internal-include/darlingserver/process.hpp b/internal-include/darlingserver/process.hpp
+index c97be30..31772dc 100644
+--- a/internal-include/darlingserver/process.hpp
++++ b/internal-include/darlingserver/process.hpp
+@@ -94,6 +94,13 @@ namespace DarlingServer {
+ 		std::shared_ptr<FD> _vchrootDescriptor;
+ 		dtape_task_t* _dtapeTask;
+ 		std::weak_ptr<Process> _parentProcess;
++
++		// /proc/<pid>/maps, kept open for PROCMAP_QUERY region lookups (opening it per lookup cost more than the query).
++		// Guarded by its own mutex: a stale descriptor is closed and reopened, and a concurrent ioctl on a closed and
++		// reused descriptor number would hit an unrelated file.
++		mutable std::mutex _mapsMutex;
++		mutable int _mapsFd = -1;
++		int _procmapQuery(uint64_t address, uint64_t flags, void* query) const;
+ 		bool _startSuspended = false;
+ 		bool _pendingReplacement = false;
+ 		std::unordered_map<uintptr_t, std::shared_ptr<Kqchan>> _kqchannels;
+diff --git a/scripts/generate-rpc-wrappers.py b/scripts/generate-rpc-wrappers.py
+index e35221c..1068426 100755
+--- a/scripts/generate-rpc-wrappers.py
++++ b/scripts/generate-rpc-wrappers.py
+@@ -268,6 +268,22 @@ calls = [
+ 		('socket', '@fd'),
+ 	]),
+ 
++	#
++	# darling-lol M54: fileports (Mojo FD-over-Mach transport)
++	#
++
++	('fileport_makeport', [
++		('fd', '@fd'),
++	], [
++		('port_name', 'uint32_t'),
++	]),
++
++	('fileport_makefd', [
++		('port_name', 'uint32_t'),
++	], [
++		('fd', '@fd'),
++	]),
++
+ 	#
+ 	# pthread cancelation
+ 	#
+diff --git a/src/call.cpp b/src/call.cpp
+index cc10f1d..8c8d6b3 100644
+--- a/src/call.cpp
++++ b/src/call.cpp
+@@ -18,9 +18,20 @@
+  */
+ 
+ #define _GNU_SOURCE 1
++#include <map>
++#include <vector>
++#include <algorithm>
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
+ #include <darlingserver/call.hpp>
+ #include <darlingserver/server.hpp>
+ #include <sys/uio.h>
++#include <cerrno>
++#include <unistd.h>
++#include <atomic>
++#include <cstdlib>
++#include <cstdio>
+ 
+ #include <darlingserver/logging.hpp>
+ #include <darlingserver/duct-tape.h>
+@@ -29,16 +40,76 @@
+ #include <sys/syscall.h>
+ #include <darlingserver/kqchan.hpp>
+ 
++static bool m634TraceEnabled() {
++ static const bool enabled = [] {
++  const char* value = std::getenv("DARLING_M634_TRACE");
++  return value && value[0] == '1' && value[1] == '\0';
++ }();
++ return enabled;
++}
++
+ static DarlingServer::Log callLog("calls");
+ 
+ DarlingServer::Log DarlingServer::Call::rpcReplyLog("replies");
+ 
++// darling-lol: opt-in request statistics. With DSERVER_CALL_STATS=<file> set, every 5 s the server appends how many
++// requests of each call number arrived and which (pid, tid) pairs sent the most, then starts over. Costs one getenv
++// at startup and a branch per request when off. callFromMessage runs on the server's single message loop thread.
++static void callStatsRecord(unsigned number, int pid, int tid) {
++	static const char* path = getenv("DSERVER_CALL_STATS");
++	if (!path || !path[0]) {
++		return;
++	}
++	static std::map<unsigned, unsigned long> byNumber;
++	static std::map<std::pair<int, unsigned>, unsigned long> byThreadCall;
++	static std::map<std::pair<int, int>, unsigned long> byThread;
++	static unsigned long total = 0;
++	static auto last = std::chrono::steady_clock::now();
++
++	++byNumber[number];
++	++byThreadCall[{tid, number}];
++	++byThread[{pid, tid}];
++	++total;
++
++	auto now = std::chrono::steady_clock::now();
++	if (now - last < std::chrono::seconds(5)) {
++		return;
++	}
++	double seconds = std::chrono::duration<double>(now - last).count();
++	last = now;
++
++	if (FILE* file = fopen(path, "a")) {
++		fprintf(file, "calls: %lu in %.1fs (%.0f/s)\n  by call number:", total, seconds, total / seconds);
++		std::vector<std::pair<unsigned long, unsigned>> numbers;
++		for (auto& [num, count]: byNumber) numbers.push_back({count, num});
++		std::sort(numbers.rbegin(), numbers.rend());
++		for (size_t i = 0; i < numbers.size() && i < 12; ++i) fprintf(file, " #%u=%lu", numbers[i].second, numbers[i].first);
++		fprintf(file, "\n  by pid/tid:");
++		std::vector<std::pair<unsigned long, std::pair<int, int>>> threads;
++		for (auto& [id, count]: byThread) threads.push_back({count, id});
++		std::sort(threads.rbegin(), threads.rend());
++		for (size_t i = 0; i < threads.size() && i < 12; ++i) fprintf(file, " %d/%d=%lu", threads[i].second.first, threads[i].second.second, threads[i].first);
++		fprintf(file, "\n  by tid/call:");
++		std::vector<std::pair<unsigned long, std::pair<int, unsigned>>> pairs;
++		for (auto& [id, count]: byThreadCall) pairs.push_back({count, id});
++		std::sort(pairs.rbegin(), pairs.rend());
++		for (size_t i = 0; i < pairs.size() && i < 24; ++i) fprintf(file, " %d:#%u=%lu", pairs[i].second.first, pairs[i].second.second, pairs[i].first);
++		fprintf(file, "\n");
++		fclose(file);
++	}
++	byThreadCall.clear();
++	byNumber.clear();
++	byThread.clear();
++	total = 0;
++};
++
+ std::shared_ptr<DarlingServer::Call> DarlingServer::Call::callFromMessage(Message&& requestMessage) {
+ 	if (requestMessage.data().size() < sizeof(dserver_rpc_callhdr_t)) {
+ 		throw std::invalid_argument("Message buffer was too small for call header");
+ 	}
+ 
+ 	dserver_rpc_callhdr_t* header = reinterpret_cast<dserver_rpc_callhdr_t*>(requestMessage.data().data());
++	callStatsRecord(header->number, header->pid, header->tid);
+ 	std::shared_ptr<Call> result = nullptr;
+ 	std::shared_ptr<Process> process = nullptr;
+ 	std::shared_ptr<Thread> thread = nullptr;
+@@ -127,6 +198,38 @@ std::shared_ptr<DarlingServer::Call> DarlingServer::Call::callFromMessage(Messag
+ 	auto tidString = (thread) ? (std::to_string(thread->id()) + " (" + std::to_string(thread->nsid()) + ")") : (std::to_string(header->tid) + " (-1)");
+ 	callLog.debug() << "Received call #" << header->number << " (" << dserver_callnum_to_string(header->number) << ") from PID " << pidString << ", TID " << tidString << callLog.endLog;
+ 
++	/* darling-lol M634: rate-limited trace of EVERY call through dserver, to
++	 * see which RPCs the launcher's blocked service threads are waiting on
++	 * and whether an S2C/interrupt round-trip is wedged. */
++	if (m634TraceEnabled()) {
++		static std::atomic<unsigned> m634AllCount{0};
++		unsigned seen = m634AllCount.fetch_add(1);
++		if (seen < 120 || seen % 64 == 0) {
++			fprintf(stderr, "M634RPC line=%u nr=%d pid=%d ns=%d tid=%d nstid=%d\n",
++				seen, (int)header->number, requestMessage.pid(),
++				process ? (int)process->nsid() : -1,
++				header->tid, thread ? (int)thread->nsid() : -1);
++		}
++	}
++
++	/* darling-lol M634: bounded trace of the storm calls (semaphore_timedwait
++	 * and pthread_canceled) to diagnose the League-launch wedge. */
++	if (m634TraceEnabled() && (header->number == dserver_callnum_semaphore_timedwait || header->number == dserver_callnum_pthread_canceled)) {
++		static std::atomic<unsigned> m634CallCount{0};
++		unsigned seen = m634CallCount.fetch_add(1);
++		if (seen < 200 || seen % 256 == 0) {
++			if (header->number == dserver_callnum_semaphore_timedwait) {
++				auto call64 = reinterpret_cast<const dserver_rpc_call_semaphore_timedwait_t*>(requestMessage.data().data());
++				fprintf(stderr, "M634CALL line=%u nr=64 pid=%d tid=%d name=%u sec=%u nsec=%u\n",
++					seen, requestMessage.pid(), header->tid,
++					call64->body.wait_name, call64->body.sec, call64->body.nsec);
++			} else {
++				fprintf(stderr, "M634CALL line=%u nr=33 pid=%d tid=%d\n",
++					seen, requestMessage.pid(), header->tid);
++			}
++		}
++	}
++
+ 	if (header->number == dserver_callnum_s2c) {
+ 		// this is an S2C reply
+ 
+@@ -694,6 +797,60 @@ void DarlingServer::Call::KqchanProcOpen::processCall() {
+ 	_sendReply(code, socket);
+ };
+ 
++void DarlingServer::Call::FileportMakeport::processCall() {
++	int code = 0;
++	uint32_t port_name = 0;
++
++	if (auto thread = _thread.lock()) {
++		if (auto process = thread->process()) {
++			// _body.fd arrives via SCM_RIGHTS; the framework closes it
++			// after this call, so dup for the kobject's own lifecycle.
++			int fd = dup(_body.fd);
++			if (fd < 0) {
++				code = -errno;
++			} else {
++				int kr = dtape_fileport_makeport(process->_dtapeTask, fd, &port_name);
++				if (kr != 0) {
++					code = -EINVAL;
++					::close(fd);
++				}
++			}
++		} else {
++			code = -ESRCH;
++		}
++	} else {
++		code = -ESRCH;
++	}
++
++	_sendReply(code, port_name);
++};
++
++void DarlingServer::Call::FileportMakefd::processCall() {
++	int code = 0;
++	int fd = -1;
++
++	if (auto thread = _thread.lock()) {
++		if (auto process = thread->process()) {
++			int held = -1;
++			int kr = dtape_fileport_makefd(process->_dtapeTask, _body.port_name, &held);
++			if (kr != 0) {
++				code = -EINVAL;
++			} else {
++				// dtape_fileport_makefd already returns an owned duplicate.
++				// Transfer it to Message; its destructor closes the server
++				// copy after SCM_RIGHTS gives the receiver its own descriptor.
++				fd = held;
++			}
++		} else {
++			code = -ESRCH;
++		}
++	} else {
++		code = -ESRCH;
++	}
++
++	_sendReply(code, fd);
++};
++
+ void DarlingServer::Call::ForkWaitForChild::processCall() {
+ 	int code = 0;
+ 
+@@ -714,6 +871,24 @@ void DarlingServer::Call::Sigprocess::processCall() {
+ 	int code = 0;
+ 	int newBSDSignal = 0;
+ 
++	// darling-lol M34 TMPLOG: every guest signal delivered through sigexc.
++	// For the RC UX SIGSEGV this is the reliable place to see the crash:
++	// signal numbers + si_code + si_addr. RIP is not read here yet, but
++	// si_addr + code identify the fault class. (Chromium/Electron
++	// sigexc-routes its fatal signals through this RPC.)
++	std::string lolExe = "?";
++	if (auto th = _thread.lock()) {
++		if (auto pr = th->process())
++			lolExe = pr->executablePath();
++	}
++	callLog.error() << "LOLSIG processSignal bsd=" << _body.bsd_signal_number
++		<< " linux=" << _body.linux_signal_number
++		<< " code=" << _body.code
++		<< " addr=0x" << std::hex << _body.signal_address << std::dec
++		<< " ts=0x" << std::hex << _body.thread_state << std::dec
++		<< " exe=" << lolExe
++		<< callLog.endLog;
++
+ 	if (auto thread = _thread.lock()) {
+ 		try {
+ 			thread->processSignal(_body.bsd_signal_number, _body.linux_signal_number, _body.code, _body.signal_address, _body.thread_state, _body.float_state);
+diff --git a/src/darlingserver.cpp b/src/darlingserver.cpp
+index f79f057..2bf9cfb 100644
+--- a/src/darlingserver.cpp
++++ b/src/darlingserver.cpp
+@@ -497,6 +497,45 @@ static void handle_sigusr1(int signum) {
+ };
+ #endif
+ 
++/* darling-lol M58f2b: darlingserver was observed exiting silently ~100s into
++ * direct-UX runs; the monitor caught exit_code=15 — a SIGTERM sent by an
++ * unknown host process. Log the sender (siginfo.si_pid + its comm/cmdline)
++ * instead of dying, so the culprit is identified. Not strictly
++ * async-signal-safe, but this is a diagnostic for a fatal path. */
++static void handle_sigterm_diagnostic(int signum, siginfo_t* info, void* uctx) {
++	int fd = open("/tmp/dserver-signal.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
++	if (fd >= 0) {
++		dprintf(fd, "darlingserver pid=%d got %s from sender pid=%ld uid=%ld\n",
++			getpid(),
++			signum == SIGTERM ? "SIGTERM" : (signum == SIGINT ? "SIGINT" : "signal"),
++			info ? (long) info->si_pid : -1L,
++			info ? (long) info->si_uid : -1L);
++		if (info && info->si_pid > 0) {
++			char path[64], comm[256], cmdline[1024];
++			snprintf(path, sizeof(path), "/proc/%ld/comm", (long) info->si_pid);
++			int cfd = open(path, O_RDONLY);
++			if (cfd >= 0) {
++				ssize_t n = read(cfd, comm, sizeof(comm) - 1);
++				if (n > 0) { comm[n - 1] = '\0'; dprintf(fd, "  sender comm: %s\n", comm); }
++				close(cfd);
++			}
++			snprintf(path, sizeof(path), "/proc/%ld/cmdline", (long) info->si_pid);
++			cfd = open(path, O_RDONLY);
++			if (cfd >= 0) {
++				ssize_t n = read(cfd, cmdline, sizeof(cmdline) - 1);
++				if (n > 0) {
++					cmdline[n] = '\0';
++					for (ssize_t i = 0; i < n; ++i) { if (cmdline[i] == '\0') cmdline[i] = ' '; }
++					dprintf(fd, "  sender cmdline: %s\n", cmdline);
++				}
++				close(cfd);
++			}
++		}
++		close(fd);
++	}
++	/* keep running: the goal is to survive teardown races and name the sender */
++};
++
+ int main(int argc, char** argv) {
+ 	const char* prefix = NULL;
+ 	uid_t originalUID = -1;
+@@ -515,6 +554,30 @@ int main(int argc, char** argv) {
+ 	char putOld[4096];
+ 	char *p;
+ 
++	/* darling-lol M58f2: never die from SIGPIPE. The server writes to
++	 * client sockets (MessageQueue::sendMany's sendmmsg, RPC replies,
++	 * async-writer) whose peers are guest processes that can be torn
++	 * down at any moment (Chromium helper churn, crashes). The default
++	 * SIGPIPE disposition kills the whole server SILENTLY — no core,
++	 * no log — which then wedges the entire container (every guest RPC
++	 * fails with ECONNREFUSED). The write paths already handle EPIPE /
++	 * ECONNREFUSED errors gracefully (e.g. message.cpp sendMany drops
++	 * the dead peer's message); they just never got a chance to run.
++	 * Ignoring SIGPIPE makes those handlers reachable. */
++	signal(SIGPIPE, SIG_IGN);
++
++	/* darling-lol M58f2b: catch SIGTERM/SIGINT and log the sender instead
++	 * of dying (see handle_sigterm_diagnostic above). */
++	{
++		struct sigaction sa_diag;
++		memset(&sa_diag, 0, sizeof(sa_diag));
++		sa_diag.sa_sigaction = handle_sigterm_diagnostic;
++		sa_diag.sa_flags = SA_SIGINFO | SA_RESTART;
++		sigemptyset(&sa_diag.sa_mask);
++		sigaction(SIGTERM, &sa_diag, NULL);
++		sigaction(SIGINT, &sa_diag, NULL);
++	}
++
+ 	if (argc < 6) {
+ 		fprintf(stderr, "darlingserver is not meant to be started manually\n");
+ 		exit(1);
+@@ -745,6 +808,13 @@ int main(int argc, char** argv) {
+ #endif
+ 
+ 	// create the server
++	// All native forks and privilege changes are complete. Snapshot only our
++	// fixed transport identity; received/per-message credentials stay independent.
++	DarlingServer::Message::initializeServerCredentials();
++	// Explicit desktop-debugging opt-in, after dropping elevated privileges.
++	if (getenv("RCLOL_DEBUG_ATTACH")) {
++		prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
++	}
+ 	auto server = new DarlingServer::Server(prefix);
+ 
+ 	// tell the child to go ahead; the socket has been created
+diff --git a/src/kqchan.cpp b/src/kqchan.cpp
+index 7f766a2..1597a8c 100644
+--- a/src/kqchan.cpp
++++ b/src/kqchan.cpp
+@@ -13,6 +13,27 @@ static DarlingServer::Log kqchanMachPortLog("kqchan:mach_port");
+ static DarlingServer::Log kqchanProcLog("kqchan:proc");
+ static std::atomic_uint64_t kqchanDebugIDCounter = 0;
+ 
++// Opt-in bounded metadata trace; never records Mach message contents.
++#include <unistd.h>
++#include <cstdlib>
++#include <cstdio>
++#include <cstring>
++static void riotKqTrace(char stage, uint64_t channel, int socket, long value = 0) {
++ static int fd = [] {
++  if (!std::getenv("RCLOL_KQTRACE")) return -1;
++  char path[96]; std::snprintf(path, sizeof(path), "/tmp/riot-kqtrace-%d.log", getpid());
++  return open(path, O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0600);
++ }();
++ if (fd < 0) return;
++ static std::atomic_uint64_t next{0};
++ uint64_t index = next.fetch_add(1);
++ char row[128]; std::memset(row, ' ', sizeof(row));
++ int n = std::snprintf(row, sizeof(row), "%llu %c channel=%llu fd=%d value=%ld", (unsigned long long)index, stage, (unsigned long long)channel, socket, value);
++ if (n >= 0 && n < 127) row[n] = ' ';
++ row[127] = '\n';
++ pwrite(fd, row, sizeof(row), (index % 8192) * sizeof(row));
++}
++
+ //
+ // base class
+ //
+@@ -67,6 +88,7 @@ int DarlingServer::Kqchan::setup() {
+ 		throw std::system_error(ret, std::generic_category());
+ 	}
+ 
++	riotKqTrace('S', _debugID, _socket->fd());
+ 	std::weak_ptr<Kqchan> weakThis = sharedFromRoot();
+ 
+ 	_outbox.setMessageArrivalNotificationCallback([weakThis]() {
+@@ -84,6 +106,7 @@ int DarlingServer::Kqchan::setup() {
+ 		// we can send all the messages in the same context that they were pushed
+ 		do {
+ 			self->_canSend = self->_outbox.sendMany(self->_socket->fd());
++			riotKqTrace('O', self->_debugID, self->_socket->fd(), self->_canSend);
+ 		} while (self->_canSend && !self->_outbox.empty());
+ 	});
+ 
+@@ -119,6 +142,7 @@ int DarlingServer::Kqchan::setup() {
+ 
+ 			kqchanLog.debug() << *self << ": socket has pending incoming messages" << kqchanLog.endLog;
+ 
++			riotKqTrace('I', self->_debugID, self->_socket->fd());
+ 			// receive them all
+ 			while (self->_inbox.receiveMany(self->_socket->fd()));
+ 
+@@ -135,6 +159,7 @@ int DarlingServer::Kqchan::setup() {
+ 			kqchanLog.debug() << *self << ": socket is now writable; sending all pending outgoing messages" << kqchanLog.endLog;
+ 			do {
+ 				self->_canSend = self->_outbox.sendMany(self->_socket->fd());
++			riotKqTrace('O', self->_debugID, self->_socket->fd(), self->_canSend);
+ 			} while (self->_canSend  && !self->_outbox.empty());
+ 		}
+ 	});
+@@ -343,6 +368,7 @@ void DarlingServer::Kqchan::MachPort::_modify(uint64_t receiveBuffer, uint64_t r
+ };
+ 
+ void DarlingServer::Kqchan::MachPort::_read(uint64_t defaultBuffer, uint64_t defaultBufferSize, pid_t nstid) {
++	riotKqTrace('R', _debugID, _socket->fd(), nstid);
+ 	kqchanMachPortLog.debug() << *this << ": received read request with {defaultBuffer=" << defaultBuffer << ",defaultBufferSize=" << defaultBufferSize << "}" << kqchanMachPortLog.endLog;
+ 
+ 	{
+@@ -380,6 +406,7 @@ void DarlingServer::Kqchan::MachPort::_read(uint64_t defaultBuffer, uint64_t def
+ 
+ 	auto self = shared_from_this();
+ 	Thread::kernelAsync([self, thread, defaultBuffer, defaultBufferSize]() {
++		riotKqTrace('K', self->_debugID, self->_socket->fd());
+ 		Message msg(sizeof(dserver_kqchan_reply_mach_port_read_t), 0, self->_checkForEventsAsyncFactory());
+ 
+ 		kqchanMachPortLog.debug() << *self << ": handling read request in microthread" << kqchanMachPortLog.endLog;
+@@ -395,8 +422,11 @@ void DarlingServer::Kqchan::MachPort::_read(uint64_t defaultBuffer, uint64_t def
+ 			reply->header.code = 0xdead;
+ 		}
+ 		Thread::currentThread()->impersonate(nullptr);
++		riotKqTrace('F', self->_debugID, self->_socket->fd(), reply->header.code);
+ 
++		riotKqTrace('P', self->_debugID, self->_socket->fd());
+ 		self->_outbox.push(std::move(msg));
++		riotKqTrace('D', self->_debugID, self->_socket->fd());
+ 
+ 		// now let's send any deferred notifications we might have
+ 		self->_sendDeferredNotification();
+diff --git a/src/logging.cpp b/src/logging.cpp
+index 7b8000f..dbaf832 100644
+--- a/src/logging.cpp
++++ b/src/logging.cpp
+@@ -22,6 +22,8 @@
+ #include <darlingserver/thread.hpp>
+ #include <darlingserver/process.hpp>
+ #include <filesystem>
++#include <cstring>
++#include <cstdlib>
+ #include <fcntl.h>
+ #include <unistd.h>
+ #include <sys/stat.h>
+@@ -45,7 +47,8 @@ DarlingServer::Log::Log(std::string category):
+ 
+ DarlingServer::Log::Stream::Stream(Type type, const Log& log):
+ 	_type(type),
+-	_log(log)
++	_log(log),
++	_buffer(log._enabled(type) ? std::make_unique<std::ostringstream>() : nullptr)
+ 	{};
+ 
+ DarlingServer::Log::Stream::~Stream() {
+@@ -53,17 +56,22 @@ DarlingServer::Log::Stream::~Stream() {
+ };
+ 
+ DarlingServer::Log::Stream& DarlingServer::Log::Stream::operator<<(EndLog value) {
+-	auto str = _buffer.str();
++	if (!_buffer) {
++		return *this;
++	}
++	auto str = _buffer->str();
+ 	if (!str.empty()) {
+ 		_log._log(_type, str);
+-		_buffer.str(std::string());
+-		_buffer.clear();
++		_buffer->str(std::string());
++		_buffer->clear();
+ 	}
+ 	return *this;
+ };
+ 
+ DarlingServer::Log::Stream& DarlingServer::Log::Stream::operator<<(const Loggable& loggable) {
+-	loggable.logToStream(*this);
++	if (_buffer) {
++		loggable.logToStream(*this);
++	}
+ 	return *this;
+ };
+ 
+@@ -98,20 +106,7 @@ std::string DarlingServer::Log::_typeToString(Type type) {
+ 	}
+ };
+ 
+-void DarlingServer::Log::_log(Type type, std::string message) const {
+-	// NOTE: we use POSIX file APIs because we want to append each message to the log file atomically,
+-	//       and as far as i can tell, C++ fstreams provide no such guarantee (that they won't write in chunks).
+-	static int logFile = []() {
+-		std::filesystem::path path(Server::sharedInstance().prefix() + "/private/var/log/dserver.log");
+-		std::filesystem::create_directories(path.parent_path());
+-		return open(path.c_str(), O_WRONLY | O_APPEND | O_CREAT, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+-	}();
+-
+-	static bool logToStderr = []() {
+-		auto val = getenv("DSERVER_LOG_STDERR");
+-		return val && strlen(val) >= 1 && (val[0] == 't' || val[0] == 'T' || val[0] == '1');
+-	}();
+-
++bool DarlingServer::Log::_enabled(Type type) const {
+ 	static Type logMinLevel = []() {
+ 		auto val = getenv("DSERVER_LOG_LEVEL");
+ 		Type level = DEFAULT_LOG_CUTOFF;
+@@ -129,7 +124,24 @@ void DarlingServer::Log::_log(Type type, std::string message) const {
+ 		return level;
+ 	}();
+ 
+-	if ((type < logMinLevel && !_alwaysLog) || logFile < 0) {
++	return _alwaysLog || type >= logMinLevel;
++};
++
++void DarlingServer::Log::_log(Type type, std::string message) const {
++	// NOTE: we use POSIX file APIs because we want to append each message to the log file atomically,
++	//       and as far as i can tell, C++ fstreams provide no such guarantee (that they won't write in chunks).
++	static int logFile = []() {
++		std::filesystem::path path(Server::sharedInstance().prefix() + "/private/var/log/dserver.log");
++		std::filesystem::create_directories(path.parent_path());
++		return open(path.c_str(), O_WRONLY | O_APPEND | O_CREAT, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
++	}();
++
++	static bool logToStderr = []() {
++		auto val = getenv("DSERVER_LOG_STDERR");
++		return val && strlen(val) >= 1 && (val[0] == 't' || val[0] == 'T' || val[0] == '1');
++	}();
++
++	if (!_enabled(type) || logFile < 0) {
+ 		return;
+ 	}
+ 
+diff --git a/src/message.cpp b/src/message.cpp
+index 414c1d6..995e184 100644
+--- a/src/message.cpp
++++ b/src/message.cpp
+@@ -24,6 +24,23 @@
+ #include <new>
+ #include <mutex>
+ #include <system_error>
++#include <pthread.h>
++
++namespace {
++	std::optional<struct ucred> serverCredentials;
++	struct ucred outgoingCredentials() {
++		if (serverCredentials) return *serverCredentials;
++		return {getpid(), getuid(), getgid()};
++	}
++}
++
++void DarlingServer::Message::initializeServerCredentials() {
++	if (serverCredentials) throw std::logic_error("Server credentials already initialized");
++	// A future fork must never send the parent's cached PID from its child.
++	int result = pthread_atfork(nullptr, nullptr, [] { serverCredentials.reset(); });
++	if (result) throw std::system_error(result, std::generic_category(), "pthread_atfork");
++	serverCredentials = outgoingCredentials();
++}
+ 
+ DarlingServer::Address::Address() {
+ 	_address.sun_family = AF_UNIX;
+@@ -65,10 +82,7 @@ DarlingServer::Message::Message(size_t bufferSpace, size_t descriptorSpace, std:
+ 	_controlHeader->cmsg_len = CMSG_LEN(sizeof(struct ucred));
+ 	_controlHeader->cmsg_level = SOL_SOCKET;
+ 	_controlHeader->cmsg_type = SCM_CREDENTIALS;
+-	struct ucred ourCreds;
+-	ourCreds.pid = getpid();
+-	ourCreds.uid = getuid();
+-	ourCreds.gid = getgid();
++	struct ucred ourCreds = outgoingCredentials();
+ 	// the cmsg man page says memcpy should be used with CMSG_DATA instead of direct pointer access
+ 	memcpy(CMSG_DATA(_controlHeader), &ourCreds, sizeof(ourCreds));
+ 
+@@ -348,10 +362,7 @@ void DarlingServer::Message::_ensureCredentialsHeader() {
+ 	credHeader->cmsg_level = SOL_SOCKET;
+ 	credHeader->cmsg_type = SCM_CREDENTIALS;
+ 
+-	struct ucred creds;
+-	creds.pid = getpid();
+-	creds.uid = getuid();
+-	creds.gid = getgid();
++	struct ucred creds = outgoingCredentials();
+ 	memcpy(CMSG_DATA(credHeader), &creds, sizeof(struct ucred));
+ };
+ 
+@@ -496,13 +507,47 @@ std::optional<DarlingServer::Message> DarlingServer::MessageQueue::pop() {
+ 	}
+ };
+ 
++// darling-lol M58ak: log small (control) messages to/from clients so the
++// dserver's request/reply routing can be correlated. Writes to a host-visible
++// path from inside the guest. Size-filtered (<= 64) to keep volume low.
++static void m58ak_log_message(const char* dir, int socket, const struct sockaddr_un* addr, const void* data, size_t size) {
++	/* darling-lol M58aw: log only pthread_canceled (call 33) messages, both
++	 * directions, with the destination address, to see whether the dserver
++	 * emits the replies the client is missing. */
++	if (size < sizeof(int) || data == 0) {
++		return;
++	}
++	if (*(const int*) data != 33) {
++		return;
++	}
++	static FILE* f = nullptr;
++	static unsigned long n = 0;
++	if (!f) {
++		f = fopen("/tmp/opencode/m58ak.log", "a");
++		if (!f) {
++			f = fopen("/Volumes/SystemRoot/tmp/opencode/m58ak.log", "a");
++		}
++	}
++	if (!f || n++ > 300000) {
++		return;
++	}
++	char hex[20];
++	hex[0] = '\0';
++	if (addr) {
++		for (int i = 0; i < 8; ++i) {
++			snprintf(hex + i * 2, 3, "%02x", (unsigned char) addr->sun_path[i]);
++		}
++	}
++	fprintf(f, "M58AK %s sock=%d addr=%s size=%zu\n", dir, socket, hex, size);
++	fflush(f);
++}
++
+ bool DarlingServer::MessageQueue::sendMany(int socket) {
+ 	bool canSendMore = true;
+ 	std::scoped_lock lock(_lock);
+ 	struct mmsghdr mmsgs[16];
+ 	size_t len = 0;
+ 	int ret = 0;
+-
+ 	while (ret >= 0) {
+ 		len = 0;
+ 		for (size_t i = 0; i < _messages.size() && i < sizeof(mmsgs) / sizeof(*mmsgs); ++i) {
+@@ -549,6 +594,7 @@ bool DarlingServer::MessageQueue::sendMany(int socket) {
+ 		}
+ 
+ 		for (size_t i = 0; i < ret; ++i) {
++			m58ak_log_message("send", socket, &_messages.front().address().raw(), _messages.front().data().data(), _messages.front().data().size());
+ 			auto cb = _messages.front().sendNotificationCallback();
+ 			_messages.pop_front();
+ 			if (cb) {
+@@ -591,6 +637,7 @@ bool DarlingServer::MessageQueue::receiveMany(int socket) {
+ 			messages[i].rawHeader() = mmsgs[i].msg_hdr;
+ 			messages[i].data().resize(mmsgs[i].msg_len);
+ 			messages[i].setAddress(Address(*(const struct sockaddr_un*)mmsgs[i].msg_hdr.msg_name, mmsgs[i].msg_hdr.msg_namelen));
++			m58ak_log_message("recv", socket, &messages[i].address().raw(), messages[i].data().data(), messages[i].data().size());
+ 			_messages.push_back(std::move(messages[i]));
+ 		}
+ 	}
+diff --git a/src/process.cpp b/src/process.cpp
+index 9cd7b81..180f372 100644
+--- a/src/process.cpp
++++ b/src/process.cpp
+@@ -25,9 +25,15 @@
+ #include <darlingserver/logging.hpp>
+ 
+ #include <fstream>
++#include <atomic>
+ #include <regex>
++#include <cstdio>
++#include <cstring>
+ 
+ #include <sys/mman.h>
++#include <signal.h>   /* darling-lol M58DS: kill(0) liveness probe */
++#include <stdio.h>    /* darling-lol M58DS: /proc state read */
++#include <string.h>
+ 
+ static DarlingServer::Log processLog("process");
+ 
+@@ -109,6 +115,10 @@ DarlingServer::Process::Process(KernelProcessConstructorTag tag):
+ 
+ DarlingServer::Process::~Process() {
+ 	processLog.info() << *this << ": process being destroyed" << processLog.endLog;
++	if (_mapsFd >= 0) {
++		close(_mapsFd);
++		_mapsFd = -1;
++	}
+ };
+ 
+ DarlingServer::Process::ID DarlingServer::Process::id() const {
+@@ -245,6 +255,44 @@ bool DarlingServer::Process::_readOrWriteMemory(bool isWrite, uintptr_t remoteAd
+ 			<< strerror(code)
+ 			<< ")"
+ 			<< processMemoryAccessLog.endLog;
++		/* darling-lol M58DS: log why the kernel disagrees with isDead(). */
++		{
++			char m58path[64];
++			char m58comm[64] = "?";
++			char m58state = '?';
++			int m58k = kill(id(), 0);
++			int m58kerr = errno;
++			FILE* m58f;
++			size_t m58n;
++			snprintf(m58path, sizeof(m58path), "/proc/%d/comm", (int) id());
++			m58f = fopen(m58path, "r");
++			if (m58f) {
++				if (fgets(m58comm, sizeof(m58comm), m58f)) {
++					m58n = strlen(m58comm);
++					if (m58n && m58comm[m58n - 1] == '\n') m58comm[m58n - 1] = 0;
++				}
++				fclose(m58f);
++			}
++			snprintf(m58path, sizeof(m58path), "/proc/%d/stat", (int) id());
++			m58f = fopen(m58path, "r");
++			if (m58f) {
++				char m58buf[512];
++				if (fgets(m58buf, sizeof(m58buf), m58f)) {
++					char* m58p = strrchr(m58buf, ')');
++					if (m58p && m58p[1] == ' ') m58state = m58p[2];
++				}
++				fclose(m58f);
++			}
++			processMemoryAccessLog.error()
++				<< "M58DS target hostpid=" << id()
++				<< " nsid=" << nsid()
++				<< " isDead=" << (isDead() ? 1 : 0)
++				<< " kill0=" << m58k
++				<< " killerrno=" << m58kerr
++				<< " state=" << m58state
++				<< " comm=" << m58comm
++				<< processMemoryAccessLog.endLog;
++		}
+ 		if (errorCode) {
+ 			*errorCode = code;
+ 		}
+@@ -369,7 +417,18 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
+ 	} else {
+ 		// notify the parent process (if we have one) that we've arrived
+ 		if (auto parent = _parentProcess.lock()) {
+-			dtape_semaphore_up(parent->_dtapeForkWaitSemaphore);
++			/* darling-lol: the parent may already be tearing down (its
++			 * fork-wait semaphore destroyed and nullified in
++			 * notifyDead/kernelAsync, or across exec). A late checkin
++			 * used to up the dead/NULL semaphore -> SIGSEGV *in
++			 * darlingserver*, killing the whole container whenever a
++			 * child (e.g. a Chromium helper) checked in after its
++			 * parent died. Take the parent's lock and skip when gone. */
++			std::unique_lock parentLock(parent->_rwlock);
++			if (parent->_dtapeForkWaitSemaphore != nullptr) {
++				dtape_semaphore_up(parent->_dtapeForkWaitSemaphore);
++			}
++			parentLock.unlock();
+ 			parent->_notifyListeningKqchannels(NOTE_FORK, nsid());
+ 		}
+ 	}
+@@ -465,7 +524,75 @@ DarlingServer::Process::MemoryInfo DarlingServer::Process::memoryInfo() const {
+ 	return info;
+ };
+ 
+-static const std::regex memoryRegionEntryRegex("([0-9a-fA-F]+)\\-([0-9a-fA-F]+)\\s+((?:r|w|x|p|s|\\-)+)\\s+([0-9a-fA-F]+)");
++// parses "start-end perms offset ..." from a `/proc/<pid>/maps` line without std::regex (which is extremely slow here)
++static bool parseMapsLine(const std::string& line, uintptr_t& start, uintptr_t& end, char perms[8], uintptr_t* offset) {
++	unsigned long long s = 0, e = 0, o = 0;
++	char p[8] = {0};
++	if (sscanf(line.c_str(), "%llx-%llx %7s %llx", &s, &e, p, &o) != 4) {
++		return false;
++	}
++	start = s;
++	end = e;
++	memcpy(perms, p, 8);
++	if (offset) {
++		*offset = o;
++	}
++	return true;
++};
++
++// darling-lol: PROCMAP_QUERY (Linux 6.11+) answers "which VMA covers/follows this address" in O(log n)
++// without generating and re-parsing the whole /proc/<pid>/maps text; mach_msg with out-of-line
++// descriptors asked for that on every call and dominated darlingserver CPU. Returns 0 on success,
++// ENOENT when no VMA matches, and -1 when the ioctl is unavailable (callers fall back to the text parser).
++#include <sys/ioctl.h>
++#include <linux/fs.h>
++#include <fcntl.h>
++static std::atomic<bool> procmapQueryUnsupported(false);
++
++// Returns 0 on success, ENOENT when no VMA matches, -1 when the ioctl cannot be used (callers fall back to parsing
++// /proc/<pid>/maps text). The descriptor stays open between lookups; any failure other than "no such mapping" drops it
++// and retries once with a fresh one (after an exec the old descriptor refers to a dead address space).
++int DarlingServer::Process::_procmapQuery(uint64_t address, uint64_t flags, void* result) const {
++	if (procmapQueryUnsupported.load(std::memory_order_relaxed)) {
++		return -1;
++	}
++	auto& query = *static_cast<procmap_query*>(result);
++	std::lock_guard<std::mutex> lock(_mapsMutex);
++	for (int attempt = 0; attempt < 2; ++attempt) {
++		bool fresh = false;
++		if (_mapsFd < 0) {
++			_mapsFd = open(("/proc/" + std::to_string(_pid) + "/maps").c_str(), O_RDONLY | O_CLOEXEC);
++			if (_mapsFd < 0) {
++				return -1;
++			}
++			fresh = true;
++		}
++		memset(&query, 0, sizeof(query));
++		query.size = sizeof(query);
++		query.query_flags = flags;
++		query.query_addr = address;
++		int status = ioctl(_mapsFd, PROCMAP_QUERY, &query);
++		int error = errno;
++		if (status == 0) {
++			return 0;
++		}
++		if (error == ENOENT) {
++			return ENOENT;
++		}
++		if (fresh && (error == ENOTTY || error == EINVAL)) {
++			procmapQueryUnsupported.store(true, std::memory_order_relaxed);
++			close(_mapsFd);
++			_mapsFd = -1;
++			return -1;
++		}
++		close(_mapsFd);
++		_mapsFd = -1;
++		if (fresh) {
++			return -1;
++		}
++	}
++	return -1;
++};
+ 
+ DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInfo(uintptr_t address) const {
+ 	if (isDead()) {
+@@ -473,31 +600,55 @@ DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInf
+ 	}
+ 
+ 	MemoryRegionInfo info;
++
++	{
++		procmap_query query;
++		int status = _procmapQuery(address, 0, &query);
++		if (status == 0) {
++			info.startAddress = query.vma_start;
++			info.pageCount = (query.vma_end - query.vma_start) / sysconf(_SC_PAGESIZE);
++			info.mapOffset = query.vma_offset;
++			info.protection = 0;
++			if (query.vma_flags & PROCMAP_QUERY_VMA_READABLE) {
++				info.protection |= PROT_READ;
++			}
++			if (query.vma_flags & PROCMAP_QUERY_VMA_WRITABLE) {
++				info.protection |= PROT_WRITE;
++			}
++			if (query.vma_flags & PROCMAP_QUERY_VMA_EXECUTABLE) {
++				info.protection |= PROT_EXEC;
++			}
++			info.shared = !!(query.vma_flags & PROCMAP_QUERY_VMA_SHARED);
++			return info;
++		} else if (status == ENOENT) {
++			processLog.warning() << *this << ": Address 0x" << std::hex << address << " not found in \"/proc/" << std::dec << _pid << "/maps\"" << processLog.endLog;
++			throw std::system_error(EFAULT, std::generic_category());
++		}
++	}
++
+ 	std::ifstream file("/proc/" + std::to_string(_pid) + "/maps");
+ 	std::string line;
+ 
+ 	uintptr_t endAddress;
+ 
+ 	while (std::getline(file, line)) {
+-		std::smatch match;
++		char permsBuffer[8];
++		uintptr_t mapOffset = 0;
+ 
+-		if (!std::regex_search(line, match, memoryRegionEntryRegex)) {
++		if (!parseMapsLine(line, info.startAddress, endAddress, permsBuffer, &mapOffset)) {
+ 			processLog.warning() << "Encountered malformed `/proc/<pid>/maps` entry? Definitely a bug (on our part)." << processLog.endLog;
+ 			continue;
+ 		}
+ 
+-		info.startAddress = std::stoul(match[1].str(), nullptr, 16);
+-		endAddress = std::stoul(match[2].str(), nullptr, 16);
+-
+ 		if (endAddress <= address || info.startAddress > address) {
+ 			continue;
+ 		}
+ 
+ 		info.pageCount = (endAddress - info.startAddress) / sysconf(_SC_PAGESIZE);
+ 
+-		info.mapOffset = std::stoul(match[4].str(), nullptr, 16);
++		info.mapOffset = mapOffset;
+ 
+-		auto perms = match[3].str();
++		std::string perms = permsBuffer;
+ 
+ 		info.protection = 0;
+ 
+@@ -657,27 +808,38 @@ void DarlingServer::Process::syncMemory(uintptr_t address, size_t size, int sync
+ 	return thread->syncMemory(address, size, sync_flags);
+ };
+ 
+-static const std::regex memoryRegionEntryAddressRegex("([0-9a-fA-F]+)\\-([0-9a-fA-F]+)");
+-
+ uintptr_t DarlingServer::Process::getNextRegion(uintptr_t address) const {
+ 	if (isDead()) {
+ 		throw std::system_error(ESRCH, std::generic_category(), "dead process; can't call getNextRegion");
+ 	}
+ 
++	{
++		// first region whose start is above `address`: the VMA covering-or-following address + 1, unless
++		// that one already started at or below `address`, in which case ask again from its end
++		procmap_query query;
++		int status = address == UINTPTR_MAX ? ENOENT : _procmapQuery(address + 1, PROCMAP_QUERY_COVERING_OR_NEXT_VMA, &query);
++		if (status == 0 && query.vma_start <= address) {
++			status = _procmapQuery(query.vma_end, PROCMAP_QUERY_COVERING_OR_NEXT_VMA, &query);
++		}
++		if (status == 0) {
++			return query.vma_start;
++		} else if (status == ENOENT) {
++			return 0;
++		}
++	}
++
+ 	std::ifstream file("/proc/" + std::to_string(_pid) + "/maps");
+ 	std::string line;
+ 
+ 	while (std::getline(file, line)) {
+-		std::smatch match;
++		uintptr_t startAddress, endAddress;
++		char permsBuffer[8];
+ 
+-		if (!std::regex_search(line, match, memoryRegionEntryAddressRegex)) {
++		if (!parseMapsLine(line, startAddress, endAddress, permsBuffer, nullptr)) {
+ 			processLog.warning() << "Encountered malformed `/proc/<pid>/maps` entry? Definitely a bug (on our part)." << processLog.endLog;
+ 			continue;
+ 		}
+ 
+-		auto startAddress = std::stoul(match[1].str(), nullptr, 16);
+-		auto endAddress = std::stoul(match[2].str(), nullptr, 16);
+-
+ 		if (startAddress <= address) {
+ 			continue;
+ 		}
+diff --git a/src/server.cpp b/src/server.cpp
+index e502e28..e225510 100644
+--- a/src/server.cpp
++++ b/src/server.cpp
+@@ -28,6 +28,8 @@
+ #include <sys/epoll.h>
+ #include <fcntl.h>
+ #include <system_error>
++#include <cstdio>
++#include <time.h>
+ #include <thread>
+ #include <array>
+ #include <darlingserver/registry.hpp>
+@@ -40,6 +42,44 @@
+ 
+ #include <darlingserver/logging.hpp>
+ 
++/* darling-lol M58F129: bounded work-queue trace.  With the single-threaded
++ * WorkQueue, this proves whether a process's RPCs wait behind another's: push
++ * (enqueue) and run (dequeue) timestamps per guest thread, in one monotonic
++ * clock, land in dserver.log as `M58WQ push|run pid=.. tid=.. t=<us>`. */
++#include <ctime>
++#include <atomic>
++#include <cstdlib>
++
++static bool m634TraceEnabled() {
++ static const bool enabled = [] {
++  const char* value = std::getenv("DARLING_M634_TRACE");
++  return value && value[0] == '1' && value[1] == '\0';
++ }();
++ return enabled;
++}
++
++static uint64_t m58wq_now(void) {
++	struct timespec ts;
++	clock_gettime(CLOCK_MONOTONIC, &ts);
++	return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)(ts.tv_nsec / 1000);
++};
++
++static std::atomic<unsigned long> m58wq_count(0);
++
++static void m58wq_log(const char* what, std::shared_ptr<DarlingServer::Thread> thread) {
++	/* darling-lol M58F151: disabled (per-work-item dserver log overhead) */
++	(void) what;
++	(void) thread;
++#if 0
++	if (m58wq_count.fetch_add(1) >= 200000) return;
++	if (!thread) return;
++	auto proc = thread->process();
++	static const auto log = DarlingServer::Log("M58WQ");
++	log.error() << what << " pid=" << (proc ? proc->id() : -1)
++	            << " tid=" << thread->id() << " t=" << m58wq_now() << log.endLog;
++#endif
++};
++
+ static DarlingServer::Server* sharedInstancePointer = nullptr;
+ 
+ struct DTapeHooks {
+@@ -104,8 +144,44 @@ struct DTapeHooks {
+ 
+ 		std::unique_lock lock(server._timerLock);
+ 
+-		if (!override && server._currentTimerDeadline != 0 && deadline_ns >= server._currentTimerDeadline) {
+-			return;
++		/* darling-lol M634: bounded trace of timer arms to diagnose the
++		 * League-launch wedge (instant semaphore timeouts + RPC storm).
++		 * Rate-limited after the boot burst so launch-time behavior persists. */
++		if (m634TraceEnabled()) {
++			static std::atomic<unsigned> m634ArmCount{0};
++			unsigned seen = m634ArmCount.fetch_add(1);
++			if (seen < 120 || seen % 64 == 0) {
++				struct timespec nowTs = {0, 0};
++				clock_gettime(CLOCK_MONOTONIC, &nowTs);
++				uint64_t nowNs = (uint64_t)nowTs.tv_sec * 1000000000ull + nowTs.tv_nsec;
++				fprintf(stderr, "M634ARM line=%u deadline=%llu override=%d prev=%llu now=%llu delta=%lld\n",
++					seen,
++					(unsigned long long)deadline_ns, (int)override,
++					(unsigned long long)server._currentTimerDeadline,
++					(unsigned long long)nowNs,
++					(long long)((int64_t)deadline_ns - (int64_t)nowNs));
++			}
++		}
++
++		if (!override) {
++			/* darling-lol M634: the software marker races with kernel expiry
++			 * (an arm landing between kernel expiry and the fire read used to
++			 * be skipped, losing that timer forever). Query the kernel's own
++			 * remaining time as the source of truth instead: a zero remaining
++			 * value means the timer is disarmed/consumed and must be armed. */
++			struct itimerspec armedSpec;
++			if (timerfd_gettime(server._timerFD, &armedSpec) == 0
++				&& (armedSpec.it_value.tv_sec != 0 || armedSpec.it_value.tv_nsec != 0)) {
++				struct timespec nowTs = {0, 0};
++				clock_gettime(CLOCK_MONOTONIC, &nowTs);
++				uint64_t armedRemaining = (uint64_t)armedSpec.it_value.tv_sec * 1000000000ull
++					+ (uint64_t)armedSpec.it_value.tv_nsec;
++				uint64_t nowNs = (uint64_t)nowTs.tv_sec * 1000000000ull + nowTs.tv_nsec;
++				uint64_t armedDeadline = nowNs + armedRemaining;
++				if (deadline_ns >= armedDeadline) {
++					return;
++				}
++			}
+ 		}
+ 
+ 		server._currentTimerDeadline = deadline_ns;
+@@ -115,6 +191,11 @@ struct DTapeHooks {
+ 		}
+ 	};
+ 
++	static int dtape_hook_log_enabled(dtape_log_level_t level) {
++		static const auto log = DarlingServer::Log("dtape");
++		return log.levelEnabled(static_cast<int>(level) + 1) ? 1 : 0;
++	};
++
+ 	static void dtape_hook_log(dtape_log_level_t level, const char* message) {
+ 		static const auto log = DarlingServer::Log("dtape");
+ 		auto process = DarlingServer::Process::currentProcess();
+@@ -271,11 +352,23 @@ struct DTapeHooks {
+ 	};
+ 
+ 	static void dtape_hook_task_get_memory_info(void* task_context, dtape_memory_info_t* memory_info) {
+-		auto info = static_cast<DarlingServer::Process*>(task_context)->memoryInfo();
+-		memory_info->virtual_size = info.virtualSize;
+-		memory_info->resident_size = info.residentSize;
+-		memory_info->page_size = info.pageSize;
+-		memory_info->region_count = info.regionCount;
++		/* darling-lol M57: a task_info(TASK_BASIC_INFO) for a process that has
++		 * already exited made memoryInfo() throw std::system_error, which was
++		 * uncaught here and aborted darlingserver, killing the whole session
++		 * (Chromium's renderer/GPU probing dies with "dead process; can't call
++		 * memoryInfo"). Fail soft with zeroes instead. */
++		try {
++			auto info = static_cast<DarlingServer::Process*>(task_context)->memoryInfo();
++			memory_info->virtual_size = info.virtualSize;
++			memory_info->resident_size = info.residentSize;
++			memory_info->page_size = info.pageSize;
++			memory_info->region_count = info.regionCount;
++		} catch (...) {
++			memory_info->virtual_size = 0;
++			memory_info->resident_size = 0;
++			memory_info->page_size = 0;
++			memory_info->region_count = 0;
++		}
+ 	};
+ 
+ 	static bool dtape_hook_task_get_memory_region_info(void* task_context, uintptr_t address, dtape_memory_region_info_t* memory_region_info) {
+@@ -392,6 +485,7 @@ struct DTapeHooks {
+ 		.timer_arm = dtape_hook_timer_arm,
+ 
+ 		.log = dtape_hook_log,
++		.log_enabled = dtape_hook_log_enabled,
+ 		.get_load_info = dtape_hook_get_load_info,
+ 
+ 		.thread_suspend = dtape_hook_thread_suspend,
+@@ -540,6 +634,7 @@ void DarlingServer::Server::start() {
+ 				// TODO: this could be done concurrently
+ 				auto call = DarlingServer::Call::callFromMessage(std::move(*msg));
+ 				if (call) {
++					m58wq_log("push", call->thread());
+ 					_workQueue.push(call->thread());
+ 				}
+ 			}
+@@ -604,6 +699,25 @@ void DarlingServer::Server::start() {
+ 					continue;
+ 				}
+ 
++				/* darling-lol M634: the timer is now consumed; drop the stale
++				 * armed-deadline marker so future arms are not skipped. Also
++				 * trace the fire (rate-limited) to diagnose the launch wedge. */
++				if (m634TraceEnabled()) {
++					static std::atomic<unsigned> m634FireCount{0};
++					unsigned seen = m634FireCount.fetch_add(1);
++					if (seen < 80 || seen % 64 == 0) {
++						struct timespec nowTs = {0, 0};
++						clock_gettime(CLOCK_MONOTONIC, &nowTs);
++						uint64_t nowNs = (uint64_t)nowTs.tv_sec * 1000000000ull + nowTs.tv_nsec;
++						fprintf(stderr, "M634FIRE line=%u exp=%llu prevDeadline=%llu now=%llu\n",
++							seen,
++							(unsigned long long)expirations,
++							(unsigned long long)_currentTimerDeadline,
++							(unsigned long long)nowNs);
++					}
++				}
++				_currentTimerDeadline = 0;
++
+ 				// we're done handling the timerfd;
+ 				// we don't need to lock anymore (and the following call might need to arm the timer again)
+ 				lock.unlock();
+@@ -681,6 +795,7 @@ std::string DarlingServer::Server::prefix() const {
+ };
+ 
+ void DarlingServer::Server::_worker(std::shared_ptr<Thread> thread) {
++	m58wq_log("run", thread);
+ 	thread->doWork();
+ };
+ 

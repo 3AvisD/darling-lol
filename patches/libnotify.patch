@@ -1,0 +1,19 @@
+diff --git a/notifyd/CMakeLists.txt b/notifyd/CMakeLists.txt
+index cc6ee7c..ebbedf4 100644
+--- a/notifyd/CMakeLists.txt
++++ b/notifyd/CMakeLists.txt
+@@ -23,7 +23,13 @@ add_darling_executable(notifyd ${notifyd_sources})
+ target_link_libraries(notifyd system bsm.0)
+ 
+ install(TARGETS notifyd DESTINATION libexec/darling/usr/sbin)
+-# install(FILES com.apple.notifyd.plist DESTINATION libexec/darling/System/Library/LaunchDaemons)
++# darling-lol: notifyd was installed as a binary but its launchd job was
++# commented out, so the Mach service `com.apple.system.notification_center`
++# was never registered. Anything calling notify_register_* (e.g. Chromium's
++# ThermalStateObserverMac via IOPSNotificationCreateRunLoopSource) then got
++# NOTIFY_STATUS_SERVER_NOT_FOUND and logged
++# "unable to register to power notifications. Result: 9".
++install(FILES com.apple.notifyd.plist DESTINATION libexec/darling/System/Library/LaunchDaemons)
+ install(FILES notifyd.8 DESTINATION libexec/darling/usr/share/man/man8)
+ install(FILES notify.conf.MacOSX RENAME notify.conf DESTINATION libexec/darling/private/etc)
+ 

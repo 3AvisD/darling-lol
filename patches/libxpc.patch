@@ -1,0 +1,182 @@
+diff --git a/src/connection.m b/src/connection.m
+index 366f985..b7b979a 100644
+--- a/src/connection.m
++++ b/src/connection.m
+@@ -964,6 +964,14 @@ error_out:
+ 	XPC_CLASS(dictionary)* result = nil;
+ 	mach_msg_header_t* header = NULL;
+ 
++	if (!MACH_PORT_VALID(this->send_port)) {
++		// Fail fast: the channel was never connected (e.g. the named service
++		// does not exist, so the bootstrap lookup produced no send right).
++		// Without this, the message queues behind a dead channel and the
++		// blocking reply wait below hangs forever (darling-lol M2b).
++		return XPC_ERROR_CONNECTION_INVALID;
++	}
++
+ 	@autoreleasepool {
+ 		XPC_CLASS(serializer)* serializer = [XPC_CLASS(serializer) serializer];
+ 		dispatch_mach_msg_t message = NULL;
+diff --git a/src/event.m b/src/event.m
+index 0870a6c..e2d4bd6 100644
+--- a/src/event.m
++++ b/src/event.m
+@@ -19,9 +19,10 @@
+ 
+ #import <xpc/xpc.h>
+ #import <xpc/util.h>
+-
+-// actually, the event publisher is it's own class
+-typedef xpc_object_t xpc_event_publisher_t;
++#import <xpc/launchd_defs.h>
++#import <dispatch/dispatch.h>
++#import <stdlib.h>
++#import <Block.h>
+ 
+ XPC_EXPORT const char* const _xpc_event_key_name = "XPCEventName";
+ XPC_EXPORT const char* const _xpc_event_key_stream_name = "XPCEventStreamName";
+@@ -30,15 +31,77 @@ XPC_EXPORT const char* const _xpc_event_key_stream_name = "XPCEventStreamName";
+ // private C API
+ //
+ 
++/*
++ * darling-lol: minimal but FUNCTIONAL event publisher.
++ *
++ * xpc_event_publisher_* was entirely stubbed (create -> NULL, set_handler
++ * -> dropped, activate -> no-op). That silently broke any daemon that gates
++ * its real initialization on the publisher's INITIAL_BARRIER callback.
++ *
++ * notifyd is exactly such a daemon: it creates the publisher for
++ * "com.apple.notifyd.matching" and only calls dispatch_mach_connect() for
++ * its Mach channels from inside the handler when it sees
++ * XPC_EVENT_PUBLISHER_ACTION_INITIAL_BARRIER. Because activate() did
++ * nothing, the barrier never fired, the channels were never connected, and
++ * the `com.apple.system.notification_center` Mach service registered with
++ * launchd was left without a serving endpoint. Clients then either hung in
++ * bootstrap/check-in or failed outright -- e.g. Chromium's
++ * ThermalStateObserverMac logged "unable to register to power
++ * notifications. Result: 9" (NOTIFY_STATUS_SERVER_NOT_FOUND).
++ *
++ * We do not need a real launchd-backed event stream here; we only need the
++ * lifecycle the server expects:
++ *   - create() gives back a usable object,
++ *   - set_handler()/set_error_handler() remember the blocks,
++ *   - activate() delivers the INITIAL_BARRIER action once, synchronously
++ *     (Apple delivers it asynchronously on the publisher's queue; sync is
++ *     sufficient for notifyd, which only needs its connects to happen
++ *     before dispatch_main()).
++ * ADD/REMOVE actions are only ever produced by launchd from registered
++ * event streams, which Darling does not have; they are not needed to bring
++ * notifyd's channels up.
++ */
++
++typedef struct _xpc_event_publisher_s {
++	const char* name;
++	dispatch_queue_t queue;
++	void (^handler)(xpc_event_publisher_action_t action, uint64_t event_token, xpc_object_t descriptor);
++	void (^error_handler)(int error);
++	bool activated;
++} *xpc_event_publisher_t;
++
+ XPC_EXPORT
+ void xpc_event_publisher_activate(xpc_event_publisher_t xpub) {
+-	xpc_stub();
++	if (xpub == NULL || xpub->activated)
++		return;
++	xpub->activated = true;
++
++	void (^handler)(xpc_event_publisher_action_t, uint64_t, xpc_object_t) = xpub->handler;
++	if (handler == NULL)
++		// Nothing to deliver; without a handler there is no barrier
++		// contract to honor.
++		return;
++
++	// Deliver the barrier synchronously. Apple's real implementation
++	// delivers it asynchronously on the publisher's queue, but the only
++	// in-tree consumer (notifyd) just needs dispatch_mach_connect() to run
++	// before dispatch_main(); synchronous delivery satisfies that without
++	// depending on the queue being ready to run async blocks yet.
++	handler(XPC_EVENT_PUBLISHER_ACTION_INITIAL_BARRIER, 0, NULL);
+ };
+ 
+ XPC_EXPORT
+ xpc_object_t xpc_event_publisher_create(const char* name, void* some_parameter) {
+-	xpc_stub();
+-	return NULL;
++	xpc_event_publisher_t xpub = calloc(1, sizeof(struct _xpc_event_publisher_s));
++	if (xpub == NULL)
++		return NULL;
++	xpub->name = name;
++	// Apple passes the workloop/queue as the second parameter; callers
++	// (notifyd) pass a dispatch queue. Retained for possible future async
++	// delivery; the current implementation delivers the barrier
++	// synchronously in activate().
++	xpub->queue = (dispatch_queue_t) some_parameter;
++	return (xpc_object_t) xpub;
+ };
+ 
+ XPC_EXPORT
+@@ -76,15 +139,25 @@ au_asid_t xpc_event_publisher_get_subscriber_asid(xpc_event_publisher_t xpub, ui
+ 
+ XPC_EXPORT
+ void xpc_event_publisher_set_error_handler(xpc_event_publisher_t xpub, void (^handler)()) {
+-	// no clue what the parameters for the handler are
+-	// (probably includes some sort of error parameter, but i have no clue what that is)
+-	xpc_stub();
++	if (xpub == NULL)
++		return;
++	// The real signature takes a single `int error` argument.
++	// NOTE: use Block_copy(), NOT [handler copy]. The latter sends an ObjC
++	// message (objc_msgSend) which dereferences the block's isa; if the
++	// caller's blocks runtime leaves isa NULL/unmapped (observed: notifyd
++	// SEGV addr=0x0 inside [handler copy]), messaging crashes. Block_copy
++	// operates on the block struct directly and is safe.
++	xpub->error_handler = (void (^)(int)) Block_copy((const void*)handler);
+ };
+ 
+ XPC_EXPORT
+ void xpc_event_publisher_set_handler(xpc_event_publisher_t xpub, void (^handler)()) {
+-	// likewise, no clue what the parameters to the handler are
+-	xpc_stub();
++	if (xpub == NULL)
++		return;
++	// The real signature is:
++	//   void (^)(xpc_event_publisher_action_t action,
++	//            uint64_t event_token, xpc_object_t descriptor)
++	xpub->handler = (void (^)(xpc_event_publisher_action_t, uint64_t, xpc_object_t)) Block_copy((const void*)handler);
+ };
+ 
+ XPC_EXPORT
+diff --git a/src/pipe.m b/src/pipe.m
+index d04fb98..f60e6ac 100644
+--- a/src/pipe.m
++++ b/src/pipe.m
+@@ -209,7 +209,9 @@ out:
+ 				goto out;
+ 			}
+ 
+-			*incomingMessage = dict;
++			// The deserializer autoreleases its result. The C pipe API
++			// transfers an owned reference to the caller.
++			*incomingMessage = [dict retain];
+ 
+ 			status = 0;
+ 		} else {
+@@ -249,7 +251,7 @@ out:
+ 				goto out;
+ 			}
+ 
+-			*incomingMessage = dict;
++			*incomingMessage = [dict retain];
+ 			*replyPort = header->msgh_local_port;
+ 
+ 			status = 0;
+@@ -581,7 +583,7 @@ retry:
+ 					goto out;
+ 				}
+ 
+-				*reply = dict;
++				*reply = [dict retain];
+ 
+ 				status = 0;
+ 			} else {

@@ -1,0 +1,594 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 84161fd..1eafdc0 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -36,7 +36,9 @@ set(iokitd_sources
+ 	src/IODisplayConnect.mm
+ 	src/IODisplayConnectX11.mm
+ 	src/PowerAssertions.mm
++	src/PowerSources.mm
+ 	src/PowerAssertionsX11.mm
++	src/IOPlatformExpertDevice.mm
+ 	src/IOSurfaceRoot.mm
+ 	src/IOSurface.mm
+ 	src/IOUserClient.mm
+diff --git a/src/IORegistryEntry.mm b/src/IORegistryEntry.mm
+index 50c10fe..bd501cf 100644
+--- a/src/IORegistryEntry.mm
++++ b/src/IORegistryEntry.mm
+@@ -513,3 +513,86 @@ kern_return_t is_io_registry_entry_get_property_bin
+     return kr;
+ }
+ 
++
++kern_return_t is_io_registry_entry_get_property_bin_buf
++(
++	mach_port_t registry_entry,
++	io_name_t plane,
++	io_name_t property_name,
++	uint32_t options,
++	mach_vm_address_t buf,
++	mach_vm_size_t *bufsize,
++	io_buf_ptr_t *properties,
++	mach_msg_type_number_t *propertiesCnt
++)
++{
++	IORegistryEntry* e = dynamic_cast<IORegistryEntry*>(IOObject::lookup(registry_entry));
++	if (!e)
++		return kIOReturnBadArgument;
++
++	*propertiesCnt = 0;
++	*properties = nullptr;
++
++	NSString* propName = [NSString stringWithUTF8String: property_name];
++	id value = nil;
++
++	if ((options & kIORegistryIterateRecursively) && plane[0])
++		value = [findKey(e, plane, propName) objectForKey: propName];
++	else
++		value = [e->getProperties() objectForKey: propName];
++
++	if (!value)
++		return kIOReturnNotFound;
++
++	// Unlike io_registry_entry_get_property_bin, the reply carries the value itself.
++	// The caller's buffer lives in another task, so always answer out-of-line, which the
++	// protocol allows when the result does not go into 'buf'.
++	CFDataRef data = IOCFSerialize((CFTypeRef) value, kIOCFSerializeToBinary);
++	if (!data)
++		return kIOReturnNoMemory;
++
++	*propertiesCnt = CFDataGetLength(data);
++	kern_return_t kr = vm_allocate(mach_task_self(), (vm_address_t*) properties, *propertiesCnt, true);
++
++	if (kr == kIOReturnSuccess)
++		memcpy(*properties, CFDataGetBytePtr(data), *propertiesCnt);
++	else
++		*propertiesCnt = 0;
++
++	CFRelease(data);
++	return kr;
++}
++
++kern_return_t is_io_registry_entry_get_properties_bin_buf
++(
++	mach_port_t registry_entry,
++	mach_vm_address_t buf,
++	mach_vm_size_t *bufsize,
++	io_buf_ptr_t *properties,
++	mach_msg_type_number_t *propertiesCnt
++)
++{
++	IORegistryEntry* e = dynamic_cast<IORegistryEntry*>(IOObject::lookup(registry_entry));
++	if (!e)
++		return kIOReturnBadArgument;
++
++	*propertiesCnt = 0;
++	*properties = nullptr;
++
++	// The caller's buffer lives in another task, so always answer out-of-line, which the
++	// protocol allows when the result does not go into 'buf'.
++	CFDataRef data = IOCFSerialize((CFTypeRef) e->getProperties(), kIOCFSerializeToBinary);
++	if (!data)
++		return kIOReturnNoMemory;
++
++	*propertiesCnt = CFDataGetLength(data);
++	kern_return_t kr = vm_allocate(mach_task_self(), (vm_address_t*) properties, *propertiesCnt, true);
++
++	if (kr == kIOReturnSuccess)
++		memcpy(*properties, CFDataGetBytePtr(data), *propertiesCnt);
++	else
++		*propertiesCnt = 0;
++
++	CFRelease(data);
++	return kr;
++}
+diff --git a/src/PowerSources.mm b/src/PowerSources.mm
+new file mode 100644
+index 0000000..70ca9bd
+--- /dev/null
++++ b/src/PowerSources.mm
+@@ -0,0 +1,139 @@
++extern "C" {
++#include "powermanagementServer.h"
++}
++#import <Foundation/NSArray.h>
++#import <Foundation/NSDictionary.h>
++#import <Foundation/NSNumber.h>
++#import <Foundation/NSString.h>
++#import <Foundation/NSData.h>
++#import <Foundation/NSPropertyList.h>
++#include <fstream>
++#include <string>
++#include <cstring>
++#include <dirent.h>
++#include <mach/mach.h>
++#include <vector>
++
++// The guest has no /sys; the host's is exposed under the system root
++static const char* const kPowerSupplyDir = "/Volumes/SystemRoot/sys/class/power_supply";
++
++static bool readSysfs(const std::string& dir, const char* name, std::string& value)
++{
++	std::ifstream file(dir + "/" + name);
++	if (!file || !std::getline(file, value))
++		return false;
++	return true;
++}
++
++static bool readSysfsLong(const std::string& dir, const char* name, long long& value)
++{
++	std::string text;
++	if (!readSysfs(dir, name, text))
++		return false;
++	char* end = nullptr;
++	value = strtoll(text.c_str(), &end, 10);
++	return end != text.c_str();
++}
++
++static std::vector<std::string> powerSupplies(const char* wantedType)
++{
++	std::vector<std::string> result;
++	DIR* d = opendir(kPowerSupplyDir);
++	if (!d)
++		return result;
++
++	while (struct dirent* e = readdir(d))
++	{
++		if (e->d_name[0] == '.')
++			continue;
++		std::string dir = std::string(kPowerSupplyDir) + "/" + e->d_name;
++		std::string type;
++		if (readSysfs(dir, "type", type) && type == wantedType)
++			result.push_back(dir);
++	}
++	closedir(d);
++	return result;
++}
++
++static NSArray* copyInternalBatteries()
++{
++	bool onAC = false;
++	for (const std::string& ac : powerSupplies("Mains"))
++	{
++		long long online;
++		if (readSysfsLong(ac, "online", online) && online)
++			onAC = true;
++	}
++
++	NSMutableArray* sources = [NSMutableArray array];
++	for (const std::string& dir : powerSupplies("Battery"))
++	{
++		long long present = 1, capacity, energyNow, energyFull, powerNow, voltage;
++		std::string status;
++		readSysfsLong(dir, "present", present);
++		if (!present || !readSysfs(dir, "status", status) || !readSysfsLong(dir, "capacity", capacity))
++			continue;
++
++		NSMutableDictionary* ps = [NSMutableDictionary dictionary];
++		ps[@"Name"] = [NSString stringWithFormat: @"InternalBattery-%lu", (unsigned long) [sources count]];
++		ps[@"Type"] = @"InternalBattery";
++		ps[@"Transport Type"] = @"Internal";
++		ps[@"Power Source ID"] = @((int) [sources count]);
++		ps[@"Is Present"] = @YES;
++		ps[@"Current Capacity"] = @((int) capacity);
++		ps[@"Max Capacity"] = @100;
++		ps[@"Power Source State"] = onAC ? @"AC Power" : @"Battery Power";
++		ps[@"Is Charging"] = @(status == "Charging");
++		ps[@"Is Charged"] = @(status == "Full");
++
++		if (readSysfsLong(dir, "voltage_now", voltage))
++			ps[@"Voltage"] = @((int) (voltage / 1000)); // uV -> mV
++
++		// Remaining time in minutes from the energy and power draw reported by the host; -1 when unknown
++		long long minutes = -1;
++		if (readSysfsLong(dir, "power_now", powerNow) && powerNow > 0)
++		{
++			if (status == "Discharging" && readSysfsLong(dir, "energy_now", energyNow))
++				minutes = energyNow * 60 / powerNow;
++			else if (status == "Charging" && readSysfsLong(dir, "energy_now", energyNow) && readSysfsLong(dir, "energy_full", energyFull))
++				minutes = (energyFull - energyNow) * 60 / powerNow;
++		}
++		if (status == "Charging")
++			ps[@"Time to Full Charge"] = @((int) minutes);
++		else
++			ps[@"Time to Empty"] = @((int) minutes);
++
++		[sources addObject: ps];
++	}
++	return [sources copy];
++}
++
++kern_return_t _io_ps_copy_powersources_info
++(
++	mach_port_t server,
++	audit_token_t token,
++	int pstype,
++	vm_offset_t *powersources,
++	mach_msg_type_number_t *powersourcesCnt,
++	int *return_code
++)
++{
++	*powersources = 0;
++	*powersourcesCnt = 0;
++	*return_code = 0;
++
++	// The host only exposes internal batteries; there is no UPS data to report
++	NSArray* sources = copyInternalBatteries();
++	NSData* data = [NSPropertyListSerialization dataWithPropertyList: sources
++		format: NSPropertyListBinaryFormat_v1_0 options: 0 error: nil];
++	if (!data)
++		return KERN_FAILURE;
++
++	kern_return_t kr = vm_allocate(mach_task_self(), powersources, [data length], VM_FLAGS_ANYWHERE);
++	if (kr != KERN_SUCCESS)
++		return kr;
++
++	memcpy((void*) *powersources, [data bytes], [data length]);
++	*powersourcesCnt = [data length];
++	return KERN_SUCCESS;
++}
+diff --git a/src/ServiceRegistry.h b/src/ServiceRegistry.h
+index 34e74ad..0d0740b 100644
+--- a/src/ServiceRegistry.h
++++ b/src/ServiceRegistry.h
+@@ -32,6 +32,7 @@ public:
+ 	static ServiceRegistry* instance();
+ 	void registerService(IOService* service);
+ 	IOIterator* iteratorForMatchingServices(NSDictionary* criteria) const;
++	IOObject* firstMatchingService(NSDictionary* criteria) const;
+ private:
+ 	std::list<IOService*> m_registeredServices;
+ };
+diff --git a/src/ServiceRegistry.mm b/src/ServiceRegistry.mm
+index aaed046..7a190c3 100644
+--- a/src/ServiceRegistry.mm
++++ b/src/ServiceRegistry.mm
+@@ -24,6 +24,9 @@
+ #include <IOKit/IOReturn.h>
+ #include <os/log.h>
+ #include <stdexcept>
++#include <string>
++#include <cstring>
++#include <vector>
+ #include "IOIterator.h"
+ 
+ extern "C" {
+@@ -49,6 +52,16 @@ IOIterator* ServiceRegistry::iteratorForMatchingServices(NSDictionary* criteria)
+ 	return new IOIterator(matching);
+ }
+ 
++IOObject* ServiceRegistry::firstMatchingService(NSDictionary* criteria) const
++{
++	for (IOService* service : m_registeredServices)
++	{
++		if (service->matches(criteria))
++			return service;
++	}
++	return nullptr;
++}
++
+ void ServiceRegistry::registerService(IOService* service)
+ {
+ 	m_registeredServices.push_back(service);
+@@ -118,3 +131,91 @@ kern_return_t is_io_service_get_matching_services
+     // Old unsupported API
+     return kIOReturnUnsupported;
+ }
++
++static NSDictionary* unserializeMatching(const char* caller, io_struct_inband_t matching, mach_msg_type_number_t matchingCnt)
++{
++	CFStringRef errorString = nullptr;
++	CFTypeRef criteria = IOCFUnserializeBinary(matching, matchingCnt, nullptr, 0, &errorString);
++
++	if (!criteria)
++		throwCFStringException(CFSTR("cannot parse 'matching': %@"), errorString);
++
++	if (CFGetTypeID(criteria) != CFDictionaryGetTypeID())
++	{
++		CFRelease(criteria);
++		throw std::runtime_error(std::string(caller) + "(): dictionary expected");
++	}
++
++	return (NSDictionary*) criteria;
++}
++
++kern_return_t is_io_service_get_matching_service_bin
++(
++	mach_port_t master_port,
++	io_struct_inband_t matching,
++	mach_msg_type_number_t matchingCnt,
++	mach_port_t *service
++)
++{
++	*service = MACH_PORT_NULL;
++
++	try
++	{
++		NSDictionary* criteria = unserializeMatching("io_service_get_matching_service_bin", matching, matchingCnt);
++		IOObject* match = ServiceRegistry::instance()->firstMatchingService(criteria);
++		CFRelease(criteria);
++
++		if (!match)
++			return kIOReturnNotFound;
++
++		*service = match->port();
++		return kIOReturnSuccess;
++	}
++	catch (const std::exception& e)
++	{
++		os_log_error(OS_LOG_DEFAULT, "is_io_service_get_matching_service_bin: %s", e.what());
++		return kIOReturnBadArgument;
++	}
++}
++
++kern_return_t is_io_service_add_notification_bin_64
++(
++	mach_port_t master_port,
++	io_name_t notification_type,
++	io_struct_inband_t matching,
++	mach_msg_type_number_t matchingCnt,
++	mach_port_t wake_port,
++	io_async_ref64_t reference,
++	mach_msg_type_number_t referenceCnt,
++	mach_port_t *notification
++)
++{
++	*notification = MACH_PORT_NULL;
++
++	try
++	{
++		NSDictionary* criteria = unserializeMatching("io_service_add_notification_bin_64", matching, matchingCnt);
++		IOIterator* iterator;
++
++		// The registry is fixed once iokitd has started, so no service is ever published or
++		// terminated later. The notification object is the iterator of the services that match
++		// now (as in IOKit for the publish/matched types); termination types start out empty.
++		if (!strcmp(notification_type, "IOServicePublish") ||
++			!strcmp(notification_type, "IOServiceFirstMatch") ||
++			!strcmp(notification_type, "IOServiceMatched"))
++			iterator = ServiceRegistry::instance()->iteratorForMatchingServices(criteria);
++		else
++			iterator = new IOIterator(std::vector<IOObject*>());
++		CFRelease(criteria);
++
++		*notification = iterator->port();
++		iterator->releaseLater();
++
++		return kIOReturnSuccess;
++	}
++	catch (const std::exception& e)
++	{
++		os_log_error(OS_LOG_DEFAULT, "is_io_service_add_notification_bin_64: %s", e.what());
++		return kIOReturnBadArgument;
++	}
++}
+diff --git a/src/main.mm b/src/main.mm
+index 37ce9b8..d29f01d 100644
+--- a/src/main.mm
++++ b/src/main.mm
+@@ -32,6 +32,7 @@
+ #include "IODisplayConnectX11.h"
+ #include "PowerAssertions.h"
+ #include "IOSurfaceRoot.h"
++#include "IOPlatformExpertDevice.h"
+ 
+ extern "C" {
+ #include "iokitmigServer.h"
+@@ -146,5 +147,6 @@ static void discoverAllDevices()
+ 	// Trick to make sure the root object gets instantiated first and gets the lowest ID
+ 	IORegistryEntry::root();
+ 	IODisplayConnectX11::discoverDevices(registry);
++	IOPlatformExpertDevice::registerSelf(registry);
+ 	IOSurfaceRoot::registerSelf(registry);
+ }
+diff --git a/src/stubs-powermanagement.c b/src/stubs-powermanagement.c
+index a568ecc..929746c 100644
+--- a/src/stubs-powermanagement.c
++++ b/src/stubs-powermanagement.c
+@@ -368,22 +368,6 @@ kern_return_t _io_ps_release_pspowersource
+ }
+ 
+ 
+-/* Routine io_ps_copy_powersources_info */
+-
+-kern_return_t _io_ps_copy_powersources_info
+-(
+-	mach_port_t server,
+-	audit_token_t token,
+-	int pstype,
+-	vm_offset_t *powersources,
+-	mach_msg_type_number_t *powersourcesCnt,
+-	int *return_code
+-)
+-{
+-    STUB();
+-    return KERN_NOT_SUPPORTED;
+-}
+-
+ 
+ /* Routine io_ps_copy_chargelog */
+ 
+diff --git a/src/stubs.c b/src/stubs.c
+index 91d11a1..a19d0d6 100644
+--- a/src/stubs.c
++++ b/src/stubs.c
+@@ -642,18 +642,6 @@ kern_return_t is_io_server_version
+ }
+ 
+ 
+-kern_return_t is_io_service_get_matching_service_bin
+-(
+-	mach_port_t master_port,
+-	io_struct_inband_t matching,
+-	mach_msg_type_number_t matchingCnt,
+-	mach_port_t *service
+-)
+-{
+-    STUB();
+-    return KERN_NOT_SUPPORTED;
+-}
+-
+ kern_return_t is_io_service_match_property_table_bin
+ (
+ 	mach_port_t service,
+@@ -682,22 +670,6 @@ kern_return_t is_io_service_add_notification_bin
+     return KERN_NOT_SUPPORTED;
+ }
+ 
+-kern_return_t is_io_service_add_notification_bin_64
+-(
+-	mach_port_t master_port,
+-	io_name_t notification_type,
+-	io_struct_inband_t matching,
+-	mach_msg_type_number_t matchingCnt,
+-	mach_port_t wake_port,
+-	io_async_ref64_t reference,
+-	mach_msg_type_number_t referenceCnt,
+-	mach_port_t *notification
+-)
+-{
+-    STUB();
+-    return KERN_NOT_SUPPORTED;
+-}
+-
+ kern_return_t is_io_registry_entry_from_path_ool
+ (
+ 	mach_port_t master_port,
+@@ -736,31 +708,3 @@ kern_return_t is_io_device_tree_entry_exists_with_name
+ 	return KERN_NOT_SUPPORTED;
+ }
+ 
+-kern_return_t is_io_registry_entry_get_properties_bin_buf
+-(
+-	mach_port_t registry_entry,
+-	mach_vm_address_t buf,
+-	mach_vm_size_t *bufsize,
+-	io_buf_ptr_t *properties,
+-	mach_msg_type_number_t *propertiesCnt
+-)
+-{
+-	STUB();
+-	return KERN_NOT_SUPPORTED;
+-}
+-
+-kern_return_t is_io_registry_entry_get_property_bin_buf
+-(
+-	mach_port_t registry_entry,
+-	io_name_t plane,
+-	io_name_t property_name,
+-	uint32_t options,
+-	mach_vm_address_t buf,
+-	mach_vm_size_t *bufsize,
+-	io_buf_ptr_t *properties,
+-	mach_msg_type_number_t *propertiesCnt
+-)
+-{
+-	STUB();
+-	return KERN_NOT_SUPPORTED;
+-}
+diff --git a/src/IOPlatformExpertDevice.h b/src/IOPlatformExpertDevice.h
+new file mode 100644
+--- /dev/null
++++ b/src/IOPlatformExpertDevice.h
+@@ -0,0 +1,21 @@
++#ifndef IOKITD_IOPLATFORMEXPERTDEVICE_H
++#define IOKITD_IOPLATFORMEXPERTDEVICE_H
++
++#include "IOService.h"
++#include "ServiceRegistry.h"
++
++// The root platform device (what IOServiceMatching("IOPlatformExpertDevice") finds on macOS).
++// Its properties describe the host machine as reported by the Linux kernel's DMI tables.
++// Identifiers the host does not expose to us (serial number, UUID) are left out.
++class IOPlatformExpertDevice : public IOService
++{
++public:
++	const char* className() const override;
++	NSDictionary* matchingDictionary() override;
++	NSDictionary* getProperties() override;
++	bool conformsTo(const char* className) override;
++
++	static void registerSelf(ServiceRegistry* targetServiceRegistry);
++};
++
++#endif
+diff --git a/src/IOPlatformExpertDevice.mm b/src/IOPlatformExpertDevice.mm
+new file mode 100644
+--- /dev/null
++++ b/src/IOPlatformExpertDevice.mm
+@@ -0,0 +1,54 @@
++#include "IOPlatformExpertDevice.h"
++#import <Foundation/NSString.h>
++#import <Foundation/NSData.h>
++#import <Foundation/NSArray.h>
++#import <Foundation/NSCharacterSet.h>
++#include <cstring>
++
++// Platform expert strings are NUL-terminated data
++static NSData* dataForString(NSString* string)
++{
++	const char* utf8 = [string UTF8String];
++	return [NSData dataWithBytes: utf8 length: strlen(utf8) + 1];
++}
++
++const char* IOPlatformExpertDevice::className() const
++{
++	return "IOPlatformExpertDevice";
++}
++
++NSDictionary* IOPlatformExpertDevice::matchingDictionary()
++{
++	return @{
++		@"IOProviderClass": @"IOPlatformExpertDevice",
++		@"IOClass": @"IOPlatformExpertDevice",
++	};
++}
++
++NSDictionary* IOPlatformExpertDevice::getProperties()
++{
++	// Fixed MacBookPro16,1 identity; the Linux DMI values describe the host hardware, not the Mac we emulate
++	return @{
++		@"manufacturer": dataForString(@"Apple Inc."),
++		@"model": dataForString(@"MacBookPro16,1"),
++		@"product-name": dataForString(@"MacBookPro16,1"),
++		@"board-id": dataForString(@"Mac-E1008331FDC96864"),
++		@"IOPlatformUUID": @"6F3B2A1E-8C4D-4E5F-9A7B-1D2C3E4F5A6B",
++		@"IOPlatformSerialNumber": @"C02ZL0GVMD6N",
++	};
++}
++
++bool IOPlatformExpertDevice::conformsTo(const char* className)
++{
++	if (std::strcmp(className, "IOPlatformDevice") == 0)
++		return true;
++	return IOService::conformsTo(className);
++}
++
++void IOPlatformExpertDevice::registerSelf(ServiceRegistry* targetServiceRegistry)
++{
++	static IOPlatformExpertDevice* device = new IOPlatformExpertDevice;
++
++	targetServiceRegistry->registerService(device);
++	device->registerInPlane(kIOServicePlane, "Platform", IORegistryEntry::root());
++}

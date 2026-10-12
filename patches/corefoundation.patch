@@ -1,0 +1,323 @@
+diff --git a/CFError.c b/CFError.c
+index 91b5a2b..0f7b4eb 100644
+--- a/CFError.c
++++ b/CFError.c
+@@ -30,6 +30,7 @@
+ #include <CoreFoundation/CFError_Private.h>
+ #include "CFInternal.h"
+ #include <CoreFoundation/CFPriv.h>
++#include <sys/mman.h> /* darling-lol: mincore for isa validation */
+ #if DEPLOYMENT_TARGET_MACOSX || DEPLOYMENT_TARGET_EMBEDDED
+ #include <mach/mach_error.h>
+ #endif
+@@ -380,6 +381,19 @@ CFDictionaryRef CFErrorCopyUserInfo(CFErrorRef err) {
+ }
+ 
+ CFStringRef CFErrorCopyDescription(CFErrorRef err) {
++#ifdef DARLING
++    /* Fail soft on NULL/unmapped-isa errors: callers (and some Darling
++     * stubs that fail without setting out-errors) can hand us garbage;
++     * the description is logging-only, crashing here helps nothing. */
++    if (!err)
++        return CFSTR("(null error)");
++    {
++        uintptr_t isa = ((CFRuntimeBase *)err)->_cfisa;
++        char vec = 0;
++        if (isa == 0 || mincore((void *)(isa & ~0xFFFUL), 4096, &vec) != 0)
++            return CFSTR("(null error)");
++    }
++#endif
+     if (CF_IS_OBJC(CFErrorGetTypeID(), err)) {  // Since we have to return a retained result, we need to treat the toll-free bridging specially
+         CFStringRef desc = (CFStringRef) CF_OBJC_CALLV((NSError *)err, localizedDescription);
+         return desc ? (CFStringRef)CFRetain(desc) : NULL;    // !!! It really should never return nil.
+@@ -389,6 +403,19 @@ CFStringRef CFErrorCopyDescription(CFErrorRef err) {
+ }
+ 
+ CFStringRef CFErrorCopyFailureReason(CFErrorRef err) {
++#ifdef DARLING
++    /* Fail soft on NULL/unmapped-isa errors: callers (and some Darling
++     * stubs that fail without setting out-errors) can hand us garbage;
++     * the description is logging-only, crashing here helps nothing. */
++    if (!err)
++        return CFSTR("(null error)");
++    {
++        uintptr_t isa = ((CFRuntimeBase *)err)->_cfisa;
++        char vec = 0;
++        if (isa == 0 || mincore((void *)(isa & ~0xFFFUL), 4096, &vec) != 0)
++            return CFSTR("(null error)");
++    }
++#endif
+     if (CF_IS_OBJC(CFErrorGetTypeID(), err)) {  // Since we have to return a retained result, we need to treat the toll-free bridging specially
+         CFStringRef str = (CFStringRef) CF_OBJC_CALLV((NSError *)err, localizedFailureReason);
+         return str ? (CFStringRef)CFRetain(str) : NULL;    // It's possible for localizedFailureReason to return nil
+@@ -398,6 +425,19 @@ CFStringRef CFErrorCopyFailureReason(CFErrorRef err) {
+ }
+ 
+ CFStringRef CFErrorCopyRecoverySuggestion(CFErrorRef err) {
++#ifdef DARLING
++    /* Fail soft on NULL/unmapped-isa errors: callers (and some Darling
++     * stubs that fail without setting out-errors) can hand us garbage;
++     * the description is logging-only, crashing here helps nothing. */
++    if (!err)
++        return CFSTR("(null error)");
++    {
++        uintptr_t isa = ((CFRuntimeBase *)err)->_cfisa;
++        char vec = 0;
++        if (isa == 0 || mincore((void *)(isa & ~0xFFFUL), 4096, &vec) != 0)
++            return CFSTR("(null error)");
++    }
++#endif
+     if (CF_IS_OBJC(CFErrorGetTypeID(), err)) {  // Since we have to return a retained result, we need to treat the toll-free bridging specially
+         CFStringRef str = (CFStringRef) CF_OBJC_CALLV((NSError *)err, localizedRecoverySuggestion);
+         return str ? (CFStringRef)CFRetain(str) : NULL;    // It's possible for localizedRecoverySuggestion to return nil
+diff --git a/CFRunLoop.c b/CFRunLoop.c
+index e932ea5..522bc72 100644
+--- a/CFRunLoop.c
++++ b/CFRunLoop.c
+@@ -27,6 +27,7 @@
+ */
+ 
+ #include <CoreFoundation/CFRunLoop.h>
++extern int __simple_printf(const char *, ...); /* darling-lol M58F20 */
+ #include <CoreFoundation/CFSet.h>
+ #include <CoreFoundation/CFBag.h>
+ #include <CoreFoundation/CFNumber.h>
+@@ -38,6 +39,14 @@
+ #include <pthread.h>
+ #include <dispatch/dispatch.h>
+ 
++/* Opt-in bounded idle waits while investigating lost Mach run-loop wakeups.
++ * Read configuration at load time, never from syscall wrappers. */
++static Boolean darlingBoundedRunLoopWait;
++__attribute__((constructor)) static void darlingConfigureRunLoopWait(void) {
++    const char *value = getenv("RCLOL_CF_POLL");
++    darlingBoundedRunLoopWait = value && value[0] == '1';
++}
++
+ 
+ #if DEPLOYMENT_TARGET_WINDOWS
+ #include <typeinfo.h>
+@@ -2209,6 +2218,8 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
+ #define TIMEOUT_INFINITY (~(mach_msg_timeout_t)0)
+ 
+ static Boolean __CFRunLoopServiceMachPort(mach_port_name_t port, mach_msg_header_t **buffer, size_t buffer_size, mach_port_t *livePort, mach_msg_timeout_t timeout, voucher_mach_msg_state_t *voucherState, voucher_t *voucherCopy) {
++    if (darlingBoundedRunLoopWait && timeout == TIMEOUT_INFINITY)
++        timeout = 10;
+     Boolean originalBuffer = true;
+     kern_return_t ret = KERN_SUCCESS;
+     for (;;) {		/* In that sleep of death what nightmares may come ... */
+@@ -2417,6 +2428,11 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
+ 
+         Boolean poll = sourceHandledThisLoop || (0ULL == timeout_context->termTSR);
+ 
++        // darling-lol: every Mach port-set change and receive is a synchronous round trip to darlingserver here.
++        // A zero-timeout pass that has just polled the dispatch port on its own does not need to put that same
++        // port into the wait set (insert) and take it out again (extract) around the non-blocking set poll: a
++        // message that lands in between is picked up by the very next pass.
++        Boolean darlingSkipDispatchSet = poll && (MACH_PORT_NULL != dispatchPort) && !didDispatchPortLastTime;
+         if (MACH_PORT_NULL != dispatchPort && !didDispatchPortLastTime) {
+ #if DEPLOYMENT_TARGET_MACOSX || DEPLOYMENT_TARGET_EMBEDDED || DEPLOYMENT_TARGET_EMBEDDED_MINI
+             msg = (mach_msg_header_t *)msg_buffer;
+@@ -2440,7 +2456,7 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
+         // iteration, as this mode could be run re-entrantly and we don't
+         // want these ports to get serviced.
+ 
+-        __CFPortSetInsert(dispatchPort, waitSet);
++        if (!darlingSkipDispatchSet) __CFPortSetInsert(dispatchPort, waitSet);
+         
+ 	__CFRunLoopModeUnlock(rlm);
+ 	__CFRunLoopUnlock(rl);
+@@ -2500,7 +2516,7 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
+         // want these ports to get serviced. Also, we don't want them left
+         // in there if this function returns.
+ 
+-        __CFPortSetRemove(dispatchPort, waitSet);
++        if (!darlingSkipDispatchSet) __CFPortSetRemove(dispatchPort, waitSet);
+         
+         __CFRunLoopSetIgnoreWakeUps(rl);
+ 
+@@ -2550,7 +2566,11 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
+ #endif
+         if (MACH_PORT_NULL == livePort) {
+             CFRUNLOOP_WAKEUP_FOR_NOTHING();
+-            // handle nothing
++            /* A bounded wait or zero-timeout poll must check due timers when
++             * their Mach notification was missed. Otherwise AppKit observes
++             * an overdue timer, skips its idle wait, and polls forever. */
++            if (darlingBoundedRunLoopWait || poll)
++                __CFRunLoopDoTimers(rl, rlm, mach_absolute_time());
+         } else if (livePort == rl->_wakeUpPort) {
+             CFRUNLOOP_WAKEUP_FOR_WAKEUP();
+             // do nothing on Mac OS
+@@ -2719,21 +2739,46 @@ void CFRunLoopWakeUp(CFRunLoopRef rl) {
+     CHECK_FOR_FORK();
+     // This lock is crucial to ignorable wakeups, do not remove it.
+     __CFRunLoopLock(rl);
++    /* darling-lol M58F32: do NOT drop the wakeup when ignoreWakeUps is set.
++     *
++     * The upstream guard skips sending the wake while the runloop is in its
++     * post-wait "handling" phase (flag set at CFRunLoop.c ~2514/2521, cleared
++     * only before the next Mach wait at ~2400).  On macOS that window is short,
++     * so a skipped wake is harmless - the runloop is already awake and about to
++     * run its sources.  Under Darling the browser main thread's handling phase
++     * can be very long (the browser loop runs seconds-late/starves; see the
++     * M58n/M58o/M58ad findings).  In that state a cross-thread PostTask onto the
++     * main thread's TASK_ENVIRONMENT_DEFAULT_TQ schedules exactly this wake, and
++     * dropping it means the queued task is not noticed until the runloop next
++     * parks and an unrelated event wakes it - which is the observed black-window
++     * defect (M58f25: no WAKE_SEND at the notification moment; M58f31: 6 dropped
++     * wakes on the CrBrowserMain runloop).
++     *
++     * The send is deliberately unconditional below ("we don't want to lose a
++     * wakeup"), and the wake-up port queue length is 1, so an extra wake while
++     * handling is harmless (it coalesces).  We therefore fall through to send it
++     * even when the flag is set, instead of returning early. */
++#if 0
+     if (__CFRunLoopIsIgnoringWakeUps(rl)) {
+         __CFRunLoopUnlock(rl);
+         return;
+     }
++#endif
+ #if DEPLOYMENT_TARGET_MACOSX || DEPLOYMENT_TARGET_EMBEDDED || DEPLOYMENT_TARGET_EMBEDDED_MINI
+     kern_return_t ret;
+     /* We unconditionally try to send the message, since we don't want
+      * to lose a wakeup, but the send may fail if there is already a
+      * wakeup pending, since the queue length is 1. */
+-    ret = __CFSendTrivialMachMessage(rl->_wakeUpPort, 0, MACH_SEND_TIMEOUT, 0);
++    /* darling-lol: the send is a darlingserver round trip (~50 us); do it after dropping the run loop lock so other
++     * threads (including the run loop's own thread) do not block on the lock for the duration of the RPC. */
++    mach_port_t wakePort = rl->_wakeUpPort;
++    __CFRunLoopUnlock(rl);
++    ret = __CFSendTrivialMachMessage(wakePort, 0, MACH_SEND_TIMEOUT, 0);
+     if (ret != MACH_MSG_SUCCESS && ret != MACH_SEND_TIMED_OUT) CRASH("*** Unable to send message to wake up port. (%d) ***", ret);
+ #elif DEPLOYMENT_TARGET_WINDOWS
+     SetEvent(rl->_wakeUpPort);
+-#endif
+     __CFRunLoopUnlock(rl);
++#endif
+ }
+ 
+ void CFRunLoopStop(CFRunLoopRef rl) {
+@@ -2828,6 +2873,10 @@ void CFRunLoopPerformBlock(CFRunLoopRef rl, CFTypeRef mode, void (^block)(void))
+ 
+ Boolean CFRunLoopContainsSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStringRef modeName) {
+     CHECK_FOR_FORK();
++#ifdef DARLING
++    /* See CFRunLoopAddSource: NULL sources are never contained. */
++    if (NULL == rls) return false;
++#endif
+     CFRunLoopModeRef rlm;
+     Boolean hasValue = false;
+     __CFRunLoopLock(rl);
+@@ -2849,6 +2898,13 @@ Boolean CFRunLoopContainsSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStrin
+ void CFRunLoopAddSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStringRef modeName) {	/* DOES CALLOUT */
+     CHECK_FOR_FORK();
+     if (__CFRunLoopIsDeallocating(rl)) return;
++#ifdef DARLING
++    /* Darling's IOKit has no iokitd, so notification-port lookups can
++     * legitimately yield NULL where Apple always returns a port.
++     * Ignore NULL sources instead of crashing (matches the fail-soft
++     * guards in IOKitUser). */
++    if (NULL == rls) return;
++#endif
+     if (!__CFIsValid(rls)) return;
+     Boolean doVer0Callout = false;
+     __CFRunLoopLock(rl);
+@@ -2910,6 +2966,10 @@ void CFRunLoopAddSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStringRef mod
+ 
+ void CFRunLoopRemoveSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStringRef modeName) {	/* DOES CALLOUT */
+     CHECK_FOR_FORK();
++#ifdef DARLING
++    /* See CFRunLoopAddSource: ignore NULL sources. */
++    if (NULL == rls) return;
++#endif
+     Boolean doVer0Callout = false, doRLSRelease = false;
+     __CFRunLoopLock(rl);
+     if (modeName == kCFRunLoopCommonModes) {
+@@ -3432,6 +3492,12 @@ void CFRunLoopSourceSignal(CFRunLoopSourceRef rls) {
+ 	__CFRunLoopSourceSetSignaled(rls);
+     }
+     __CFRunLoopSourceUnlock(rls);
++    #if 0 /* darling-lol: keep hot source-signal tracing off by default. */
++    { /* darling-lol M58F25: source-signal trace (bounded) */
++        static unsigned long _m58f25 = 0;
++        if (_m58f25++ < 4000) __simple_printf("M58F25 SIG_SRC rls=%p tid=0x%x\n", (void*)rls, (unsigned)pthread_mach_thread_np(pthread_self()));
++    }
++    #endif
+ }
+ 
+ Boolean CFRunLoopSourceIsSignalled(CFRunLoopSourceRef rls) {
+@@ -3966,4 +4032,3 @@ void CFRunLoopTimerSetTolerance(CFRunLoopTimerRef rlt, CFTimeInterval tolerance)
+     }
+ #endif
+ }
+-
+diff --git a/CFString.c b/CFString.c
+index 162403a..b9ad8a0 100644
+--- a/CFString.c
++++ b/CFString.c
+@@ -6572,3 +6572,24 @@ void CFShowStr(CFStringRef str) {
+ #undef HANGUL_TCOUNT
+ #undef HANGUL_NCOUNT
+ 
++
++/* Darling has no locale hyphenation dictionaries. Advertise that capability
++ * truthfully instead of leaving the macOS APIs absent (which aborts callers
++ * at lazy symbol binding). Ordinary line wrapping remains available. */
++Boolean CFStringIsHyphenationAvailableForLocale(CFLocaleRef locale) {
++    (void)locale;
++    return false;
++}
++
++CFIndex CFStringGetHyphenationLocationBeforeIndex(CFStringRef string,
++        CFIndex location, CFRange limitRange, CFOptionFlags options,
++        CFLocaleRef locale, UTF32Char *character) {
++    (void)string;
++    (void)location;
++    (void)limitRange;
++    (void)options;
++    (void)locale;
++    if (character != NULL)
++        *character = 0;
++    return kCFNotFound;
++}
+diff --git a/NSArray.m b/NSArray.m
+index 30ac9df..b389210 100644
+--- a/NSArray.m
++++ b/NSArray.m
+@@ -1232,6 +1232,15 @@ SINGLETON_RR()
+     return success;
+ }
+ 
++- (BOOL)writeToURL:(NSURL *)url error:(NSError **)error
++{
++    BOOL success = [self writeToURL:url atomically:YES];
++    if (!success && error != NULL) {
++        *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileWriteUnknownError userInfo:nil];
++    }
++    return success;
++}
++
+ - (void)makeObjectsPerformSelector:(SEL)sel
+ {
+     [self makeObjectsPerformSelector:sel withObject:nil];
+diff --git a/NSDictionary.m b/NSDictionary.m
+index a3da56a..4678733 100644
+--- a/NSDictionary.m
++++ b/NSDictionary.m
+@@ -986,6 +986,15 @@ static NSString *_getDescription(id obj, id locale, int level)
+     return success;
+ }
+ 
++- (BOOL)writeToURL:(NSURL *)url error:(NSError **)error
++{
++    BOOL success = [self writeToURL:url atomically:YES];
++    if (!success && error != NULL) {
++        *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileWriteUnknownError userInfo:nil];
++    }
++    return success;
++}
++
+ - (NSArray *)keysSortedByValueUsingSelector:(SEL)comparator
+ {
+     return [[self allKeys] sortedArrayUsingComparator:^NSComparisonResult(id obj1, id obj2) {

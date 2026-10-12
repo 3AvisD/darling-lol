@@ -1,0 +1,67 @@
+diff --git a/src/internal.h b/src/internal.h
+index 28eb2ef..c2c0435 100644
+--- a/src/internal.h
++++ b/src/internal.h
+@@ -146,6 +146,10 @@ malloc_traced(void)
+ 	return malloc_tracing_enabled;
+ }
+ 
++#if defined(DARLING) && defined(__x86_64__)
++MALLOC_NOEXPORT uint32_t malloc_cpu_number_native(void);
++#endif
++
+ static inline uint32_t
+ _malloc_cpu_number(void)
+ {
+@@ -153,6 +157,8 @@ _malloc_cpu_number(void)
+ 	size_t n;
+ 	pthread_cpu_number_np(&n);
+ 	return (uint32_t)n;
++#elif defined(DARLING) && defined(__x86_64__)
++    return malloc_cpu_number_native();
+ #else
+ 	return _os_cpu_number();
+ #endif
+diff --git a/src/malloc.c b/src/malloc.c
+index c6c2a5a..b882aba 100644
+--- a/src/malloc.c
++++ b/src/malloc.c
+@@ -23,6 +23,38 @@
+ 
+ #include "internal.h"
+ 
++#if defined(DARLING) && defined(__x86_64__)
++#include <elfcalls.h>
++extern struct elf_calls* _elfcalls;
++
++// Only local, valid output pointers are passed to the vDSO. The public raw
++// syscall wrapper keeps its original EFAULT behavior. Query the CPU afresh
++// on every allocation: an allocating thread may migrate at any time.
++MALLOC_NOEXPORT uint32_t malloc_cpu_number_native(void) {
++    static void* cached;
++    void* function = __atomic_load_n(&cached, __ATOMIC_ACQUIRE);
++    if (!function && _elfcalls) {
++        void* expected = 0;
++        // Never wait during allocator recursion or concurrent initialization.
++        if (__atomic_compare_exchange_n(&cached, &expected, (void*)-1, 0,
++                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
++            void* libc = _elfcalls->dlopen("libc.so.6");
++            void* vdso = _elfcalls->dlopen("linux-vdso.so.1");
++            void* (*lookup)(void*, const char*, const char*) = libc ?
++                (void* (*)(void*, const char*, const char*))_elfcalls->dlsym(libc, "dlvsym") : 0;
++            function = lookup && vdso ? lookup(vdso, "__vdso_getcpu", "LINUX_2.6") : 0;
++            __atomic_store_n(&cached, function ? function : (void*)-1, __ATOMIC_RELEASE);
++        } else function = expected;
++    }
++    if (function && function != (void*)-1) {
++        unsigned cpu = 0;
++        if (((int (*)(unsigned*, unsigned*, void*))function)(&cpu, 0, 0) == 0)
++            return cpu;
++    }
++    return _os_cpu_number();
++}
++#endif
++
+ #if TARGET_OS_IPHONE
+ // malloc_report(ASL_LEVEL_INFO...) on iOS doesn't show up in the Xcode Console log of the device,
+ // but ASL_LEVEL_NOTICE does.  So raising the log level is helpful.

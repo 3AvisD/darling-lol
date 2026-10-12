@@ -1,0 +1,190 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 54d2843..b6ec62e 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -127,3 +127,12 @@ if (BUILD_TARGET_64BIT)
+ endif (BUILD_TARGET_64BIT)
+ 
+ install(TARGETS platform DESTINATION libexec/darling/usr/lib/system)
++
++# These primitives are on software video/rendering hot paths even in an
++# otherwise unoptimized development build. Disable builtin recognition so
++# optimizing their loops cannot introduce recursive libc calls.
++set_source_files_properties(
++    src/string/generic/memmove.c
++    src/string/generic/memset_pattern.c
++    src/string/generic/bzero.c
++    PROPERTIES COMPILE_OPTIONS "-O2;-fno-builtin")
+diff --git a/src/string/generic/memcmp.c b/src/string/generic/memcmp.c
+index fd4311d..34e52aa 100644
+--- a/src/string/generic/memcmp.c
++++ b/src/string/generic/memcmp.c
+@@ -34,6 +34,79 @@
+ 
+ #if !_PLATFORM_OPTIMIZED_MEMCMP
+ 
++#if defined(__x86_64__)
++#include <emmintrin.h>
++
++// The byte loop below was 12% of the League main thread (the game compares buffers every frame, most of them
++// shorter than 16 bytes). Blocks are compared with SSE2 (always present on x86_64) and the remainder with
++// overlapping unaligned loads; no read goes past either buffer.
++typedef unsigned long long __attribute__((aligned(1), may_alias)) platform_u64u;
++typedef unsigned int __attribute__((aligned(1), may_alias)) platform_u32u;
++
++static inline int
++platform_memcmp16(const unsigned char *p1, const unsigned char *p2)
++{
++	const __m128i a = _mm_loadu_si128((const __m128i *)p1);
++	const __m128i b = _mm_loadu_si128((const __m128i *)p2);
++	const unsigned equal = (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(a, b));
++
++	if (equal != 0xffffu) {
++		const unsigned i = (unsigned)__builtin_ctz(~equal);
++		return (p1[i] - p2[i]);
++	}
++	return (0);
++}
++
++int
++_platform_memcmp(const void *s1, const void *s2, size_t n)
++{
++	const unsigned char *p1 = s1, *p2 = s2;
++
++	if (n >= 16) {
++		int r;
++
++		do {
++			if ((r = platform_memcmp16(p1, p2)) != 0)
++				return (r);
++			p1 += 16; p2 += 16; n -= 16;
++		} while (n >= 16);
++		// the last (possibly overlapping) 16 bytes
++		return (n != 0 ? platform_memcmp16(p1 + n - 16, p2 + n - 16) : 0);
++	}
++	if (n >= 8) {
++		unsigned long long x = *(const platform_u64u *)p1 ^ *(const platform_u64u *)p2;
++		unsigned i;
++
++		if (x == 0) {
++			p1 += n - 8; p2 += n - 8;
++			x = *(const platform_u64u *)p1 ^ *(const platform_u64u *)p2;
++			if (x == 0)
++				return (0);
++		}
++		i = (unsigned)__builtin_ctzll(x) >> 3;
++		return (p1[i] - p2[i]);
++	}
++	if (n >= 4) {
++		unsigned x = *(const platform_u32u *)p1 ^ *(const platform_u32u *)p2;
++		unsigned i;
++
++		if (x == 0) {
++			p1 += n - 4; p2 += n - 4;
++			x = *(const platform_u32u *)p1 ^ *(const platform_u32u *)p2;
++			if (x == 0)
++				return (0);
++		}
++		i = (unsigned)__builtin_ctz(x) >> 3;
++		return (p1[i] - p2[i]);
++	}
++	while (n != 0) {
++		if (*p1 != *p2)
++			return (*p1 - *p2);
++		++p1; ++p2; --n;
++	}
++	return (0);
++}
++#else
+ int
+ _platform_memcmp(const void *s1, const void *s2, size_t n)
+ {
+@@ -48,6 +121,8 @@ _platform_memcmp(const void *s1, const void *s2, size_t n)
+ 	return (0);
+ }
+ 
++#endif
++
+ #if VARIANT_STATIC
+ int
+ memcmp(const void *s1, const void *s2, size_t n)
+diff --git a/src/string/generic/memset_pattern.c b/src/string/generic/memset_pattern.c
+index 94aa085..0966fb7 100644
+--- a/src/string/generic/memset_pattern.c
++++ b/src/string/generic/memset_pattern.c
+@@ -23,20 +23,32 @@
+ 
+ #include <platform/string.h>
+ 
++/* Snapshot the pattern once, then double the initialized region. This also
++ * handles a pattern stored inside the destination without changing its value.
++ * Large software video frames must not make one memmove call per pixel. */
++static void fill_pattern(void *buffer, const void *pattern, size_t length,
++                         size_t pattern_size)
++{
++    unsigned char saved[16];
++    unsigned char *destination = buffer;
++    if (!length) return;
++    _platform_memmove(saved, pattern, pattern_size);
++    size_t initialized = length < pattern_size ? length : pattern_size;
++    _platform_memmove(destination, saved, initialized);
++    while (initialized < length) {
++        size_t remaining = length - initialized;
++        size_t chunk = initialized < remaining ? initialized : remaining;
++        _platform_memmove(destination + initialized, destination, chunk);
++        initialized += chunk;
++    }
++}
++
+ #if !_PLATFORM_OPTIMIZED_MEMSET_PATTERN4
+ 
+ void
+ _platform_memset_pattern4(void *b, const void *pattern4, size_t len)
+ {
+-	char * start = (char *)b;
+-	char * p = (char *)b;
+-	while ((start + len) - p >= 4) {
+-		_platform_memmove(p, pattern4, 4);
+-		p += 4;
+-	}
+-	if ((start + len) - p != 0) {
+-		_platform_memmove(p, pattern4, (start + len) - p);
+-	}
++    fill_pattern(b, pattern4, len, 4);
+ }
+ 
+ #if VARIANT_STATIC
+@@ -55,15 +67,7 @@ memset_pattern4(void *b, const void *pattern4, size_t len)
+ void
+ _platform_memset_pattern8(void *b, const void *pattern8, size_t len)
+ {
+-	char * start = (char *)b;
+-	char * p = (char *)b;
+-	while ((start + len) - p >= 8) {
+-		_platform_memmove(p, pattern8, 8);
+-		p += 8;
+-	}
+-	if ((start + len) - p != 0) {
+-		_platform_memmove(p, pattern8, (start + len) - p);
+-	}
++    fill_pattern(b, pattern8, len, 8);
+ }
+ 
+ #if VARIANT_STATIC
+@@ -82,15 +86,7 @@ memset_pattern8(void *b, const void *pattern8, size_t len)
+ void
+ _platform_memset_pattern16(void *b, const void *pattern16, size_t len)
+ {
+-	char * start = (char *)b;
+-	char * p = (char *)b;
+-	while ((start + len) - p >= 16) {
+-		_platform_memmove(p, pattern16, 16);
+-		p += 16;
+-	}
+-	if ((start + len) - p != 0) {
+-		_platform_memmove(p, pattern16, (start + len) - p);
+-	}
++    fill_pattern(b, pattern16, len, 16);
+ }
+ 
+ #if VARIANT_STATIC

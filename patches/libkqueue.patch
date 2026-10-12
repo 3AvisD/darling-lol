@@ -1,0 +1,617 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index b9cf3f8..62e11d0 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -31,7 +31,12 @@ if (DARLING)
+ 	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -nostdinc -DHAVE_SYS_EVENTFD_H -DHAVE_SYS_SIGNALFD_H -DHAVE_SYS_TIMERFD_H -ggdb -O0")
+ 
+ 	#add_definitions(-DKERNEL_PRIVATE)
+-	#add_definitions(-Dkqueue=kqueue_impl -Dkevent=kevent_impl -Dkevent64=kevent64_impl)
++	# darling-lol: enable kqueue emulation (was stubbed ENOSYS, breaking
++	# dispatch sources, FilePathWatcher, and socket servers). Maps the
++	# public API to the _impl entry points that override libsystem_kernel's
++	# weak stubs. (Deliberately NOT mapping close=__close_for_kqueue yet;
++	# evaluate fd-lifecycle tracking separately.)
++	add_definitions(-Dkqueue=kqueue_impl -Dkevent=kevent_impl -Dkevent64=kevent64_impl)
+ 	#add_definitions(-Dclose=__close_for_kqueue)
+ endif (DARLING)
+ 
+diff --git a/src/common/filter.c b/src/common/filter.c
+index a9a6512..f324b41 100644
+--- a/src/common/filter.c
++++ b/src/common/filter.c
+@@ -125,11 +125,14 @@ filter_unregister_all(struct kqueue *kq)
+         if (kq->kq_filt[i].kf_id == 0)
+             continue;
+ 
+-        if (kq->kq_filt[i].kf_destroy != NULL) 
+-            kq->kq_filt[i].kf_destroy(&kq->kq_filt[i]);
++        /* Closing the queue owns teardown of every remaining registration,
++         * including the native socket retained by a Mach-port knote. */
++        struct knote *kn;
++        while ((kn = RB_ROOT(&kq->kq_filt[i].kf_knote)) != NULL)
++            knote_delete(&kq->kq_filt[i], kn);
+ 
+-        //XXX-FIXME
+-        //knote_free_all(&kq->kq_filt[i]);
++        if (kq->kq_filt[i].kf_destroy != NULL)
++            kq->kq_filt[i].kf_destroy(&kq->kq_filt[i]);
+ 
+         if (kqops.filter_free != NULL)
+             kqops.filter_free(kq, &kq->kq_filt[i]);
+diff --git a/src/common/kevent.c b/src/common/kevent.c
+index f5d53a2..ca91b33 100644
+--- a/src/common/kevent.c
++++ b/src/common/kevent.c
+@@ -27,6 +27,8 @@
+ #include <string.h>
+ 
+ #include "private.h"
++#include <darling/emulation/common/simple.h>
++#define LOLKQ(...) do { } while (0)
+ 
+ static const char *
+ kevent_filter_dump(const struct kevent64_s *kev)
+@@ -127,7 +129,9 @@ kevent_copyin_one(struct kqueue *kq, const struct kevent64_s *src)
+ 
+     dbg_printf("src=%s", kevent_dump(src));
+ 
+-    kn = knote_lookup(filt, src->ident);
++    if((src->filter==EVFILT_READ || src->filter==EVFILT_WRITE) && (src->flags&EV_UDATA_SPECIFIC))
++        kn=knote_lookup_fd_specific(filt,src->ident,src->udata);
++    else kn = knote_lookup(filt, src->ident);
+     dbg_printf("knote_lookup: ident %d == %p", (int)src->ident, kn);
+     if (kn == NULL) {
+         if (src->flags & EV_ADD) {
+@@ -170,6 +174,16 @@ kevent_copyin_one(struct kqueue *kq, const struct kevent64_s *src)
+         }
+     }
+ 
++    /* A delivered dispatch2 event still owns its userdata until acknowledged.
++     * Match XNU: a plain delete of a disabled source defers reclamation. */
++    if ((src->flags & EV_DELETE) && !(src->flags & EV_ENABLE) &&
++        (kn->kev.flags & EV_DISPATCH2) == EV_DISPATCH2 &&
++        (kn->kev.flags & EV_DISABLE)) {
++        kn->kn_flags |= KNFL_DEFER_DELETE;
++        errno = EINPROGRESS;
++        return (-1);
++    }
++
+     if ((src->flags & EV_DELETE) || ((kn->kn_flags & KNFL_DEFER_DELETE) && (src->flags & EV_ENABLE))) {
+         rv = knote_delete(filt, kn);
+         dbg_printf("knote_delete returned %d", rv);
+@@ -349,6 +363,7 @@ kevent64_impl(int kqfd, const struct kevent64_s *changelist, int nchanges,
+     kqueue_addref(kq);
+ 
+     pthread_mutex_unlock(&kq_mtx);
++    LOLKQ("kevent64_impl enter kqfd=%d nch=%d nev=%d\n", kqfd, nchanges, nevents);
+ 
+ #ifndef NDEBUG
+     if (DEBUG_KQUEUE) {
+@@ -386,6 +401,11 @@ kevent64_impl(int kqfd, const struct kevent64_s *changelist, int nchanges,
+     if ((flags & KEVENT_FLAG_ERROR_EVENTS) == 0 && nevents > 0) {
+         const struct timespec* ts = (flags & KEVENT_FLAG_IMMEDIATE) ? (&timeout_zero) : timeout;
+ again:
++        /* epoll snapshots contain raw knote pointers. Keep retired notes alive
++         * until every waiter that could have observed them has copied out. */
++        kqueue_lock(kq);
++        kq->kq_waiters++;
++        kqueue_unlock(kq);
+         rv = kqops.kevent_wait(kq, nevents, ts);
+         dbg_printf("kqops.kevent_wait returned %d", rv);
+ 
+@@ -395,6 +415,7 @@ again:
+             ret += rv;
+         }
+ 
++        kq->kq_waiters--;
+         kqueue_cleanup(kq);
+         kqueue_unlock(kq);
+ 
+diff --git a/src/common/knote.c b/src/common/knote.c
+index a328f80..d0141aa 100644
+--- a/src/common/knote.c
++++ b/src/common/knote.c
+@@ -33,7 +33,17 @@ knote_init(void)
+ static int
+ knote_cmp(struct knote *a, struct knote *b)
+ {
+-    return memcmp(&a->kev.ident, &b->kev.ident, sizeof(a->kev.ident)); 
++    int compared=memcmp(&a->kev.ident,&b->kev.ident,sizeof(a->kev.ident));
++    if(compared) return compared;
++    // Darwin allows independent fd registrations distinguished by udata.
++    // Each Linux fd note already owns a separate dupfd/epoll registration.
++    if(a->kev.filter==EVFILT_READ || a->kev.filter==EVFILT_WRITE) {
++        int as=!!(a->kev.flags&EV_UDATA_SPECIFIC);
++        int bs=!!(b->kev.flags&EV_UDATA_SPECIFIC);
++        if(as!=bs) return as-bs;
++        if(as) return a->kev.udata<b->kev.udata?-1:a->kev.udata>b->kev.udata?1:0;
++    }
++    return 0;
+ }
+ 
+ RB_GENERATE(knt, knote, kn_entries, knote_cmp)
+@@ -94,7 +104,7 @@ knote_delete(struct filter *filt, struct knote *kn)
+      * Verify that the knote wasn't removed by another
+      * thread before we acquired the knotelist lock.
+      */
+-    query.kev.ident = kn->kev.ident;
++    query.kev = kn->kev;
+     pthread_rwlock_wrlock(&filt->kf_knote_mtx);
+     tmp = RB_FIND(knt, &filt->kf_knote, &query);
+     if (tmp == kn) {
+@@ -114,10 +124,11 @@ knote_delete(struct filter *filt, struct knote *kn)
+ struct knote *
+ knote_lookup(struct filter *filt, uintptr_t ident)
+ {
+-    struct knote query;
++    struct knote query={0};
+     struct knote *ent = NULL;
+ 
+     query.kev.ident = ident;
++    query.kev.filter=filt->kf_id;
+ 
+     pthread_rwlock_rdlock(&filt->kf_knote_mtx);
+     ent = RB_FIND(knt, &filt->kf_knote, &query);
+@@ -160,3 +171,14 @@ knote_disable(struct filter *filt, struct knote *kn)
+ 
+ //TODO: knote_enable()
+ 
++
++struct knote *
++knote_lookup_fd_specific(struct filter *filt,uintptr_t ident,uint64_t udata) {
++    struct knote query={0};
++    query.kev.ident=ident;query.kev.filter=filt->kf_id;
++    query.kev.flags=EV_UDATA_SPECIFIC;query.kev.udata=udata;
++    pthread_rwlock_rdlock(&filt->kf_knote_mtx);
++    struct knote* result=RB_FIND(knt,&filt->kf_knote,&query);
++    pthread_rwlock_unlock(&filt->kf_knote_mtx);
++    return result;
++}
+diff --git a/src/common/kqueue.c b/src/common/kqueue.c
+index 61cc9dc..f05576d 100644
+--- a/src/common/kqueue.c
++++ b/src/common/kqueue.c
+@@ -23,6 +23,8 @@
+ #include <string.h>
+ 
+ #include "private.h"
++#include <darling/emulation/common/simple.h>
++#define LOLKQ(...) do { } while (0)
+ 
+ #ifdef DARLING
+ #include "../darling/listenregistry.h"
+@@ -113,6 +115,7 @@ kqueue_cmp(struct kqueue *a, struct kqueue *b)
+ void kqueue_cleanup(struct kqueue* kq)
+ {
+     struct knote *next, *tmp;
++    if (kq->kq_waiters) return;
+     for (next = kq->kq_tofree.lh_first; next != NULL; next = tmp)
+     {
+         tmp = next->kn_entries2free.le_next;
+@@ -135,6 +138,7 @@ kqueue_free(struct kqueue *kq)
+ 	// XXX: we should be doing this more efficiently (i.e. without walking through all open kqueues)
+ 	map_foreach(kqmap, kqueue_free_cb, kq);
+     filter_unregister_all(kq);
++    kqueue_cleanup(kq);
+     kqops.kqueue_free(kq);
+     free(kq);
+ }
+@@ -329,6 +333,7 @@ void kqueue_delref(struct kqueue *kq)
+ int VISIBLE
+ kqueue_impl(void)
+ {
++	LOLKQ("kqueue_impl enter\n");
+ 	struct kqueue *kq;
+     struct kqueue *tmp;
+ 
+diff --git a/src/common/map.c b/src/common/map.c
+index cc254dd..ed0f21c 100644
+--- a/src/common/map.c
++++ b/src/common/map.c
+@@ -18,6 +18,7 @@
+ 
+ struct map {
+     size_t len;
++    int high_water;
+     void **data;
+ };
+ 
+@@ -51,12 +52,23 @@ map_new(size_t len)
+     return (dst);
+ }
+ 
++/* Iteration is used on every descriptor close. Do not scan the entire
++ * RLIMIT_NOFILE-sized allocation for a map with only a few populated slots. */
++static void map_note_index(struct map *m, int idx)
++{
++    int end = idx + 1;
++    int old = __atomic_load_n(&m->high_water, __ATOMIC_RELAXED);
++    while (old < end && !__atomic_compare_exchange_n(&m->high_water, &old, end,
++            0, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {}
++}
++
+ int
+ map_insert(struct map *m, int idx, void *ptr)
+ {
+-    if (slowpath(idx < 0 || idx > (int)m->len))
++    if (slowpath(idx < 0 || idx >= (int)m->len))
+            return (-1);
+ 
++    map_note_index(m, idx);
+     if (atomic_ptr_cas(&(m->data[idx]), 0, ptr) == NULL) {
+         dbg_printf("inserted %p in location %d", ptr, idx);
+         return (0);
+@@ -71,7 +83,7 @@ map_insert(struct map *m, int idx, void *ptr)
+ int
+ map_remove(struct map *m, int idx, void *ptr)
+ {
+-    if (slowpath(idx < 0 || idx > (int)m->len))
++    if (slowpath(idx < 0 || idx >= (int)m->len))
+            return (-1);
+ 
+     if (atomic_ptr_cas(&(m->data[idx]), ptr, 0) == NULL) {
+@@ -88,9 +100,10 @@ map_replace(struct map *m, int idx, void *oldp, void *newp)
+ {
+     void *tmp;
+ 
+-    if (slowpath(idx < 0 || idx > (int)m->len))
++    if (slowpath(idx < 0 || idx >= (int)m->len))
+            return (-1);
+ 
++    map_note_index(m, idx);
+     tmp = atomic_ptr_cas(&(m->data[idx]), oldp, newp);
+     if (tmp == oldp) {
+         dbg_printf("replaced value %p in location %d with value %p",
+@@ -106,7 +119,7 @@ map_replace(struct map *m, int idx, void *oldp, void *newp)
+ void *
+ map_lookup(struct map *m, int idx)
+ {
+-    if (slowpath(idx < 0 || idx > (int)m->len))
++    if (slowpath(idx < 0 || idx >= (int)m->len))
+         return (NULL);
+ 
+     return m->data[idx];
+@@ -116,7 +129,8 @@ void
+ map_foreach(struct map *m, void(*cb)(int, void*, void*), void* private)
+ {
+     int i;
+-    for (i = 0; i < (int)m->len; i++) {
++    int end = __atomic_load_n(&m->high_water, __ATOMIC_ACQUIRE);
++    for (i = 0; i < end; i++) {
+         if (m->data[i])
+             cb(i, m->data[i], private);
+     }
+@@ -128,7 +142,7 @@ map_delete(struct map *m, int idx)
+     void *oval;
+     void *nval;
+ 
+-    if (slowpath(idx < 0 || idx > (int)m->len))
++    if (slowpath(idx < 0 || idx >= (int)m->len))
+            return ((void *)-1);
+ 
+     /* Hopefully we aren't racing with another thread, but you never know.. */
+diff --git a/src/common/private.h b/src/common/private.h
+index 5c0718e..e7a0841 100644
+--- a/src/common/private.h
++++ b/src/common/private.h
+@@ -161,6 +161,7 @@ struct kqueue {
+ #endif
+     RB_ENTRY(kqueue) entries;
+     LIST_HEAD(knt2free, knote) kq_tofree;
++    unsigned int    kq_waiters; /* protected by kq_mtx; keep existing offsets */
+ };
+ 
+ struct kqueue_vtable {
+@@ -198,6 +199,7 @@ int kevent_copyin_one(struct kqueue *kq, const struct kevent64_s *src);
+  * knote internal API
+  */
+ struct knote * knote_lookup(struct filter *, uintptr_t);
++struct knote * knote_lookup_fd_specific(struct filter *, uintptr_t,uint64_t);
+ //DEADWOOD: struct knote * knote_get_by_data(struct filter *filt, intptr_t);
+ struct knote * knote_new(void);
+ #define knote_retain(kn) atomic_inc(&kn->kn_ref)
+diff --git a/src/linux/machport.c b/src/linux/machport.c
+index 074958e..1e99023 100644
+--- a/src/linux/machport.c
++++ b/src/linux/machport.c
+@@ -34,6 +34,9 @@
+ 
+ #include "private.h"
+ 
++/* Keep the Mach-port path free of per-event diagnostic I/O. */
++#define M58MP(...) do { } while (0)
++
+ int
+ evfilt_machport_copyout(struct kevent64_s *dst, struct knote *src, void *ptr)
+ {
+@@ -45,13 +48,16 @@ evfilt_machport_copyout(struct kevent64_s *dst, struct knote *src, void *ptr)
+ 
+     epoll_event_dump(ev);
+     kevent_int_to_64(&src->kev, dst);
++    M58MP("copyout fd=%d\n", src->kdata.kn_dupfd);
+ 
+ 	// first, read the notification
+ 	rv = recv(src->kdata.kn_dupfd, &notification, sizeof(notification), 0);
+ 	if (rv < 0) {
++		M58MP("copyout notif-recv FAILED fd=%d errno=%d\n", src->kdata.kn_dupfd, errno);
+ 		dbg_printf("evfilt_machport_copyout() reading notification failed: %d (%s)", errno, strerror(errno));
+ 		return -1;
+ 	}
++	M58MP("copyout notif fd=%d rv=%d num=0x%x\n", src->kdata.kn_dupfd, rv, notification.header.number);
+ 
+ 	if (notification.header.number != dserver_kqchan_msgnum_notification) {
+ 		dbg_puts("evfilt_machport_copyout() read invalid notification");
+@@ -124,18 +130,24 @@ evfilt_machport_knote_create(struct filter *filt, struct knote *kn)
+ 
+ 	int status = _dserver_rpc_kqchan_mach_port_open_4libkqueue(port, (void*)kn->kev.ext[0], kn->kev.ext[1], kn->kev.fflags, &kn->kdata.kn_dupfd);
+ 	if (status < 0) {
++		M58MP("create open FAILED port=%d status=%d\n", port, status);
+ 		dbg_printf("evfilt_machport_open: %s", strerror(-status));
+ 		return (-1);
+ 	}
++	M58MP("create open port=%d fd=%d events=0x%x\n", port, kn->kdata.kn_dupfd, ev.events);
+ 
+ 	dbg_printf("evfilt_machport_open: listening to FD %d for events %d", kn->kdata.kn_dupfd, ev.events);
+ 
+     fcntl(kn->kdata.kn_dupfd, F_SETFD, FD_CLOEXEC);
+ 
+     if (epoll_ctl(kn->kn_epollfd, EPOLL_CTL_ADD, kn->kdata.kn_dupfd, &ev) < 0) {
++        M58MP("create epoll_add FAILED epfd=%d fd=%d errno=%d\n", kn->kn_epollfd, kn->kdata.kn_dupfd, errno);
+         dbg_printf("epoll_ctl(2): %s", strerror(errno));
++        (void) __close_for_kqueue(kn->kdata.kn_dupfd);
++        kn->kdata.kn_dupfd = -1;
+         return (-1);
+     }
++    M58MP("create epoll_add OK epfd=%d fd=%d\n", kn->kn_epollfd, kn->kdata.kn_dupfd);
+     return 0;
+ }
+ 
+@@ -186,7 +198,8 @@ evfilt_machport_knote_delete(struct filter *filt, struct knote *kn)
+     if ((kn->kev.flags & EV_DISABLE) == 0) {
+         if (epoll_ctl(kn->kn_epollfd, EPOLL_CTL_DEL, kn->kdata.kn_dupfd, NULL) < 0) {
+             dbg_perror("epoll_ctl(2)");
+-            return (-1);
++            /* Teardown must still close the channel if its epoll entry was
++             * already removed. knote_delete frees the registration anyway. */
+         }
+     }
+ 
+diff --git a/src/linux/platform.c b/src/linux/platform.c
+index 482ffb2..dd750a4 100644
+--- a/src/linux/platform.c
++++ b/src/linux/platform.c
+@@ -16,6 +16,8 @@
+ 
+ # define _GNU_SOURCE
+ # include <poll.h>
++#include <darling/emulation/common/simple.h>
++#define LOLKQ(...) do { } while (0)
+ #include <pthread.h>
+ #include "../common/private.h"
+ 
+@@ -179,6 +181,7 @@ linux_kevent_wait(
+     dbg_puts("waiting for events");
+ restart:
+     nret = epoll_wait(kqueue_epfd(kq), &epevt[0], nevents, timeout);
++    LOLKQ("ew ret=%d epfd=%d\n", nret, kqueue_epfd(kq));
+     if (nret < 0) {
+         if (errno == EINTR) // only happens when ptrace() is called
+            goto restart;
+@@ -204,6 +207,13 @@ linux_kevent_copyout(struct kqueue *kq, int nready,
+         ev = &epevt_get()[i];
+         kn = (struct knote *) ev->data.ptr;
+         event = eventlist;
++        /* Another waiter or changelist may have consumed/removed this note
++         * after epoll_wait took its snapshot. Never deliver its userdata. */
++        if ((kn->kn_flags & KNFL_KNOTE_DELETED) ||
++            (kn->kev.flags & EV_DISABLE)) {
++            nret--;
++            continue;
++        }
+         if (kn->kev.filter == 0) {
+             dbg_puts("kevent copyout for zero filter, discarding!");
+             nret--;
+@@ -352,8 +362,11 @@ linux_get_descriptor_type(struct knote *kn)
+      */
+     if (fstat(kn->kev.ident, &sb) < 0) {
+         dbg_perror("fstat(2)");
++        LOLKQ("desctype: fstat(%d) FAILED errno=%d\n", (int)kn->kev.ident, (int)errno);
+         return (-1);
+     }
++    LOLKQ("desctype: fd=%d mode=0%o sock=%d reg=%d\n", (int)kn->kev.ident,
++        (unsigned)sb.st_mode, !!S_ISSOCK(sb.st_mode), !!S_ISREG(sb.st_mode));
+     if (S_ISREG(sb.st_mode)) {
+         kn->kn_flags |= KNFL_REGULAR_FILE;
+         dbg_printf("fd %d is a regular file\n", (int)kn->kev.ident);
+@@ -382,6 +395,8 @@ linux_get_descriptor_type(struct knote *kn)
+ #endif
+             default:
+                 dbg_perror("getsockopt(3)");
++                LOLKQ("desctype: getsockopt(%d,SO_ACCEPTCONN) FAILED errno=%d\n",
++                    (int)kn->kev.ident, (int)errno);
+                 return (-1);
+         }
+     }
+@@ -436,12 +451,35 @@ epoll_update(int op, struct filter *filt, struct knote *kn, struct epoll_event *
+ int
+ linux_fd_to_path(char *buf, size_t bufsz, int fd)
+ {
++    /* NOTE: must use /proc/self, not /proc/<getpid()>: under Darling
++     * getpid() returns the *guest* pid, which does not exist in the host
++     * /proc. Using the guest pid broke every EVFILT_VNODE watch
++     * (linux_fd_to_path failed -> kevent returned EBADF). */
+     char path[1024];    //TODO: Maxpathlen, etc.
++#ifdef DARLING
++    /* darling-lol: readlink(/proc/self/fd) yields a HOST path, but our
++     * consumers (the ext inotify/epoll wrappers) treat paths as GUEST
++     * paths and re-apply guest->host translation (double translation ->
++     * ENOENT). Re-enter the guest namespace via /Volumes/SystemRoot so
++     * the round-trip resolves back to the same host file. */
++    char hpath[1024];
++    int n;
++#endif
+ 
+-    if (snprintf(&path[0], sizeof(path), "/proc/%d/fd/%d", getpid(), fd) < 0)
++    if (snprintf(&path[0], sizeof(path), "/proc/self/fd/%d", fd) < 0)
+         return (-1);
+ 
+     memset(buf, 0, bufsz);
++#ifdef DARLING
++    memset(hpath, 0, sizeof(hpath));
++    n = readlink(path, hpath, sizeof(hpath) - sizeof("/Volumes/SystemRoot") - 1);
++    if (n < 0)
++        return (-1);
++    hpath[n] = '\0';
++    if (snprintf(buf, bufsz, "/Volumes/SystemRoot%s", hpath) < 0)
++        return (-1);
++    return (n + (int)sizeof("/Volumes/SystemRoot") - 1);
++#else
+     return (readlink(path, buf, bufsz));
++#endif
+ }
+-
+diff --git a/src/linux/proc.c b/src/linux/proc.c
+index 433a9b3..9a70d77 100644
+--- a/src/linux/proc.c
++++ b/src/linux/proc.c
+@@ -256,7 +256,7 @@ evfilt_proc_knote_delete(struct filter *filt, struct knote *kn)
+     if ((kn->kev.flags & EV_DISABLE) == 0) {
+         if (epoll_ctl(kn->kn_epollfd, EPOLL_CTL_DEL, kn->kdata.kn_dupfd, NULL) < 0) {
+             dbg_perror("epoll_ctl(2)");
+-            return (-1);
++            /* Always release the channel during registration teardown. */
+         }
+     }
+ 
+@@ -302,4 +302,3 @@ const struct filter evfilt_proc = {
+     evfilt_proc_knote_enable,
+     evfilt_proc_knote_disable,         
+ };
+-
+diff --git a/src/linux/read.c b/src/linux/read.c
+index b6d2b73..8c7e97d 100644
+--- a/src/linux/read.c
++++ b/src/linux/read.c
+@@ -15,6 +15,11 @@
+  */
+ 
+ #include <errno.h>
++#ifdef DARLING
++#include <darling/emulation/common/simple.h>
++#define LOLKQ(...) do { } while (0)
++#else
++#endif
+ #include <fcntl.h>
+ #include <sys/ioctl.h>
+ #include <pthread.h>
+@@ -58,6 +63,7 @@ get_eof_offset(int fd)
+ int
+ evfilt_read_copyout(struct kevent64_s *dst, struct knote *src, void *ptr)
+ {
++    LOLKQ("read-copyout enter\n");
+     struct epoll_event * const ev = (struct epoll_event *) ptr;
+ 
+     /* Special case: for regular files, return the offset from current position to end of file */
+@@ -144,8 +150,10 @@ evfilt_read_knote_create(struct filter *filt, struct knote *kn)
+ {
+     struct epoll_event ev;
+ 
+-    if (linux_get_descriptor_type(kn) < 0)
++    if (linux_get_descriptor_type(kn) < 0) {
++        LOLKQ("knote-create: desctype FAILED for ident=%d\n", (int)kn->kev.ident);
+         return (-1);
++    }
+ 
+     /* Convert the kevent into an epoll_event */
+ #if defined(HAVE_EPOLLRDHUP)
+@@ -189,10 +197,13 @@ evfilt_read_knote_create(struct filter *filt, struct knote *kn)
+     else {
+         kn->kdata.kn_dupfd = _dup_4libkqueue(kn->kev.ident);
+         fcntl(kn->kdata.kn_dupfd, F_SETFD, FD_CLOEXEC);
++        LOLKQ("knote-create ident=%d dupfd=%d events=0x%x\n", (int)kn->kev.ident, (int)kn->kdata.kn_dupfd, ev.events);
+         if (epoll_ctl(kn->kn_epollfd, EPOLL_CTL_ADD, kn->kdata.kn_dupfd, &ev) < 0) {
+             dbg_printf("epoll_ctl(2): %s", strerror(errno));
++            LOLKQ("knote-create FAILED dupfd=%d errno=%d\n", (int)kn->kdata.kn_dupfd, (int)errno);
+             return (-1);
+         }
++        LOLKQ("knote-create OK ident=%d dupfd=%d\n", (int)kn->kev.ident, (int)kn->kdata.kn_dupfd);
+     }
+ 
+     return 0;
+diff --git a/src/linux/user.c b/src/linux/user.c
+index f109ce4..7285f2d 100644
+--- a/src/linux/user.c
++++ b/src/linux/user.c
+@@ -102,10 +102,14 @@ linux_evfilt_user_copyout(struct kevent64_s *dst, struct knote *src, void *ptr U
+     }
+     if (src->kev.flags & EV_CLEAR)
+         src->kev.fflags &= ~NOTE_TRIGGER;
+-    if (src->kev.flags & (EV_DISPATCH | EV_CLEAR | EV_ONESHOT)) {
+-        if (eventfd_lower(src->kdata.kn_eventfd) < 0)
+-            return (-1);
+-    }
++    /* darling-lol: Chromium registers its EVFILT_USER wakeup with EV_ADD only.
++     * A returned user knote means its eventfd was readable, regardless
++     * of whether NOTE_TRIGGER is still visible in kev.fflags. A concurrent
++     * trigger can raise the eventfd just before copyout clears the shared bit,
++     * otherwise leaving a readable fd with no NOTE_TRIGGER forever. */
++    if (eventfd_lower(src->kdata.kn_eventfd) < 0)
++        return (-1);
++    src->kev.fflags &= ~NOTE_TRIGGER;
+ 
+     if (src->kev.flags & EV_DISPATCH)
+         src->kev.fflags &= ~NOTE_TRIGGER;
+diff --git a/src/linux/vnode.c b/src/linux/vnode.c
+index 58b1544..8337ea0 100644
+--- a/src/linux/vnode.c
++++ b/src/linux/vnode.c
+@@ -95,7 +95,10 @@ add_watch(struct filter *filt, struct knote *kn)
+         return (-1);
+ 
+     /* Convert the fflags to the inotify mask */
+-    mask = IN_CLOSE;
++    /* Closing another descriptor for this inode is not a vnode event.
++     * Watching IN_CLOSE used to poison kn_flags with EV_ONESHOT (the same
++     * bit as KNFL_KNOTE_DELETED), leaving an undrained epoll registration. */
++    mask = IN_ATTRIB;
+     if (kn->kev.fflags & NOTE_DELETE)
+         mask |= IN_ATTRIB | IN_DELETE_SELF;
+     if (kn->kev.fflags & NOTE_WRITE)      
+@@ -178,18 +181,9 @@ evfilt_vnode_copyout(struct kevent64_s *dst, struct knote *src, void *ptr UNUSED
+         return (0);
+     }
+ 
+-    /* Check if the watched file has been closed, and 
+-       XXX-this may not exactly match the kevent() behavior if multiple file de
+-scriptors reference the same file.
+-    */
+-    if (evt->mask & IN_CLOSE_WRITE || evt->mask & IN_CLOSE_NOWRITE) {
+-        src->kn_flags |= EV_ONESHOT; /* KLUDGE: causes the knote to be deleted */
+-        dst->filter = EVFILT_DROP_POSTPROCESS; /* KLUDGE: causes the event to be discarded */
+-        return (0);
+-    }
+-
+     kevent_int_to_64(&src->kev, dst);
+     dst->data = 0;
++    dst->fflags = 0;
+ 
+     /* No error checking because fstat(2) should rarely fail */
+     //FIXME: EINTR
+@@ -203,7 +197,7 @@ scriptors reference the same file.
+         if (sb.st_nsize == 0 && src->kev.fflags & NOTE_TRUNCATE) 
+             dst->fflags |= NOTE_TRUNCATE;
+ #endif
+-        if (sb.st_size > src->data.vnode.size && src->kev.fflags & NOTE_WRITE) 
++        if (sb.st_size > src->data.vnode.size && src->kev.fflags & NOTE_EXTEND)
+             dst->fflags |= NOTE_EXTEND;
+        src->data.vnode.nlink = sb.st_nlink;
+        src->data.vnode.size = sb.st_size;
+@@ -227,6 +221,7 @@ scriptors reference the same file.
+     if (evt->mask & IN_DELETE_SELF && src->kev.fflags & NOTE_DELETE) 
+         dst->fflags |= NOTE_DELETE;
+ 
++    if (!dst->fflags) dst->filter = EVFILT_DROP;
+     return (0);
+ }
+ 

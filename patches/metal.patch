@@ -1,0 +1,3124 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 431f29a..7f10875 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -42,8 +42,10 @@ add_framework(Metal
+ 	SOURCES
+ 		src/Metal/Metal.mm
+ 		src/Metal/MTLBuffer.mm
++	src/Metal/MTLArgument.mm
+ 		src/Metal/MTLCaptureManager.mm
+ 		src/Metal/MTLCommandBuffer.mm
++	src/Metal/MTLBlitCommandEncoder.mm
+ 		src/Metal/MTLCommandQueue.mm
+ 		src/Metal/MTLCompileOptions.mm
+ 		src/Metal/MTLComputeCommandEncoder.mm
+diff --git a/include/Metal/MTLCommandBuffer.h b/include/Metal/MTLCommandBuffer.h
+index ef43df8..9045a84 100644
+--- a/include/Metal/MTLCommandBuffer.h
++++ b/include/Metal/MTLCommandBuffer.h
+@@ -16,6 +16,7 @@ METAL_DECLARATIONS_BEGIN
+ @protocol MTLComputeCommandEncoder;
+ @protocol MTLCommandQueue;
+ @protocol MTLRenderCommandEncoder;
++@protocol MTLBlitCommandEncoder;
+ 
+ @class MTLComputePassDescriptor;
+ @class MTLRenderPassDescriptor;
+@@ -36,9 +37,11 @@ typedef void (^MTLCommandBufferHandler)(id<MTLCommandBuffer>);
+ - (id<MTLComputeCommandEncoder>)computeCommandEncoderWithDescriptor: (MTLComputePassDescriptor*)computePassDescriptor;
+ - (id<MTLComputeCommandEncoder>)computeCommandEncoderWithDispatchType: (MTLDispatchType)dispatchType;
+ - (id<MTLComputeCommandEncoder>)computeCommandEncoder;
++- (id<MTLBlitCommandEncoder>)blitCommandEncoder;
+ 
+ - (id<MTLRenderCommandEncoder>)renderCommandEncoderWithDescriptor: (MTLRenderPassDescriptor*)renderPassDescriptor;
+ 
++- (void)addScheduledHandler:(MTLCommandBufferHandler)block;
+ - (void)addCompletedHandler: (MTLCommandBufferHandler)block;
+ - (void)waitUntilCompleted;
+ - (void)presentDrawable: (id<MTLDrawable>)drawable;
+diff --git a/include/Metal/MTLComputeCommandEncoder.h b/include/Metal/MTLComputeCommandEncoder.h
+index 06f4e51..a8e7436 100644
+--- a/include/Metal/MTLComputeCommandEncoder.h
++++ b/include/Metal/MTLComputeCommandEncoder.h
+@@ -13,6 +13,9 @@ METAL_DECLARATIONS_BEGIN
+ @protocol MTLComputeCommandEncoder;
+ @protocol MTLCounterSampleBuffer;
+ @protocol MTLBuffer;
++@protocol MTLTexture;
++@protocol MTLSamplerState;
++@protocol MTLDepthStencilState;
+ 
+ @class MTLComputePassDescriptor;
+ @class MTLComputePassSampleBufferAttachmentDescriptorArray;
+@@ -53,6 +56,9 @@ MTL_EXPORT
+ 
+ @property(readonly) MTLDispatchType dispatchType;
+ 
++- (void)setTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index;
++- (void)setSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index;
++- (void)setSamplerState:(id<MTLSamplerState>)sampler lodMinClamp:(float)lodMinClamp lodMaxClamp:(float)lodMaxClamp atIndex:(NSUInteger)index;
+ - (void)setComputePipelineState:(id<MTLComputePipelineState>)state;
+ 
+ - (void)setBuffer: (id<MTLBuffer>)buffer
+diff --git a/include/Metal/MTLDepthStencilDescriptor.h b/include/Metal/MTLDepthStencilDescriptor.h
+index f22a57d..6b6715d 100644
+--- a/include/Metal/MTLDepthStencilDescriptor.h
++++ b/include/Metal/MTLDepthStencilDescriptor.h
+@@ -3,10 +3,17 @@
+ 
+ #ifndef _METAL_MTLDEPTHSTENCILDESCRIPTOR_H_
+ #define _METAL_MTLDEPTHSTENCILDESCRIPTOR_H_
+-
+-#import <Foundation/Foundation.h>
+-
+-@interface MTLDepthStencilDescriptor : NSObject
++#import <Metal/MTLStencilDescriptor.h>
++@protocol MTLDevice;
++@interface MTLDepthStencilDescriptor : NSObject <NSCopying>
++@property(nonatomic) MTLCompareFunction depthCompareFunction;
++@property(nonatomic) BOOL depthWriteEnabled;
++@property(nonatomic, copy) MTLStencilDescriptor* frontFaceStencil;
++@property(nonatomic, copy) MTLStencilDescriptor* backFaceStencil;
++@property(nonatomic, copy) NSString* label;
+ @end
+-
+-#endif // _METAL_MTLDEPTHSTENCILDESCRIPTOR_H_
++@protocol MTLDepthStencilState <NSObject>
++@property(readonly) id<MTLDevice> device;
++@property(readonly) NSString* label;
++@end
++#endif
+diff --git a/include/Metal/MTLDevice.h b/include/Metal/MTLDevice.h
+index a3efc96..299c038 100644
+--- a/include/Metal/MTLDevice.h
++++ b/include/Metal/MTLDevice.h
+@@ -18,9 +18,18 @@ METAL_DECLARATIONS_BEGIN
+ @protocol MTLBuffer;
+ @protocol MTLLibrary;
+ @protocol MTLRenderPipelineState;
++@protocol MTLSamplerState;
++@protocol MTLDepthStencilState;
++@class MTLDepthStencilDescriptor;
++@class MTLSamplerDescriptor;
++@class MTLTextureDescriptor;
++@protocol MTLTexture;
+ 
+ @class MTLComputePipelineDescriptor;
+-@class MTLAutoreleasedComputePipelineReflection;
++@class MTLComputePipelineReflection;
++@class MTLRenderPipelineReflection;
++typedef MTLComputePipelineReflection* MTLAutoreleasedComputePipelineReflection;
++typedef MTLRenderPipelineReflection* MTLAutoreleasedRenderPipelineReflection;
+ @class MTLRenderPipelineDescriptor;
+ 
+ typedef NS_OPTIONS(NSUInteger, MTLPipelineOption) {
+@@ -42,8 +51,31 @@ MTL_EXPORT NSArray<id<MTLDevice>>* MTLCopyAllDevices(void);
+ MTL_EXPORT NSArray<id<MTLDevice>>* MTLCopyAllDevicesWithObserver(id<NSObject>* observer, MTLDeviceNotificationHandler handler);
+ MTL_EXPORT void MTLRemoveDeviceObserver(id<NSObject> observer);
+ 
++typedef NS_ENUM(NSInteger, MTLReadWriteTextureTier) {
++	MTLReadWriteTextureTierNone = 0,
++	MTLReadWriteTextureTier1 = 1,
++	MTLReadWriteTextureTier2 = 2,
++};
++
+ @protocol MTLDevice <NSObject>
+ 
++@property (readonly) MTLReadWriteTextureTier readWriteTextureSupport;
++
++/* darling-lol M57: additional device queries ANGLE's Metal backend probes. */
++@property (readonly) BOOL hasUnifiedMemory;
++@property (readonly) NSUInteger maxBufferLength;
++@property (readonly) NSUInteger recommendedMaxWorkingSetSize;
++@property (readonly) BOOL isLowPower;
++@property (readonly) BOOL isRemovable;
++@property (readonly) BOOL isHeadless;
++@property (readonly) NSString* name;
++@property (readonly) uint64_t registryID;
++- (BOOL)isDepth24Stencil8PixelFormatSupported;
++- (BOOL)supportsFamily: (NSUInteger)family;
++- (BOOL)supportsFeatureSet: (NSUInteger)featureSet;
++- (BOOL)supportsTextureSampleCount: (NSUInteger)sampleCount;
++- (id<MTLCommandQueue>)newCommandQueueWithMaxCommandBufferCount: (NSUInteger)maxCommandBufferCount;
++
+ - (id<MTLComputePipelineState>)newComputePipelineStateWithDescriptor: (MTLComputePipelineDescriptor*)descriptor
+                                                              options: (MTLPipelineOption)options
+                                                           reflection: (MTLAutoreleasedComputePipelineReflection*)reflection
+@@ -57,10 +89,14 @@ MTL_EXPORT void MTLRemoveDeviceObserver(id<NSObject> observer);
+                                                         reflection: (MTLAutoreleasedComputePipelineReflection*)reflection 
+                                                              error: (NSError**)error;
+ 
++- (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor*)descriptor options:(MTLPipelineOption)options reflection:(MTLAutoreleasedRenderPipelineReflection*)reflection error:(NSError**)error;
+ - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor: (MTLRenderPipelineDescriptor*)descriptor
+                                                              error: (NSError**)error;
+ 
++- (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor*)descriptor;
+ - (id<MTLCommandQueue>)newCommandQueue;
++- (id<MTLDepthStencilState>)newDepthStencilStateWithDescriptor:(MTLDepthStencilDescriptor*)descriptor;
++- (id<MTLSamplerState>)newSamplerStateWithDescriptor:(MTLSamplerDescriptor*)descriptor;
+ 
+ - (id<MTLBuffer>)newBufferWithLength: (NSUInteger)length
+                              options: (MTLResourceOptions)options;
+diff --git a/include/Metal/MTLRenderCommandEncoder.h b/include/Metal/MTLRenderCommandEncoder.h
+index 5a3845c..caeab7c 100644
+--- a/include/Metal/MTLRenderCommandEncoder.h
++++ b/include/Metal/MTLRenderCommandEncoder.h
+@@ -12,6 +12,9 @@
+ METAL_DECLARATIONS_BEGIN
+ 
+ @protocol MTLBuffer;
++@protocol MTLTexture;
++@protocol MTLSamplerState;
++@protocol MTLDepthStencilState;
+ @protocol MTLRasterizationRateMap;
+ @protocol MTLTexture;
+ @protocol MTLRenderPipelineState;
+@@ -26,6 +29,13 @@ METAL_DECLARATIONS_BEGIN
+ struct MTLSamplePosition;
+ typedef struct MTLSamplePosition MTLSamplePosition;
+ 
++typedef NS_OPTIONS(NSUInteger, MTLBarrierScope) {
++    MTLBarrierScopeBuffers = 1, MTLBarrierScopeTextures = 2, MTLBarrierScopeRenderTargets = 4,
++};
++typedef NS_OPTIONS(NSUInteger, MTLRenderStages) {
++    MTLRenderStageVertex = 1, MTLRenderStageFragment = 2, MTLRenderStageTile = 4,
++    MTLRenderStageObject = 8, MTLRenderStageMesh = 16,
++};
+ typedef NS_ENUM(NSUInteger, MTLLoadAction) {
+ 	MTLLoadActionDontCare = 0,
+ 	MTLLoadActionLoad = 1,
+@@ -98,10 +108,10 @@ typedef struct MTLViewport {
+ } MTLViewport;
+ 
+ typedef struct MTLScissorRect {
+-	size_t height;
+-	size_t width;
+-	size_t x;
+-	size_t y;
++	NSUInteger x;
++	NSUInteger y;
++	NSUInteger width;
++	NSUInteger height;
+ } MTLScissorRect;
+ 
+ NS_INLINE
+@@ -190,6 +200,14 @@ MTL_EXPORT
+ 
+ @protocol MTLRenderCommandEncoder <MTLCommandEncoder>
+ 
++- (void)setVertexTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index;
++- (void)setFragmentTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index;
++- (void)setVertexSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index;
++- (void)setFragmentSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index;
++- (void)setDepthBias:(float)depthBias slopeScale:(float)slopeScale clamp:(float)clamp;
++- (void)setDepthStencilState:(id<MTLDepthStencilState>)state;
++- (void)memoryBarrierWithScope:(MTLBarrierScope)scope afterStages:(MTLRenderStages)after beforeStages:(MTLRenderStages)before;
++- (void)setStencilReferenceValue:(uint32_t)value;
+ - (void)setRenderPipelineState: (id<MTLRenderPipelineState>)pipelineState;
+ - (void)setTriangleFillMode: (MTLTriangleFillMode)fillMode;
+ - (void)setFrontFacingWinding: (MTLWinding)frontFacingWinding;
+diff --git a/include/Metal/MTLSamplerDescriptor.h b/include/Metal/MTLSamplerDescriptor.h
+index f049017..c8026d3 100644
+--- a/include/Metal/MTLSamplerDescriptor.h
++++ b/include/Metal/MTLSamplerDescriptor.h
+@@ -1,12 +1,46 @@
+-// SPDX-FileCopyrightText: 2026 Darling Developers
+ // SPDX-License-Identifier: MPL-2.0
+-
+-#ifndef _METAL_MTLSAMPLERDESCRIPTOR_H_
+-#define _METAL_MTLSAMPLERDESCRIPTOR_H_
+-
++#pragma once
+ #import <Foundation/Foundation.h>
+-
+-@interface MTLSamplerDescriptor : NSObject
++typedef NS_ENUM(NSUInteger, MTLSamplerMinMagFilter) {
++    MTLSamplerMinMagFilterNearest = 0,
++    MTLSamplerMinMagFilterLinear = 1,
++};
++typedef NS_ENUM(NSUInteger, MTLSamplerMipFilter) {
++    MTLSamplerMipFilterNotMipmapped = 0,
++    MTLSamplerMipFilterNearest = 1,
++    MTLSamplerMipFilterLinear = 2,
++};
++typedef NS_ENUM(NSUInteger, MTLSamplerAddressMode) {
++    MTLSamplerAddressModeClampToEdge = 0,
++    MTLSamplerAddressModeMirrorClampToEdge = 1,
++    MTLSamplerAddressModeRepeat = 2,
++    MTLSamplerAddressModeMirrorRepeat = 3,
++    MTLSamplerAddressModeClampToZero = 4,
++    MTLSamplerAddressModeClampToBorderColor = 5,
++};
++typedef NS_ENUM(NSUInteger, MTLSamplerBorderColor) {
++    MTLSamplerBorderColorTransparentBlack = 0,
++    MTLSamplerBorderColorOpaqueBlack = 1,
++    MTLSamplerBorderColorOpaqueWhite = 2,
++};
++@protocol MTLDevice;
++@protocol MTLSamplerState <NSObject>
++@property(readonly) id<MTLDevice> device;
++@property(readonly) NSString* label;
++@end
++@interface MTLSamplerDescriptor : NSObject <NSCopying>
++@property MTLSamplerMinMagFilter minFilter;
++@property MTLSamplerMinMagFilter magFilter;
++@property MTLSamplerMipFilter mipFilter;
++@property NSUInteger maxAnisotropy;
++@property MTLSamplerAddressMode sAddressMode;
++@property MTLSamplerAddressMode tAddressMode;
++@property MTLSamplerAddressMode rAddressMode;
++@property MTLSamplerBorderColor borderColor;
++@property BOOL normalizedCoordinates;
++@property float lodMinClamp;
++@property float lodMaxClamp;
++@property BOOL supportArgumentBuffers;
++@property NSUInteger compareFunction;
++@property(copy) NSString* label;
+ @end
+-
+-#endif // _METAL_MTLSAMPLERDESCRIPTOR_H_
+diff --git a/include/Metal/MTLStencilDescriptor.h b/include/Metal/MTLStencilDescriptor.h
+index 9dd6f91..ebe0baf 100644
+--- a/include/Metal/MTLStencilDescriptor.h
++++ b/include/Metal/MTLStencilDescriptor.h
+@@ -3,10 +3,33 @@
+ 
+ #ifndef _METAL_MTLSTENCILDESCRIPTOR_H_
+ #define _METAL_MTLSTENCILDESCRIPTOR_H_
+-
+ #import <Foundation/Foundation.h>
+-
+-@interface MTLStencilDescriptor : NSObject
++typedef NS_ENUM(NSUInteger, MTLCompareFunction) {
++    MTLCompareFunctionNever = 0,
++    MTLCompareFunctionLess = 1,
++    MTLCompareFunctionEqual = 2,
++    MTLCompareFunctionLessEqual = 3,
++    MTLCompareFunctionGreater = 4,
++    MTLCompareFunctionNotEqual = 5,
++    MTLCompareFunctionGreaterEqual = 6,
++    MTLCompareFunctionAlways = 7,
++};
++typedef NS_ENUM(NSUInteger, MTLStencilOperation) {
++    MTLStencilOperationKeep = 0,
++    MTLStencilOperationZero = 1,
++    MTLStencilOperationReplace = 2,
++    MTLStencilOperationIncrementClamp = 3,
++    MTLStencilOperationDecrementClamp = 4,
++    MTLStencilOperationInvert = 5,
++    MTLStencilOperationIncrementWrap = 6,
++    MTLStencilOperationDecrementWrap = 7,
++};
++@interface MTLStencilDescriptor : NSObject <NSCopying>
++@property(nonatomic) MTLCompareFunction stencilCompareFunction;
++@property(nonatomic) MTLStencilOperation stencilFailureOperation;
++@property(nonatomic) MTLStencilOperation depthFailureOperation;
++@property(nonatomic) MTLStencilOperation depthStencilPassOperation;
++@property(nonatomic) uint32_t readMask;
++@property(nonatomic) uint32_t writeMask;
+ @end
+-
+-#endif // _METAL_MTLSTENCILDESCRIPTOR_H_
++#endif
+diff --git a/include/Metal/MTLTextureDescriptor.h b/include/Metal/MTLTextureDescriptor.h
+index 959d552..02e147f 100644
+--- a/include/Metal/MTLTextureDescriptor.h
++++ b/include/Metal/MTLTextureDescriptor.h
+@@ -1,12 +1,22 @@
+-// SPDX-FileCopyrightText: 2026 Darling Developers
+ // SPDX-License-Identifier: MPL-2.0
+-
+-#ifndef _METAL_MTLTEXTUREDESCRIPTOR_H_
+-#define _METAL_MTLTEXTUREDESCRIPTOR_H_
+-
+-#import <Foundation/Foundation.h>
+-
+-@interface MTLTextureDescriptor : NSObject
++#pragma once
++#import <Metal/MTLTexture.h>
++@interface MTLTextureDescriptor : NSObject <NSCopying>
++@property MTLTextureType textureType;
++@property MTLPixelFormat pixelFormat;
++@property NSUInteger width;
++@property NSUInteger height;
++@property NSUInteger depth;
++@property NSUInteger mipmapLevelCount;
++@property NSUInteger sampleCount;
++@property NSUInteger arrayLength;
++@property MTLResourceOptions resourceOptions;
++@property BOOL allowGPUOptimizedContents;
++@property MTLTextureUsage usage;
++@property MTLTextureSwizzleChannels swizzle;
++@property MTLCPUCacheMode cpuCacheMode;
++@property MTLStorageMode storageMode;
++@property MTLHazardTrackingMode hazardTrackingMode;
+++ (instancetype)texture2DDescriptorWithPixelFormat:(MTLPixelFormat)format width:(NSUInteger)width height:(NSUInteger)height mipmapped:(BOOL)mipmapped;
+++ (instancetype)textureCubeDescriptorWithPixelFormat:(MTLPixelFormat)format size:(NSUInteger)size mipmapped:(BOOL)mipmapped;
+ @end
+-
+-#endif // _METAL_MTLTEXTUREDESCRIPTOR_H_
+diff --git a/include/Metal/MTLVertexDescriptor.h b/include/Metal/MTLVertexDescriptor.h
+index 2084d6f..366dfa7 100644
+--- a/include/Metal/MTLVertexDescriptor.h
++++ b/include/Metal/MTLVertexDescriptor.h
+@@ -3,10 +3,90 @@
+ 
+ #ifndef _METAL_MTLVERTEXDESCRIPTOR_H_
+ #define _METAL_MTLVERTEXDESCRIPTOR_H_
+-
+ #import <Foundation/Foundation.h>
+-
+-@interface MTLVertexDescriptor : NSObject
++typedef NS_ENUM(NSUInteger, MTLVertexFormat) {
++    MTLVertexFormatInvalid = 0,
++    MTLVertexFormatUChar2 = 1,
++    MTLVertexFormatUChar3 = 2,
++    MTLVertexFormatUChar4 = 3,
++    MTLVertexFormatChar2 = 4,
++    MTLVertexFormatChar3 = 5,
++    MTLVertexFormatChar4 = 6,
++    MTLVertexFormatUChar2Normalized = 7,
++    MTLVertexFormatUChar3Normalized = 8,
++    MTLVertexFormatUChar4Normalized = 9,
++    MTLVertexFormatChar2Normalized = 10,
++    MTLVertexFormatChar3Normalized = 11,
++    MTLVertexFormatChar4Normalized = 12,
++    MTLVertexFormatUShort2 = 13,
++    MTLVertexFormatUShort3 = 14,
++    MTLVertexFormatUShort4 = 15,
++    MTLVertexFormatShort2 = 16,
++    MTLVertexFormatShort3 = 17,
++    MTLVertexFormatShort4 = 18,
++    MTLVertexFormatUShort2Normalized = 19,
++    MTLVertexFormatUShort3Normalized = 20,
++    MTLVertexFormatUShort4Normalized = 21,
++    MTLVertexFormatShort2Normalized = 22,
++    MTLVertexFormatShort3Normalized = 23,
++    MTLVertexFormatShort4Normalized = 24,
++    MTLVertexFormatHalf2 = 25,
++    MTLVertexFormatHalf3 = 26,
++    MTLVertexFormatHalf4 = 27,
++    MTLVertexFormatFloat = 28,
++    MTLVertexFormatFloat2 = 29,
++    MTLVertexFormatFloat3 = 30,
++    MTLVertexFormatFloat4 = 31,
++    MTLVertexFormatInt = 32,
++    MTLVertexFormatInt2 = 33,
++    MTLVertexFormatInt3 = 34,
++    MTLVertexFormatInt4 = 35,
++    MTLVertexFormatUInt = 36,
++    MTLVertexFormatUInt2 = 37,
++    MTLVertexFormatUInt3 = 38,
++    MTLVertexFormatUInt4 = 39,
++    MTLVertexFormatInt1010102Normalized = 40,
++    MTLVertexFormatUInt1010102Normalized = 41,
++    MTLVertexFormatUChar4Normalized_BGRA = 42,
++    MTLVertexFormatUChar = 45,
++    MTLVertexFormatChar = 46,
++    MTLVertexFormatUCharNormalized = 47,
++    MTLVertexFormatCharNormalized = 48,
++    MTLVertexFormatUShort = 49,
++    MTLVertexFormatShort = 50,
++    MTLVertexFormatUShortNormalized = 51,
++    MTLVertexFormatShortNormalized = 52,
++    MTLVertexFormatHalf = 53,
++};
++typedef NS_ENUM(NSUInteger, MTLVertexStepFunction) {
++    MTLVertexStepFunctionConstant = 0,
++    MTLVertexStepFunctionPerVertex = 1,
++    MTLVertexStepFunctionPerInstance = 2,
++    MTLVertexStepFunctionPerPatch = 3,
++    MTLVertexStepFunctionPerPatchControlPoint = 4,
++};
++@interface MTLVertexBufferLayoutDescriptor : NSObject <NSCopying>
++@property(nonatomic) NSUInteger stride;
++@property(nonatomic) MTLVertexStepFunction stepFunction;
++@property(nonatomic) NSUInteger stepRate;
+ @end
+-
+-#endif // _METAL_MTLVERTEXDESCRIPTOR_H_
++@interface MTLVertexBufferLayoutDescriptorArray : NSObject <NSCopying>
++- (MTLVertexBufferLayoutDescriptor*)objectAtIndexedSubscript:(NSUInteger)index;
++- (void)setObject:(MTLVertexBufferLayoutDescriptor*)descriptor atIndexedSubscript:(NSUInteger)index;
++@end
++@interface MTLVertexAttributeDescriptor : NSObject <NSCopying>
++@property(nonatomic) MTLVertexFormat format;
++@property(nonatomic) NSUInteger offset;
++@property(nonatomic) NSUInteger bufferIndex;
++@end
++@interface MTLVertexAttributeDescriptorArray : NSObject <NSCopying>
++- (MTLVertexAttributeDescriptor*)objectAtIndexedSubscript:(NSUInteger)index;
++- (void)setObject:(MTLVertexAttributeDescriptor*)descriptor atIndexedSubscript:(NSUInteger)index;
++@end
++@interface MTLVertexDescriptor : NSObject <NSCopying>
+++ (instancetype)vertexDescriptor;
++@property(readonly) MTLVertexBufferLayoutDescriptorArray* layouts;
++@property(readonly) MTLVertexAttributeDescriptorArray* attributes;
++- (void)reset;
++@end
++#endif
+diff --git a/include/Metal/Metal.h b/include/Metal/Metal.h
+index 3c63a1d..a9c0dc7 100644
+--- a/include/Metal/Metal.h
++++ b/include/Metal/Metal.h
+@@ -5,6 +5,8 @@
+ #define _METAL_METAL_H_
+ 
+ #import <Metal/MTLBuffer.h>
++#import <Metal/MTLArgument.h>
++#import <Metal/MTLBlitCommandEncoder.h>
+ #import <Metal/MTLCommandBuffer.h>
+ #import <Metal/MTLCommandEncoder.h>
+ #import <Metal/MTLCommandQueue.h>
+diff --git a/private-include/Metal/MTLBufferInternal.h b/private-include/Metal/MTLBufferInternal.h
+index 0a620b2..79cf40a 100644
+--- a/private-include/Metal/MTLBufferInternal.h
++++ b/private-include/Metal/MTLBufferInternal.h
+@@ -13,7 +13,7 @@
+ @interface MTLBufferInternal : NSObject <MTLBuffer>
+ 
+ #if DARLING_METAL_ENABLED
+-@property(readonly) std::shared_ptr<Indium::Buffer> buffer;
++@property(nonatomic, readonly) std::shared_ptr<Indium::Buffer> buffer;
+ 
+ - (instancetype)initWithBuffer: (std::shared_ptr<Indium::Buffer>)buffer
+                         device: (id<MTLDevice>)device
+@@ -21,5 +21,8 @@
+ #endif
+ 
+ @end
++// Direct access for the encoders: the property getter is a message send that returns the shared_ptr by value.
++const std::shared_ptr<Indium::Buffer>& MTLBufferGetIndium(id object);
++
+ 
+ #endif // _METAL_MTLBUFFERINTERNAL_H_
+diff --git a/private-include/Metal/MTLRenderPipelineInternal.h b/private-include/Metal/MTLRenderPipelineInternal.h
+index 2463e97..750a245 100644
+--- a/private-include/Metal/MTLRenderPipelineInternal.h
++++ b/private-include/Metal/MTLRenderPipelineInternal.h
+@@ -39,7 +39,7 @@ METAL_DECLARATIONS_BEGIN
+ @interface MTLRenderPipelineStateInternal : NSObject <MTLRenderPipelineState>
+ 
+ #if DARLING_METAL_ENABLED
+-@property(readonly) std::shared_ptr<Indium::RenderPipelineState> state;
++@property(nonatomic, readonly) std::shared_ptr<Indium::RenderPipelineState> state;
+ 
+ - (instancetype)initWithState: (std::shared_ptr<Indium::RenderPipelineState>)state
+                        device: (id<MTLDevice>)device
+@@ -47,6 +47,9 @@ METAL_DECLARATIONS_BEGIN
+ #endif
+ 
+ @end
++// Direct access for the encoders: the property getter is a message send that returns the shared_ptr by value.
++const std::shared_ptr<Indium::RenderPipelineState>& MTLRenderPipelineGetIndium(id object);
++
+ 
+ METAL_DECLARATIONS_END
+ 
+diff --git a/private-include/Metal/MTLTextureInternal.h b/private-include/Metal/MTLTextureInternal.h
+index 09572bf..f8e2977 100644
+--- a/private-include/Metal/MTLTextureInternal.h
++++ b/private-include/Metal/MTLTextureInternal.h
+@@ -37,7 +37,7 @@ MTL_EXPORT
+ @interface MTLTextureInternal : NSObject <MTLTexture>
+ 
+ #if DARLING_METAL_ENABLED
+-@property(readonly) std::shared_ptr<Indium::Texture> texture;
++@property(nonatomic, readonly) std::shared_ptr<Indium::Texture> texture;
+ 
+ - (instancetype)initWithTexture: (std::shared_ptr<Indium::Texture>)texture
+                          device: (id<MTLDevice>)device
+@@ -45,5 +45,8 @@ MTL_EXPORT
+ #endif
+ 
+ @end
++// Direct access for the encoders: the property getter is a message send that returns the shared_ptr by value.
++const std::shared_ptr<Indium::Texture>& MTLTextureGetIndium(id object);
++
+ 
+ #endif // _METAL_MTLTEXTUREINTERNAL_H_
+diff --git a/src/Metal/MTLBuffer.mm b/src/Metal/MTLBuffer.mm
+index e3382a8..1182427 100644
+--- a/src/Metal/MTLBuffer.mm
++++ b/src/Metal/MTLBuffer.mm
+@@ -11,6 +11,10 @@
+ #if DARLING_METAL_ENABLED
+ 
+ @synthesize buffer = _buffer;
++const std::shared_ptr<Indium::Buffer>& MTLBufferGetIndium(id object) {
++	static const std::shared_ptr<Indium::Buffer> none;
++	return object ? ((MTLBufferInternal*) object)->_buffer : none;
++}
+ @synthesize device = _device;
+ @synthesize resourceOptions = _resourceOptions;
+ @synthesize label = _label;
+diff --git a/src/Metal/MTLCommandBuffer.mm b/src/Metal/MTLCommandBuffer.mm
+index 7dedaa0..5eca991 100644
+--- a/src/Metal/MTLCommandBuffer.mm
++++ b/src/Metal/MTLCommandBuffer.mm
+@@ -1,7 +1,18 @@
+ // SPDX-FileCopyrightText: 2026 Darling Developers
+ // SPDX-License-Identifier: MPL-2.0
+ 
++#import <Metal/MTLTrace.h>
++#import <Metal/MTLTexture.h>
++#import <QuartzCore/CAMetalLayer.h>
++#include <algorithm>
++#include <atomic>
++#include <mutex>
++#include <string>
++#include <vector>
++#include <cstdio>
++#include <unistd.h>
+ #import <Metal/MTLCommandBufferInternal.h>
++#import <Metal/MTLBlitCommandEncoderInternal.h>
+ #import <Metal/MTLComputeCommandEncoderInternal.h>
+ #import <Metal/MTLDevice.h>
+ #import <Metal/MTLCommandQueue.h>
+@@ -9,6 +20,199 @@
+ #import <Metal/stubs.h>
+ #import <Metal/MTLRenderCommandEncoderInternal.h>
+ 
++
++#if DARLING_METAL_ENABLED
++// Diagnostic (MTLDebugEnabled only): remember the most recent render pass of a command buffer, then once the
++// pass is finished read its first color target back and log how many draws it had and whether any pixel is lit.
++struct MTLDebugPass {
++	id<MTLCommandBuffer> commandBuffer = nil;
++	id<MTLTexture> texture = nil;
++	unsigned long drawsAtStart = 0;
++	unsigned long ordinal = 0;
++	unsigned long load = 0;
++};
++static thread_local MTLDebugPass debugPass;
++
++static void MTLDebugFlushPass(id<MTLCommandBuffer> commandBuffer)
++{
++	if (!debugPass.texture) {
++		return;
++	}
++	id<MTLTexture> texture = debugPass.texture;
++	debugPass.texture = nil;
++	if (debugPass.commandBuffer != commandBuffer) {
++		[texture release];
++		return;
++	}
++	unsigned long draws = MTLTraceDrawTotal() - debugPass.drawsAtStart;
++	unsigned long ordinal = debugPass.ordinal, load = debugPass.load;
++	NSUInteger width = texture.width, height = texture.height;
++	unsigned long format = texture.pixelFormat;
++	bool readable = (format == 80 || format == 81 || format == 70 || format == 71) && width >= 64;
++	static unsigned long logged = 0;
++	// Full-screen passes are logged only at the start; every other size keeps being logged (the 3D scene passes come later)
++	static unsigned long smallLogged = 0, fullLogged = 0;
++	bool full = width == 1920;
++	bool interestingSmall = !full && smallLogged < 400;
++	if (interestingSmall) ++smallLogged;
++	bool skipFull = full && ++fullLogged > 60;
++	if (!readable || skipFull || (ordinal > 400 && width < 1280 && !interestingSmall) || (!interestingSmall && ++logged > 600)) {
++		if (FILE* log = fopen("/tmp/metal-trace.log", "a")) {
++			if (ordinal <= 400) {
++				fprintf(log, "pass-end #%lu %lux%lu fmt=%lu draws=%lu (not read)\n", ordinal, (unsigned long) width, (unsigned long) height, format, draws);
++			}
++			fclose(log);
++		}
++		[texture release];
++		return;
++	}
++	id<MTLBuffer> readback = [[commandBuffer device] newBufferWithLength: width * height * 4 options: MTLResourceStorageModeShared];
++	id<MTLBlitCommandEncoder> blit = [commandBuffer blitCommandEncoder];
++	[blit copyFromTexture: texture sourceSlice: 0 sourceLevel: 0 sourceOrigin: MTLOriginMake(0, 0, 0)
++	           sourceSize: MTLSizeMake(width, height, 1) toBuffer: readback destinationOffset: 0
++	destinationBytesPerRow: width * 4 destinationBytesPerImage: width * height * 4];
++	[blit endEncoding];
++	[commandBuffer addCompletedHandler: ^(id<MTLCommandBuffer> finished) {
++		const uint8_t* bytes = (const uint8_t*) readback.contents;
++		unsigned long lit = 0, maxChannel = 0;
++		for (NSUInteger i = 0; i < width * height * 4; i += 4) {
++			unsigned char top = std::max(bytes[i], std::max(bytes[i + 1], bytes[i + 2]));
++			if (top) ++lit;
++			if (top > maxChannel) maxChannel = top;
++		}
++		if (FILE* log = fopen("/tmp/metal-trace.log", "a")) {
++			fprintf(log, "pass-end #%lu %lux%lu fmt=%lu load=%lu draws=%lu litPixels=%lu max=%lu\n", ordinal,
++				(unsigned long) width, (unsigned long) height, format, load, draws, lit, maxChannel);
++			fclose(log);
++		}
++		[readback release];
++		[texture release];
++	}];
++}
++#endif
++
++#if DARLING_METAL_ENABLED
++// Diagnostic (/tmp/metal-debug-timing): remember the render passes of a command buffer and report them when it is slow.
++struct MTLTimingPass {
++	std::string description;
++	id encoder = nil;
++	unsigned long drawsAtStart = 0;
++	unsigned long draws = 0;
++};
++static thread_local std::vector<MTLTimingPass> timingPasses;
++static thread_local id timingCommandBuffer = nil;
++
++static void MTLTimingFinishPass()
++{
++	if (!timingPasses.empty() && timingPasses.back().encoder) {
++		MTLTimingPass& pass = timingPasses.back();
++		pass.draws = MTLTraceDrawTotal() - pass.drawsAtStart;
++		NSString* label = [(id<MTLRenderCommandEncoder>) pass.encoder label];
++		if (label) pass.description += std::string(" '") + [label UTF8String] + "'";
++		[pass.encoder release];
++		pass.encoder = nil;
++	}
++}
++#endif
++
++#if DARLING_METAL_ENABLED
++// Diagnostic snapshot: while /tmp/metal-snapshot exists, save the output of the render passes (as .ppm in the guest /tmp,
++// first 60 per process) so each pass of a frame can be looked at. Cheap while the flag file is absent.
++struct MTLSnapPass {
++	id<MTLCommandBuffer> commandBuffer = nil;
++	id<MTLTexture> texture = nil;
++	unsigned long drawsAtStart = 0;
++};
++static thread_local MTLSnapPass snapPass;
++
++// The first line of /tmp/metal-snapshot names the capture; a new name starts a new capture of up to 30 passes.
++static std::mutex snapTagLock;
++static std::string snapTag;
++static unsigned long snapSavedForTag = 0;
++
++static bool MTLSnapshotArmed()
++{
++	static std::atomic<unsigned long> calls { 0 };
++	static std::atomic<bool> armed { false };
++	// re-read a few times a second: this runs for every encoder and commit, and a guest fopen is several host syscalls
++	if (calls.fetch_add(1) % 2048 == 0) {
++		bool present = false;
++		if (FILE* file = fopen("/tmp/metal-snapshot", "r")) {
++			char text[48] = {};
++			if (fgets(text, sizeof(text), file)) {
++				std::string tag(text);
++				while (!tag.empty() && (tag.back() == '\n' || tag.back() == ' ')) tag.pop_back();
++				std::lock_guard<std::mutex> guard(snapTagLock);
++				if (tag != snapTag) {
++					snapTag = tag;
++					snapSavedForTag = 0;
++				}
++			}
++			present = true;
++			fclose(file);
++		}
++		armed = present;
++	}
++	return armed;
++}
++
++static void MTLSnapFlush(id<MTLCommandBuffer> commandBuffer)
++{
++	if (!snapPass.texture) {
++		return;
++	}
++	id<MTLTexture> texture = snapPass.texture;
++	snapPass.texture = nil;
++	unsigned long draws = MTLTraceDrawTotal() - snapPass.drawsAtStart;
++	NSUInteger width = texture.width, height = texture.height;
++	unsigned long format = texture.pixelFormat;
++	bool readable = (format == 80 || format == 81 || format == 70 || format == 71) && width >= 16 && width <= 2048 && snapPass.commandBuffer == commandBuffer;
++	std::string tag;
++	unsigned long number = 0;
++	{
++		std::lock_guard<std::mutex> guard(snapTagLock);
++		if (!readable || snapSavedForTag >= 30) {
++			readable = false;
++		} else {
++			number = snapSavedForTag++;
++			tag = snapTag;
++		}
++	}
++	if (!readable) {
++		[texture release];
++		return;
++	}
++	id<MTLBuffer> readback = [[commandBuffer device] newBufferWithLength: width * height * 4 options: MTLResourceStorageModeShared];
++	id<MTLBlitCommandEncoder> blit = [commandBuffer blitCommandEncoder];
++	[blit copyFromTexture: texture sourceSlice: 0 sourceLevel: 0 sourceOrigin: MTLOriginMake(0, 0, 0)
++	           sourceSize: MTLSizeMake(width, height, 1) toBuffer: readback destinationOffset: 0
++	destinationBytesPerRow: width * 4 destinationBytesPerImage: width * height * 4];
++	[blit endEncoding];
++	[commandBuffer addCompletedHandler: ^(id<MTLCommandBuffer> finished) {
++		const uint8_t* bytes = (const uint8_t*) readback.contents;
++		char path[128];
++		snprintf(path, sizeof(path), "/tmp/snap-%s-%02lu-%lux%lu-draws%lu-tex%p.ppm", tag.c_str(), number, (unsigned long) width, (unsigned long) height, draws, (void*) texture);
++		if (FILE* out = fopen(path, "wb")) {
++			fprintf(out, "P6\n%lu %lu\n255\n", (unsigned long) width, (unsigned long) height);
++			bool bgra = format == 80 || format == 81;
++			std::vector<uint8_t> row(width * 3);
++			for (NSUInteger y = 0; y < height; ++y) {
++				for (NSUInteger x = 0; x < width; ++x) {
++					const uint8_t* px = bytes + (y * width + x) * 4;
++					row[x * 3 + 0] = bgra ? px[2] : px[0];
++					row[x * 3 + 1] = px[1];
++					row[x * 3 + 2] = bgra ? px[0] : px[2];
++				}
++				fwrite(row.data(), 1, row.size(), out);
++			}
++			fclose(out);
++		}
++		[readback release];
++		[texture release];
++	}];
++}
++#endif
++
+ #if DARLING_METAL_ENABLED
+ // used to take care of RR while passing the block around in C++ code
+ struct MTLCommandBufferHandlerWrapper {
+@@ -65,7 +269,7 @@ struct MTLCommandBufferHandlerWrapper {
+ 	if (self != nil) {
+ 		_commandBuffer = commandBuffer;
+ 		_device = [commandQueue.device retain];
+-		_commandQueue = [_commandQueue retain];
++		_commandQueue = [commandQueue retain];
+ 	}
+ 	return self;
+ }
+@@ -78,6 +282,13 @@ struct MTLCommandBufferHandlerWrapper {
+ 	[super dealloc];
+ }
+ 
++- (id<MTLBlitCommandEncoder>)blitCommandEncoder
++{
++    auto encoder = _commandBuffer->blitCommandEncoder();
++    if (!encoder) return nil;
++    return [[[MTLBlitCommandEncoderInternal alloc] initWithEncoder:encoder device:_device] autorelease];
++}
++
+ - (id<MTLComputeCommandEncoder>)computeCommandEncoderWithDescriptor: (MTLComputePassDescriptor*)computePassDescriptor
+ {
+ 	auto encoder = _commandBuffer->computeCommandEncoder(computePassDescriptor.asIndiumDescriptor);
+@@ -107,11 +318,91 @@ struct MTLCommandBufferHandlerWrapper {
+ 
+ - (id<MTLRenderCommandEncoder>)renderCommandEncoderWithDescriptor: (MTLRenderPassDescriptor*)renderPassDescriptor
+ {
++	MTLTraceCount("renderPass");
++	if (MTLDebugEnabled()) {
++		MTLRenderPassColorAttachmentDescriptor* sizeColor = [renderPassDescriptor.colorAttachments objectAtIndexedSubscript: 0];
++		char name[64];
++		snprintf(name, sizeof(name), "pass_%lux%lu_f%lu", sizeColor.texture ? (unsigned long) sizeColor.texture.width : 0UL, sizeColor.texture ? (unsigned long) sizeColor.texture.height : 0UL, sizeColor.texture ? (unsigned long) sizeColor.texture.pixelFormat : 0UL);
++		MTLTraceCount(name);
++	}
++	if (MTLDebugEnabled()) {
++		MTLDebugFlushPass(self);
++	}
++	// Diagnostic: with /tmp/metal-debug-magenta present, every pass clears its first color target to magenta
++	if (MTLDebugEnabled() && access("/tmp/metal-debug-magenta", F_OK) == 0) {
++		MTLRenderPassColorAttachmentDescriptor* debugColor = [renderPassDescriptor.colorAttachments objectAtIndexedSubscript: 0];
++		if (debugColor.texture && debugColor.loadAction == MTLLoadActionClear) {
++			debugColor.clearColor = MTLClearColorMake(1, 0, 1, 1);
++		}
++	}
++	{
++		// Diagnostic: describe the first render passes (and every 500th) in the trace log
++		static unsigned long passes = 0;
++		++passes;
++		if (MTLDebugEnabled() && (passes <= 40 || passes % 500 == 0)) {
++			MTLRenderPassColorAttachmentDescriptor* color = [renderPassDescriptor.colorAttachments objectAtIndexedSubscript: 0];
++			id<MTLTexture> texture = color.texture;
++			if (FILE* log = fopen("/tmp/metal-trace.log", "a")) {
++				fprintf(log, "pass #%lu color0: tex=%s %lux%lu fmt=%lu load=%lu store=%lu clear=(%.2f %.2f %.2f %.2f) depth=%d\n", passes,
++					texture ? "yes" : "none", texture ? (unsigned long) texture.width : 0UL, texture ? (unsigned long) texture.height : 0UL,
++					texture ? (unsigned long) texture.pixelFormat : 0UL, (unsigned long) color.loadAction, (unsigned long) color.storeAction,
++					color.clearColor.red, color.clearColor.green, color.clearColor.blue, color.clearColor.alpha,
++					renderPassDescriptor.depthAttachment.texture ? 1 : 0);
++				fclose(log);
++			}
++		}
++	}
+ 	auto encoder = _commandBuffer->renderCommandEncoder([renderPassDescriptor asIndiumDescriptor]);
+ 	if (!encoder) {
+ 		return nil;
+ 	}
+-	return [[[MTLRenderCommandEncoderInternal alloc] initWithEncoder: encoder device: _device] autorelease];
++	if (MTLDebugEnabled()) {
++		MTLRenderPassColorAttachmentDescriptor* color = [renderPassDescriptor.colorAttachments objectAtIndexedSubscript: 0];
++		static unsigned long ordinal = 0;
++		debugPass.commandBuffer = self;
++		debugPass.texture = [color.texture retain];
++		debugPass.drawsAtStart = MTLTraceDrawTotal();
++		debugPass.ordinal = ++ordinal;
++		debugPass.load = (unsigned long) color.loadAction;
++	}
++	id<MTLRenderCommandEncoder> result = [[[MTLRenderCommandEncoderInternal alloc] initWithEncoder: encoder device: _device] autorelease];
++	if (MTLTimingEnabled()) {
++		MTLTimingFinishPass();
++		if (timingCommandBuffer != self) {
++			timingPasses.clear();
++			timingCommandBuffer = self;
++		}
++		MTLRenderPassColorAttachmentDescriptor* color = [renderPassDescriptor.colorAttachments objectAtIndexedSubscript: 0];
++		char text[160];
++		snprintf(text, sizeof(text), "render %lux%lu fmt=%lu load=%lu depth=%d", color.texture ? (unsigned long) color.texture.width : 0UL, color.texture ? (unsigned long) color.texture.height : 0UL,
++			color.texture ? (unsigned long) color.texture.pixelFormat : 0UL, (unsigned long) color.loadAction, renderPassDescriptor.depthAttachment.texture ? 1 : 0);
++		{
++			char sizeName[64];
++			snprintf(sizeName, sizeof(sizeName), "pass_%lux%lu_f%lu_load%lu", color.texture ? (unsigned long) color.texture.width : 0UL, color.texture ? (unsigned long) color.texture.height : 0UL,
++				color.texture ? (unsigned long) color.texture.pixelFormat : 0UL, (unsigned long) color.loadAction);
++			MTLTraceTiming(sizeName, 0);
++		}
++		MTLTimingPass pass;
++		pass.description = text;
++		pass.encoder = [result retain];
++		pass.drawsAtStart = MTLTraceDrawTotal();
++		timingPasses.push_back(pass);
++	}
++	if (MTLSnapshotArmed()) {
++		MTLSnapFlush(self);
++		MTLRenderPassColorAttachmentDescriptor* snapColor = [renderPassDescriptor.colorAttachments objectAtIndexedSubscript: 0];
++		if (snapColor.texture) {
++			snapPass.commandBuffer = self;
++			snapPass.texture = [snapColor.texture retain];
++			snapPass.drawsAtStart = MTLTraceDrawTotal();
++		}
++	}
++	return result;
++}
++
++- (void)addScheduledHandler:(MTLCommandBufferHandler)block
++{
++    _commandBuffer->addScheduledHandler(MTLCommandBufferHandlerWrapper(block, self));
+ }
+ 
+ - (void)addCompletedHandler: (MTLCommandBufferHandler)block
+@@ -121,17 +412,107 @@ struct MTLCommandBufferHandlerWrapper {
+ 
+ - (void)waitUntilCompleted
+ {
++	double waitStart = MTLTimingEnabled() ? MTLTraceNow() : 0;
+ 	_commandBuffer->waitUntilCompleted();
++	if (MTLTimingEnabled()) {
++		MTLTraceTiming("waitUntilCompleted", MTLTraceNow() - waitStart);
++	}
+ }
+ 
+ - (void)presentDrawable: (id<MTLDrawable>)drawable
+ {
++	if (MTLDebugEnabled()) {
++		static unsigned long presents = 0;
++		id drawableTexture = [(id)drawable respondsToSelector: @selector(texture)] ? [(id<CAMetalDrawable>)drawable texture] : nil;
++		if (++presents <= 40) {
++			if (FILE* log = fopen("/tmp/metal-trace.log", "a")) {
++				fprintf(log, "present #%lu lastPassTexture=%p drawableTexture=%p same=%d\n", presents, debugPass.texture, drawableTexture, debugPass.texture == drawableTexture);
++				fclose(log);
++			}
++		}
++		MTLDebugFlushPass(self);
++	}
++	// Diagnostic: with /tmp/metal-debug-present-magenta present, paint the drawable magenta right before it is
++	// presented, to tell a broken presentation path from content that is genuinely black.
++	if (MTLDebugEnabled() && access("/tmp/metal-debug-present-magenta", F_OK) == 0 && [(id)drawable respondsToSelector: @selector(texture)]) {
++		MTLRenderPassDescriptor* debugPass = [MTLRenderPassDescriptor renderPassDescriptor];
++		MTLRenderPassColorAttachmentDescriptor* debugColor = [debugPass.colorAttachments objectAtIndexedSubscript: 0];
++		debugColor.texture = [(id<CAMetalDrawable>)drawable texture];
++		debugColor.loadAction = MTLLoadActionClear;
++		debugColor.storeAction = MTLStoreActionStore;
++		debugColor.clearColor = MTLClearColorMake(1, 0, 1, 1);
++		id<MTLRenderCommandEncoder> debugEncoder = [self renderCommandEncoderWithDescriptor: debugPass];
++		[debugEncoder endEncoding];
++
++		// ... and read the drawable back on the Vulkan side, to see what it holds before it crosses to GL
++		static unsigned long debugPresents = 0;
++		++debugPresents;
++		if (debugPresents <= 5 || debugPresents % 200 == 0) {
++			id<MTLTexture> texture = debugColor.texture;
++			NSUInteger width = texture.width, height = texture.height;
++			id<MTLBuffer> readback = [[self device] newBufferWithLength: width * height * 4 options: MTLResourceStorageModeShared];
++			id<MTLBlitCommandEncoder> debugBlit = [self blitCommandEncoder];
++			[debugBlit copyFromTexture: texture sourceSlice: 0 sourceLevel: 0 sourceOrigin: MTLOriginMake(0, 0, 0)
++			                sourceSize: MTLSizeMake(width, height, 1) toBuffer: readback destinationOffset: 0
++			    destinationBytesPerRow: width * 4 destinationBytesPerImage: width * height * 4];
++			[debugBlit endEncoding];
++			unsigned long ordinal = debugPresents;
++			[self addCompletedHandler: ^(id<MTLCommandBuffer> finished) {
++				const uint8_t* bytes = (const uint8_t*) readback.contents;
++				unsigned long nonZero = 0;
++				for (NSUInteger i = 0; i < width * height * 4; i += 4) {
++					if (bytes[i] | bytes[i + 1] | bytes[i + 2]) ++nonZero;
++				}
++				if (FILE* log = fopen("/tmp/metal-trace.log", "a")) {
++					fprintf(log, "vulkan-readback #%lu %lux%lu nonZeroPixels=%lu first=(%u %u %u %u) fmt=%lu\n", ordinal,
++						(unsigned long) width, (unsigned long) height, nonZero, bytes[0], bytes[1], bytes[2], bytes[3], (unsigned long) texture.pixelFormat);
++					fclose(log);
++				}
++				[readback release];
++			}];
++		}
++	}
+ 	_commandBuffer->presentDrawable(((id<MTLDrawableInternal>)drawable).drawable);
+ }
+ 
+ - (void)commit
+ {
++	MTLTraceCount("commit");
++	if (MTLSnapshotArmed()) {
++		MTLSnapFlush(self);
++	}
++	double commitStart = MTLTimingEnabled() ? MTLTraceNow() : 0;
++	if (MTLTimingEnabled()) {
++		std::string report;
++		if (timingCommandBuffer == self) {
++			MTLTimingFinishPass();
++			for (const auto& pass: timingPasses) {
++				char draws[32];
++				snprintf(draws, sizeof(draws), " draws=%lu; ", pass.draws);
++				report += pass.description + draws;
++			}
++			timingPasses.clear();
++			timingCommandBuffer = nil;
++		}
++		_commandBuffer->addCompletedHandler(MTLCommandBufferHandlerWrapper(^(id<MTLCommandBuffer> finished) {
++			double elapsed = MTLTraceNow() - commitStart;
++			MTLTraceTiming("gpuCommitToComplete", elapsed);
++			static std::atomic<int> reported { 0 };
++			if (elapsed > 0.3 && reported.fetch_add(1) < 40) {
++				if (FILE* log = fopen("/tmp/metal-trace.log", "a")) {
++					fprintf(log, "slow-cmdbuf %.0fms label=%s passes: %s\n", elapsed * 1000, [[finished label] UTF8String] ? [[finished label] UTF8String] : "-", report.c_str());
++					fclose(log);
++				}
++			}
++		}, self));
++	}
++	if (MTLDebugEnabled()) {
++		MTLDebugFlushPass(self);
++	}
+ 	_commandBuffer->commit();
++	if (MTLTimingEnabled()) {
++		MTLTraceTiming("commitCall", MTLTraceNow() - commitStart);
++	}
+ }
+ 
+ #else
+diff --git a/src/Metal/MTLComputeCommandEncoder.mm b/src/Metal/MTLComputeCommandEncoder.mm
+index 208a0e9..b13ad20 100644
+--- a/src/Metal/MTLComputeCommandEncoder.mm
++++ b/src/Metal/MTLComputeCommandEncoder.mm
+@@ -1,3 +1,6 @@
++#import <Metal/MTLTrace.h>
++#import <Metal/MTLTextureInternal.h>
++#import <Metal/MTLSamplerStateInternal.h>
+ // SPDX-FileCopyrightText: 2026 Darling Developers
+ // SPDX-License-Identifier: MPL-2.0
+ 
+@@ -196,6 +199,15 @@ MTL_UNSUPPORTED_CLASS
+ 	[super dealloc];
+ }
+ 
++- (void)setTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index {
++    _encoder->setTexture(((MTLTextureInternal*)texture).texture, index);
++}
++- (void)setSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index {
++    _encoder->setSamplerState(((MTLSamplerStateInternal*)sampler).sampler, index);
++}
++- (void)setSamplerState:(id<MTLSamplerState>)sampler lodMinClamp:(float)lodMinClamp lodMaxClamp:(float)lodMaxClamp atIndex:(NSUInteger)index {
++    _encoder->setSamplerState(((MTLSamplerStateInternal*)sampler).sampler, lodMinClamp, lodMaxClamp, index);
++}
+ - (void)endEncoding
+ {
+ 	_encoder->endEncoding();
+@@ -249,6 +261,16 @@ MTL_UNSUPPORTED_CLASS
+ - (void)dispatchThreadgroups: (MTLSize)threadgroupsPerGrid
+        threadsPerThreadgroup: (MTLSize)threadsPerThreadgroup
+ {
++	MTLTraceCount("dispatch");
++	if (MTLTimingEnabled() || MTLDebugEnabled()) {
++		static unsigned long logged = 0;
++		if (++logged <= 40) {
++			if (FILE* log = fopen("/tmp/metal-trace.log", "a")) {
++				fprintf(log, "dispatch #%lu groups=(%lu %lu %lu) threads=(%lu %lu %lu)\n", logged, (unsigned long) threadgroupsPerGrid.width, (unsigned long) threadgroupsPerGrid.height, (unsigned long) threadgroupsPerGrid.depth, (unsigned long) threadsPerThreadgroup.width, (unsigned long) threadsPerThreadgroup.height, (unsigned long) threadsPerThreadgroup.depth);
++				fclose(log);
++			}
++		}
++	}
+ 	_encoder->dispatchThreadgroups(MTLSizeToIndium(threadgroupsPerGrid), MTLSizeToIndium(threadsPerThreadgroup));
+ }
+ 
+diff --git a/src/Metal/MTLDepthStencilDescriptor.mm b/src/Metal/MTLDepthStencilDescriptor.mm
+index 2a57796..0cbedf2 100644
+--- a/src/Metal/MTLDepthStencilDescriptor.mm
++++ b/src/Metal/MTLDepthStencilDescriptor.mm
+@@ -1,24 +1,58 @@
+ // SPDX-FileCopyrightText: 2026 Darling Developers
+ // SPDX-License-Identifier: MPL-2.0
+ 
+-#import <Metal/MTLDepthStencilDescriptor.h>
+-#import <Foundation/NSMethodSignature.h>
+-#import <Foundation/NSInvocation.h>
+-
++#import <Metal/MTLDepthStencilInternal.h>
++#import <Metal/MTLDevice.h>
++#import <Metal/stubs.h>
+ @implementation MTLDepthStencilDescriptor
+-
++@synthesize depthCompareFunction = _depthCompareFunction;
++@synthesize depthWriteEnabled = _depthWriteEnabled;
++@synthesize frontFaceStencil = _frontFaceStencil;
++@synthesize backFaceStencil = _backFaceStencil;
++@synthesize label = _label;
++- (instancetype)init {
++    self = [super init];
++    if (self) _depthCompareFunction = MTLCompareFunctionAlways;
++    return self;
++}
++- (void)dealloc { [_frontFaceStencil release]; [_backFaceStencil release]; [_label release]; [super dealloc]; }
++- (id)copyWithZone:(NSZone*)zone {
++    MTLDepthStencilDescriptor* copy = [[[self class] allocWithZone:zone] init];
++    copy.depthCompareFunction = _depthCompareFunction;
++    copy.depthWriteEnabled = _depthWriteEnabled;
++    copy.frontFaceStencil = _frontFaceStencil;
++    copy.backFaceStencil = _backFaceStencil;
++    copy.label = _label;
++    return copy;
++}
+ #if DARLING_METAL_ENABLED
+-
+-- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
+-{
+-    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++- (Indium::DepthStencilDescriptor)asIndiumDescriptor {
++    Indium::DepthStencilDescriptor result;
++    result.depthCompareFunction = static_cast<Indium::CompareFunction>(_depthCompareFunction);
++    result.depthWriteEnabled = _depthWriteEnabled;
++    if (_frontFaceStencil) result.frontFaceStencil = [_frontFaceStencil asIndiumDescriptor];
++    if (_backFaceStencil) result.backFaceStencil = [_backFaceStencil asIndiumDescriptor];
++    return result;
+ }
+-
+-- (void)forwardInvocation:(NSInvocation *)anInvocation
+-{
+-    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++#endif
++@end
++@implementation MTLDepthStencilStateInternal
++#if DARLING_METAL_ENABLED
++@synthesize state = _state;
++const std::shared_ptr<Indium::DepthStencilState>& MTLDepthStencilGetIndium(id object) {
++	static const std::shared_ptr<Indium::DepthStencilState> none;
++	return object ? ((MTLDepthStencilStateInternal*) object)->_state : none;
+ }
+-
++@synthesize device = _device;
++@synthesize label = _label;
++- (instancetype)initWithState:(std::shared_ptr<Indium::DepthStencilState>)state device:(id<MTLDevice>)device label:(NSString*)label {
++    self = [super init];
++    if (self) { _state = state; _device = [device retain]; _label = [label copy]; }
++    return self;
++}
++- (void)dealloc { [_device release]; [_label release]; [super dealloc]; }
++#else
++@dynamic device, label;
++MTL_UNSUPPORTED_CLASS
+ #endif
+-
+ @end
+diff --git a/src/Metal/MTLDevice.mm b/src/Metal/MTLDevice.mm
+index f58184a..6cfc697 100644
+--- a/src/Metal/MTLDevice.mm
++++ b/src/Metal/MTLDevice.mm
+@@ -2,13 +2,26 @@
+ // SPDX-License-Identifier: MPL-2.0
+ 
+ #import <Metal/MTLDeviceInternal.h>
++#import <Metal/MTLArgumentInternal.h>
++#import <Metal/MTLDepthStencilInternal.h>
+ #import <dispatch/dispatch.h>
+ #import <Metal/MTLLibraryInternal.h>
+ #import <Metal/MTLComputePipelineInternal.h>
+ #import <Metal/MTLCommandQueueInternal.h>
+ #import <Metal/MTLBufferInternal.h>
++#import <Metal/MTLSamplerStateInternal.h>
++#import <Metal/MTLTextureInternal.h>
++#import <Metal/MTLTextureDescriptor.h>
+ #import <Metal/MTLLibraryInternal.h>
+ #import <Metal/stubs.h>
++#import <Metal/MTLExceptionBridge.h>
++#import <Metal/MTLTrace.h>
++#include <string>
++#include <mutex>
++#include <unordered_map>
++#include <exception>
++#import <Metal/MTLVertexDescriptor.h>
++#include <type_traits>
+ #import <Metal/MTLRenderPipelineInternal.h>
+ 
+ MTL_EXTERN const MTLDeviceNotificationName MTLDeviceWasAddedNotification = @"MTLDeviceWasAdded";
+@@ -88,6 +101,37 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+ 	[observer release];
+ };
+ 
++
++#if DARLING_METAL_ENABLED
++// Diagnostic: report pipeline creation failures (the game just skips the work when a pipeline is nil).
++static void MTLDebugPipelineFailure(const char* what)
++{
++	if (!(MTLDebugEnabled() || MTLTimingEnabled())) {
++		return;
++	}
++	std::string message = "unknown";
++	try { throw; } catch (const std::exception& e) { message = e.what(); } catch (...) {}
++	MTLTraceCount(what);
++	static unsigned long logged = 0;
++	if (++logged <= 80) {
++		if (FILE* log = fopen("/tmp/metal-trace.log", "a")) {
++			fprintf(log, "pipeline-failure %s: %s\n", what, message.c_str());
++			fclose(log);
++		}
++	}
++}
++#endif
++
++#if DARLING_METAL_ENABLED
++std::mutex& MTLDebugReflectionLock() { static std::mutex lock; return lock; }
++std::unordered_map<void*, std::string>& MTLDebugReflectionMap() { static std::unordered_map<void*, std::string> map; return map; }
++std::string MTLDebugReflectionFor(void* pso)
++{
++	std::lock_guard<std::mutex> guard(MTLDebugReflectionLock());
++	auto it = MTLDebugReflectionMap().find(pso);
++	return it == MTLDebugReflectionMap().end() ? std::string("(none)") : it->second;
++}
++#endif
+ @implementation MTLDeviceInternal
+ 
+ #if DARLING_METAL_ENABLED
+@@ -153,12 +197,46 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+ 	[_threadExitCondition unlock];
+ }
+ 
++- (MTLReadWriteTextureTier)readWriteTextureSupport
++{
++	/* darling-lol: ANGLE queries this during GPU init; it was missing
++	 * (unrecognized selector -> terminate). Report Tier2; TierNone made
++	 * ANGLE refuse context creation outright (eglCreateContext failure ->
++	 * GPU exit(1) -> browser FATAL). If Indium lacks something ANGLE then
++	 * uses, that will surface as the next concrete gap instead. */
++	return MTLReadWriteTextureTier2;
++}
++
++/* darling-lol M57: feature queries ANGLE's Metal backend needs. */
++- (BOOL)isDepth24Stencil8PixelFormatSupported { return _device->supportsDepth24Stencil8PixelFormat(); }
++- (BOOL)hasUnifiedMemory { return YES; }
++- (NSUInteger)maxBufferLength { return 256u * 1024u * 1024u; }
++- (NSUInteger)recommendedMaxWorkingSetSize { return 1ull << 30; }
++- (BOOL)isLowPower { return NO; }
++- (BOOL)isRemovable { return NO; }
++- (BOOL)isHeadless { return NO; }
++- (NSString*)name { return @"Darling Indium Device"; }
++- (uint64_t)registryID { return 0; }
++- (BOOL)supportsFamily: (NSUInteger)family { return YES; }
++- (BOOL)supportsFeatureSet: (NSUInteger)featureSet { return YES; }
++- (BOOL)supportsTextureSampleCount: (NSUInteger)sampleCount { return sampleCount <= 4; }
++- (id<MTLCommandQueue>)newCommandQueueWithMaxCommandBufferCount: (NSUInteger)maxCommandBufferCount
++{
++	return [self newCommandQueue];
++}
++
+ - (id<MTLComputePipelineState>)newComputePipelineStateWithDescriptor: (MTLComputePipelineDescriptor*)descriptor
+                                                              options: (MTLPipelineOption)options
+                                                           reflection: (MTLAutoreleasedComputePipelineReflection*)reflection
+                                                                error: (NSError**)error
+ {
+-	auto pso = _device->newComputePipelineState(descriptor.asIndiumDescriptor, static_cast<Indium::PipelineOption>(options), nullptr);
++	std::decay_t<decltype(_device->newComputePipelineState(descriptor.asIndiumDescriptor, static_cast<Indium::PipelineOption>(options), nullptr))> pso;
++	try { pso = _device->newComputePipelineState(descriptor.asIndiumDescriptor, static_cast<Indium::PipelineOption>(options), nullptr); }
++	catch (...) {
++		MTLDebugPipelineFailure("computePipelineFailure");
++		if (error) *error = MTLErrorFromCurrentException("newComputePipelineStateWithDescriptor");
++		return nil;
++	}
+ 	if (!pso) {
+ 		if (error) {
+ 			// TODO: better error and/or match what the official Metal method does
+@@ -166,6 +244,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+ 		}
+ 		return nil;
+ 	}
++	if (reflection) *reflection = [[[MTLComputePipelineReflection alloc] initWithFunction:((MTLFunctionInternal*)descriptor.computeFunction).function] autorelease];
+ 	return [[MTLComputePipelineStateInternal alloc] initWithState: pso device: self label: descriptor.label];
+ }
+ 
+@@ -183,7 +262,13 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+                                                         reflection: (MTLAutoreleasedComputePipelineReflection*)reflection 
+                                                              error: (NSError**)error
+ {
+-	auto pso = _device->newComputePipelineState(((MTLFunctionInternal*)computeFunction).function, static_cast<Indium::PipelineOption>(options), nullptr);
++	std::decay_t<decltype(_device->newComputePipelineState(((MTLFunctionInternal*)computeFunction).function, static_cast<Indium::PipelineOption>(options), nullptr))> pso;
++	try { pso = _device->newComputePipelineState(((MTLFunctionInternal*)computeFunction).function, static_cast<Indium::PipelineOption>(options), nullptr); }
++	catch (...) {
++		MTLDebugPipelineFailure("computePipelineFailure");
++		if (error) *error = MTLErrorFromCurrentException("newComputePipelineStateWithFunction");
++		return nil;
++	}
+ 	if (!pso) {
+ 		if (error) {
+ 			// TODO: better error and/or match what the official Metal method does
+@@ -191,13 +276,44 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+ 		}
+ 		return nil;
+ 	}
++	if (reflection) *reflection = [[[MTLComputePipelineReflection alloc] initWithFunction:((MTLFunctionInternal*)computeFunction).function] autorelease];
+ 	return [[MTLComputePipelineStateInternal alloc] initWithState: pso device: self label: nil];
+ }
+ 
++- (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor*)descriptor options:(MTLPipelineOption)options reflection:(MTLAutoreleasedRenderPipelineReflection*)reflection error:(NSError**)error {
++    if (reflection) *reflection = nil;
++    if (options & ~(MTLPipelineOptionArgumentInfo | MTLPipelineOptionBufferTypeInfo)) {
++        if (error) *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOTSUP userInfo:nil];
++        return nil;
++    }
++    id<MTLRenderPipelineState> state = [self newRenderPipelineStateWithDescriptor:descriptor error:error];
++    if (state && reflection) *reflection = [[[MTLRenderPipelineReflection alloc] initWithVertexFunction:((MTLFunctionInternal*)descriptor.vertexFunction).function fragmentFunction:((MTLFunctionInternal*)descriptor.fragmentFunction).function vertexDescriptor:descriptor.vertexDescriptor] autorelease];
++    if (state && reflection && *reflection && MTLDrawTracking()) {
++        // Diagnostic: remember what the game is told about this pipeline's resources (it binds by these names/indices)
++        std::string text;
++        char piece[200];
++        for (MTLArgument* argument in [*reflection fragmentArguments]) {
++            snprintf(piece, sizeof(piece), " %lu:%lu:%s", (unsigned long) argument.type, (unsigned long) argument.index, [argument.name UTF8String]);
++            text += piece;
++        }
++        std::lock_guard<std::mutex> guard(MTLDebugReflectionLock());
++        MTLDebugReflectionMap()[(void*) state] = text;
++    }
++    return state;
++}
++
+ - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor: (MTLRenderPipelineDescriptor*)descriptor
+                                                              error: (NSError**)error
+ {
+-	auto pso = _device->newRenderPipelineState([descriptor asIndiumDescriptor]);
++	MTLTraceCount("pipelineRequest");
++	std::decay_t<decltype(_device->newRenderPipelineState([descriptor asIndiumDescriptor]))> pso;
++	try { pso = _device->newRenderPipelineState([descriptor asIndiumDescriptor]); }
++	catch (...) {
++		MTLDebugPipelineFailure("renderPipelineFailure");
++		MTLTraceCount("pipelineException");
++		if (error) *error = MTLErrorFromCurrentException("newRenderPipelineStateWithDescriptor");
++		return nil;
++	}
+ 	if (!pso) {
+ 		if (error) {
+ 			// TODO: better error and/or match what the official Metal method does
+@@ -205,7 +321,114 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+ 		}
+ 		return nil;
+ 	}
+-	return [[MTLRenderPipelineStateInternal alloc] initWithState: pso device: self label: descriptor.label];
++	id<MTLRenderPipelineState> created = [[MTLRenderPipelineStateInternal alloc] initWithState: pso device: self label: descriptor.label];
++	if (MTLDrawTracking()) {
++		// Diagnostic: the reflection the game would get for this pipeline (it binds resources by these names/indices)
++		MTLRenderPipelineReflection* debugReflection = [[[MTLRenderPipelineReflection alloc] initWithVertexFunction:((MTLFunctionInternal*)descriptor.vertexFunction).function fragmentFunction:((MTLFunctionInternal*)descriptor.fragmentFunction).function vertexDescriptor:descriptor.vertexDescriptor] autorelease];
++		std::string text = "vs=" + std::string([descriptor.vertexFunction.name UTF8String] ?: "(nil)") +
++            " fs=" + std::string([descriptor.fragmentFunction.name UTF8String] ?: "(nil)");
++		char piece[200];
++		for (MTLArgument* argument in [debugReflection fragmentArguments]) {
++			snprintf(piece, sizeof(piece), " %lu:%lu:%s", (unsigned long) argument.type, (unsigned long) argument.index, [argument.name UTF8String]);
++			text += piece;
++		}
++		std::lock_guard<std::mutex> guard(MTLDebugReflectionLock());
++		MTLDebugReflectionMap()[(void*) created] = text;
++	}
++	static unsigned long logged = 0;
++	if (MTLDebugEnabled() && ++logged <= 300) {
++		if (FILE* log = fopen("/tmp/metal-trace.log", "a")) {
++			MTLRenderPipelineColorAttachmentDescriptor* color = [descriptor.colorAttachments objectAtIndexedSubscript: 0];
++			fprintf(log, "pso %p indium=%p vs=%s fs=%s color0 fmt=%lu blend=%d src=%lu/%lu dst=%lu/%lu op=%lu/%lu mask=%lu depthFmt=%lu samples=%lu rasterDiscard=%d\n", created, (void*) pso.get(),
++				[descriptor.vertexFunction.name UTF8String], [descriptor.fragmentFunction.name UTF8String],
++				(unsigned long) color.pixelFormat, (int) color.blendingEnabled,
++				(unsigned long) color.sourceRGBBlendFactor, (unsigned long) color.sourceAlphaBlendFactor,
++				(unsigned long) color.destinationRGBBlendFactor, (unsigned long) color.destinationAlphaBlendFactor,
++				(unsigned long) color.rgbBlendOperation, (unsigned long) color.alphaBlendOperation, (unsigned long) color.writeMask,
++				(unsigned long) descriptor.depthAttachmentPixelFormat, (unsigned long) descriptor.sampleCount, (int) descriptor.rasterizationEnabled);
++			MTLVertexDescriptor* vertex = descriptor.vertexDescriptor;
++			for (NSUInteger i = 0; vertex && i < 31; ++i) {
++				MTLVertexAttributeDescriptor* attr = vertex.attributes[i];
++				if (attr.format == MTLVertexFormatInvalid) continue;
++				MTLVertexBufferLayoutDescriptor* layout = vertex.layouts[attr.bufferIndex];
++				fprintf(log, "  attr[%lu] fmt=%lu off=%lu buf=%lu stride=%lu step=%lu rate=%lu\n", (unsigned long) i, (unsigned long) attr.format,
++					(unsigned long) attr.offset, (unsigned long) attr.bufferIndex, (unsigned long) layout.stride, (unsigned long) layout.stepFunction, (unsigned long) layout.stepRate);
++			}
++			if (!vertex) fprintf(log, "  no vertex descriptor\n");
++			fclose(log);
++		}
++	}
++	return created;
++}
++
++- (id<MTLDepthStencilState>)newDepthStencilStateWithDescriptor:(MTLDepthStencilDescriptor*)descriptor
++{
++    if (!descriptor) return nil;
++    auto state = _device->newDepthStencilState([descriptor asIndiumDescriptor]);
++    if (!state) return nil;
++    return [[MTLDepthStencilStateInternal alloc] initWithState:state device:self label:descriptor.label];
++}
++
++- (id<MTLSamplerState>)newSamplerStateWithDescriptor:(MTLSamplerDescriptor*)descriptor
++{
++    if (!descriptor) return nil;
++    Indium::SamplerDescriptor desc;
++    desc.minFilter = static_cast<Indium::SamplerMinMagFilter>(descriptor.minFilter);
++    desc.magFilter = static_cast<Indium::SamplerMinMagFilter>(descriptor.magFilter);
++    desc.mipFilter = static_cast<Indium::SamplerMipFilter>(descriptor.mipFilter);
++    desc.maxAnisotropy = descriptor.maxAnisotropy;
++    desc.sAddressMode = static_cast<Indium::SamplerAddressMode>(descriptor.sAddressMode);
++    desc.tAddressMode = static_cast<Indium::SamplerAddressMode>(descriptor.tAddressMode);
++    desc.rAddressMode = static_cast<Indium::SamplerAddressMode>(descriptor.rAddressMode);
++    desc.borderColor = static_cast<Indium::SamplerBorderColor>(descriptor.borderColor);
++    desc.normalizedCoordinates = descriptor.normalizedCoordinates;
++    desc.lodMinClamp = descriptor.lodMinClamp;
++    desc.lodMaxClamp = descriptor.lodMaxClamp;
++    desc.supportArgumentBuffers = descriptor.supportArgumentBuffers;
++    desc.compareFunction = static_cast<Indium::CompareFunction>(descriptor.compareFunction);
++    auto sampler = _device->newSamplerState(desc);
++    if (!sampler) return nil;
++    return [[MTLSamplerStateInternal alloc] initWithSampler:sampler device:self label:descriptor.label];
++}
++
++- (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor*)descriptor
++{
++    MTLTraceCount("newTexture");
++    if (!descriptor || !descriptor.width || !descriptor.height || !descriptor.depth ||
++        !descriptor.mipmapLevelCount || !descriptor.sampleCount || !descriptor.arrayLength) return nil;
++    Indium::TextureDescriptor desc;
++    desc.textureType = static_cast<Indium::TextureType>(descriptor.textureType);
++    desc.pixelFormat = static_cast<Indium::PixelFormat>(descriptor.pixelFormat);
++    desc.width = descriptor.width;
++    desc.height = descriptor.height;
++    desc.depth = descriptor.depth;
++    desc.mipmapLevelCount = descriptor.mipmapLevelCount;
++    desc.sampleCount = descriptor.sampleCount;
++    desc.arrayLength = descriptor.arrayLength;
++    desc.resourceOptions = static_cast<Indium::ResourceOptions>(descriptor.resourceOptions);
++    desc.allowGPUOptimizedContents = descriptor.allowGPUOptimizedContents;
++    desc.usage = static_cast<Indium::TextureUsage>(descriptor.usage);
++    desc.swizzle = MTLTextureSwizzleChannelsToIndium(descriptor.swizzle);
++    std::shared_ptr<Indium::Texture> texture;
++    std::string failure;
++    try { texture = _device->newTexture(desc); }
++    catch (const std::exception& e) { failure = e.what(); }
++    catch (...) { failure = "unknown exception"; }
++    if (MTLDebugEnabled() || MTLTimingEnabled()) {
++        static unsigned long renderTargets = 0, failures = 0;
++        bool renderTarget = (descriptor.usage & MTLTextureUsageRenderTarget) != 0;
++        if (!texture ? ++failures <= 60 : (renderTarget && ++renderTargets <= 80)) {
++            if (FILE* log = fopen("/tmp/metal-trace.log", "a")) {
++                fprintf(log, "%s %lux%lux%lu type=%lu fmt=%lu mips=%lu len=%lu samples=%lu usage=%lu storage=%lu %s\n", texture ? "renderTargetTexture" : "TEXTURE-FAILED",
++                    (unsigned long) descriptor.width, (unsigned long) descriptor.height, (unsigned long) descriptor.depth, (unsigned long) descriptor.textureType,
++                    (unsigned long) descriptor.pixelFormat, (unsigned long) descriptor.mipmapLevelCount, (unsigned long) descriptor.arrayLength, (unsigned long) descriptor.sampleCount,
++                    (unsigned long) descriptor.usage, (unsigned long) descriptor.storageMode, failure.c_str());
++                fclose(log);
++            }
++        }
++    }
++    if (!texture) return nil;
++    return [[MTLTextureInternal alloc] initWithTexture:texture device:self resourceOptions:descriptor.resourceOptions];
+ }
+ 
+ - (id<MTLCommandQueue>)newCommandQueue
+@@ -275,8 +498,21 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+ - (id<MTLLibrary>)newLibraryWithData: (dispatch_data_t)data
+                                error: (NSError**)error
+ {
+-	NSData* nsdata = (NSData*)data;
+-	auto lib = _device->newLibrary(nsdata.bytes, nsdata.length);
++    const void* bytes = nullptr;
++    size_t length = 0;
++    dispatch_data_t mapped = dispatch_data_create_map(data, &bytes, &length);
++    if (!mapped) {
++        if (error) *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOMEM userInfo:nil];
++        return nil;
++    }
++    std::shared_ptr<Indium::Library> lib;
++    try { lib = _device->newLibrary(bytes, length); }
++    catch (...) {
++        dispatch_release(mapped);
++        if (error) *error = MTLErrorFromCurrentException("newLibraryWithData");
++        return nil;
++    }
++    dispatch_release(mapped);
+ 	if (!lib) {
+ 		return nil;
+ 	}
+diff --git a/src/Metal/MTLLibrary.mm b/src/Metal/MTLLibrary.mm
+index 0feb46e..e0c0e93 100644
+--- a/src/Metal/MTLLibrary.mm
++++ b/src/Metal/MTLLibrary.mm
+@@ -1,6 +1,7 @@
+ // SPDX-FileCopyrightText: 2026 Darling Developers
+ // SPDX-License-Identifier: MPL-2.0
+ 
++#import <Metal/MTLExceptionBridge.h>
+ #import <Metal/MTLLibraryInternal.h>
+ #import <Metal/MTLDevice.h>
+ #import <Metal/stubs.h>
+@@ -27,10 +28,12 @@
+ 	self = [super init];
+ 	if (self != nil) {
+ 		_function = function;
++        _functionType = static_cast<MTLFunctionType>(function->functionType());
++
+ 		_device = [device retain];
+ 
+ 		// cache the name
+-		_name = [NSString stringWithUTF8String: _function->name().c_str()];
++		_name = [[NSString alloc] initWithUTF8String: _function->name().c_str()];
+ 	}
+ 	return self;
+ }
+@@ -121,7 +124,12 @@ MTL_UNSUPPORTED_CLASS
+ 
+ - (id<MTLFunction>)newFunctionWithName: (NSString*)functionName
+ {
+-	auto func = _library->newFunction(functionName.UTF8String);
++	std::shared_ptr<Indium::Function> func;
++	try { func = _library->newFunction(functionName.UTF8String); }
++	catch (...) {
++		MTLErrorFromCurrentException("newFunctionWithName");
++		return nil;
++	}
+ 	if (!func) {
+ 		return nil;
+ 	}
+diff --git a/src/Metal/MTLRenderCommandEncoder.mm b/src/Metal/MTLRenderCommandEncoder.mm
+index e931b90..e13dc0e 100644
+--- a/src/Metal/MTLRenderCommandEncoder.mm
++++ b/src/Metal/MTLRenderCommandEncoder.mm
+@@ -1,3 +1,9 @@
++#import <Metal/MTLTrace.h>
++#import <Metal/MTLCommandBuffer.h>
++#import <Metal/MTLBlitCommandEncoder.h>
++#import <Metal/MTLTextureInternal.h>
++#import <Metal/MTLSamplerStateInternal.h>
++#import <Metal/MTLDepthStencilInternal.h>
+ // SPDX-FileCopyrightText: 2026 Darling Developers
+ // SPDX-License-Identifier: MPL-2.0
+ 
+@@ -9,8 +15,268 @@
+ #import <Metal/MTLRenderPipelineInternal.h>
+ #import <Metal/MTLTypesInternal.h>
+ 
++#include <algorithm>
++#include <atomic>
++#include <cstring>
+ #include <map>
++#include <string>
++#if DARLING_METAL_ENABLED
++extern std::string MTLDebugReflectionFor(void* pso);
++#endif
++
++#if DARLING_METAL_ENABLED
++// Diagnostic (MTLDebugEnabled only): the state a draw is issued with, logged for the first few hundred draws.
++struct MTLDebugDrawState {
++	MTLViewport viewport = {};
++	MTLScissorRect scissor = {};
++	long cull = -1, winding = -1, fill = -1;
++	void* pipeline = nullptr;
++	void* depthStencil = nullptr;
++	id vertexBuffers[31] = {}; NSUInteger vertexOffsets[31] = {};
++	id fragmentBuffers[31] = {}; NSUInteger fragmentOffsets[31] = {};
++	unsigned char vertexBytes[31][64] = {}; NSUInteger vertexBytesLength[31] = {};
++	unsigned char fragmentBytes[31][64] = {}; NSUInteger fragmentBytesLength[31] = {};
++	id fragmentTextures[31] = {};
++	id vertexTextures[31] = {};
++};
++static thread_local MTLDebugDrawState debugDrawState;
++
++// Experiments, each enabled by a file in the guest /tmp present when the process starts (with metal-debug-trace)
++#define MTL_DEBUG_FLAG(name) ([]{ static const bool on = MTLDebugEnabled() && access("/tmp/" name, F_OK) == 0; return on; }())
++
++
++static void MTLDebugDumpFloats(FILE* log, const char* what, int index, const void* bytes, size_t available)
++{
++	fprintf(log, "  %s[%d]:", what, index);
++	const float* floats = (const float*) bytes;
++	for (size_t i = 0; i < 16 && (i + 1) * 4 <= available; ++i) {
++		fprintf(log, " %g", floats[i]);
++	}
++	fprintf(log, "\n");
++}
++
++static void MTLDebugDumpBindings(unsigned long drawn)
++{
++	const MTLDebugDrawState& state = debugDrawState;
++	FILE* log = fopen("/tmp/metal-trace.log", "a");
++	if (!log) {
++		return;
++	}
++	fprintf(log, "bindings at draw #%lu\n", drawn);
++	for (int i = 0; i < 31; ++i) {
++		if (state.vertexBuffers[i]) {
++			id<MTLBuffer> buffer = state.vertexBuffers[i];
++			const char* contents = (const char*) buffer.contents;
++			fprintf(log, "  vbuf[%d] len=%lu off=%lu contents=%s\n", i, (unsigned long) buffer.length, (unsigned long) state.vertexOffsets[i], contents ? "cpu" : "none");
++			if (contents && state.vertexOffsets[i] < buffer.length) {
++				MTLDebugDumpFloats(log, "vdata", i, contents + state.vertexOffsets[i], buffer.length - state.vertexOffsets[i]);
++			}
++		}
++		if (state.vertexBytesLength[i]) {
++			MTLDebugDumpFloats(log, "vbytes", i, state.vertexBytes[i], std::min<size_t>(64, state.vertexBytesLength[i]));
++		}
++		if (state.fragmentBuffers[i]) {
++			id<MTLBuffer> buffer = state.fragmentBuffers[i];
++			const char* contents = (const char*) buffer.contents;
++			fprintf(log, "  fbuf[%d] len=%lu off=%lu contents=%s\n", i, (unsigned long) buffer.length, (unsigned long) state.fragmentOffsets[i], contents ? "cpu" : "none");
++			if (contents && state.fragmentOffsets[i] < buffer.length) {
++				MTLDebugDumpFloats(log, "fdata", i, contents + state.fragmentOffsets[i], buffer.length - state.fragmentOffsets[i]);
++			}
++		}
++		if (state.fragmentBytesLength[i]) {
++			MTLDebugDumpFloats(log, "fbytes", i, state.fragmentBytes[i], std::min<size_t>(64, state.fragmentBytesLength[i]));
++		}
++		if (state.fragmentTextures[i]) {
++			id<MTLTexture> texture = state.fragmentTextures[i];
++			unsigned long width = texture.width, height = texture.height, format = texture.pixelFormat;
++			unsigned long lit = 0, alpha = 0, total = 0;
++			bool read = MTLDebugEnabled() && (format == 80 || format == 81 || format == 70 || format == 71) && width * height <= 4096 * 4096;
++			if (read) {
++				id<MTLCommandQueue> queue = [[texture device] newCommandQueue];
++				id<MTLBuffer> readback = [[texture device] newBufferWithLength: width * height * 4 options: MTLResourceStorageModeShared];
++				id<MTLCommandBuffer> commandBuffer = [queue commandBuffer];
++				id<MTLBlitCommandEncoder> blit = [commandBuffer blitCommandEncoder];
++				[blit copyFromTexture: texture sourceSlice: 0 sourceLevel: 0 sourceOrigin: MTLOriginMake(0, 0, 0)
++				           sourceSize: MTLSizeMake(width, height, 1) toBuffer: readback destinationOffset: 0
++				destinationBytesPerRow: width * 4 destinationBytesPerImage: width * height * 4];
++				[blit endEncoding];
++				[commandBuffer commit];
++				[commandBuffer waitUntilCompleted];
++				const uint8_t* bytes = (const uint8_t*) readback.contents;
++				for (unsigned long k = 0; k < width * height * 4; k += 4) {
++					++total;
++					if (bytes[k] | bytes[k + 1] | bytes[k + 2]) ++lit;
++					if (bytes[k + 3]) ++alpha;
++				}
++				[readback release];
++				[queue release];
++			}
++			fprintf(log, "  ftex[%d] ptr=%p %lux%lu type=%lu mips=%lu len=%lu samples=%lu fmt=%lu%s litRGB=%lu alphaNonZero=%lu of %lu\n", i, (void*) texture, width, height, (unsigned long) texture.textureType, (unsigned long) texture.mipmapLevelCount, (unsigned long) texture.arrayLength, (unsigned long) texture.sampleCount, format, read ? "" : " (not read)", lit, alpha, total);
++		}
++	}
++	fclose(log);
++}
+ 
++static void MTLDebugLogDraw(const char* kind, unsigned long count, unsigned long instances, unsigned long indexType, long baseVertex, id<MTLBuffer> indexBuffer, NSUInteger indexOffset)
++{
++	if (!MTLDebugEnabled()) {
++		// Light mode: only while /tmp/metal-snapshot exists, log up to 300 draws with their bindings
++		static unsigned long lightLogged = 0;
++		static unsigned long checks = 0;
++		static bool armed = false;
++        static std::string captureTag;
++        // re-read a few times a second: this runs for every draw, and a guest fopen is several host syscalls
++        if (checks++ % 4096 == 0) {
++            armed = false;
++            if (FILE* file = fopen("/tmp/metal-snapshot", "r")) {
++                char tag[48] = {};
++                if (fgets(tag, sizeof(tag), file)) {
++                    if (captureTag != tag) { captureTag = tag; lightLogged = 0; }
++                    armed = true;
++                }
++                fclose(file);
++            }
++        }
++		if (!armed || lightLogged >= 300) {
++			return;
++		}
++		++lightLogged;
++		MTLDebugDumpBindings(2000 + lightLogged);
++		{
++			// Save the raw blocks of a few block-compressed textures (decoded offline) to check the stored image
++			static std::vector<void*> dumped;
++			for (int i = 0; i < 31; ++i) {
++				id<MTLTexture> texture = debugDrawState.fragmentTextures[i];
++				unsigned long format = texture ? (unsigned long) texture.pixelFormat : 0;
++				bool bc = format == 130 || format == 131 || format == 134 || format == 135;
++				if (!bc || texture.width < 128 || dumped.size() >= 8 || std::find(dumped.begin(), dumped.end(), (void*) texture) != dumped.end()) continue;
++				dumped.push_back((void*) texture);
++				NSUInteger level = std::min<NSUInteger>(1, texture.mipmapLevelCount - 1);
++				NSUInteger width = std::max<NSUInteger>(1, texture.width >> level), height = std::max<NSUInteger>(1, texture.height >> level);
++				NSUInteger blocksX = (width + 3) / 4, blocksY = (height + 3) / 4, blockBytes = (format == 130 || format == 131) ? 8 : 16;
++				NSUInteger rowBytes = blocksX * blockBytes, total = rowBytes * blocksY;
++				id<MTLCommandQueue> queue = [[texture device] newCommandQueue];
++				id<MTLBuffer> readback = [[texture device] newBufferWithLength: total options: MTLResourceStorageModeShared];
++				id<MTLCommandBuffer> commandBuffer = [queue commandBuffer];
++				id<MTLBlitCommandEncoder> blit = [commandBuffer blitCommandEncoder];
++				[blit copyFromTexture: texture sourceSlice: 0 sourceLevel: level sourceOrigin: MTLOriginMake(0, 0, 0) sourceSize: MTLSizeMake(width, height, 1)
++				             toBuffer: readback destinationOffset: 0 destinationBytesPerRow: rowBytes destinationBytesPerImage: total];
++				[blit endEncoding];
++				[commandBuffer commit];
++				[commandBuffer waitUntilCompleted];
++				char path[128];
++				snprintf(path, sizeof(path), "/tmp/tex-%02zu-%lux%lu-f%lu-level%lu.bc", dumped.size(), (unsigned long) width, (unsigned long) height, format, (unsigned long) level);
++				if (FILE* out = fopen(path, "wb")) { fwrite(readback.contents, 1, total, out); fclose(out); }
++				[readback release];
++				[queue release];
++			}
++		}
++		if (FILE* log = fopen("/tmp/metal-trace.log", "a")) {
++			fprintf(log, "draw #%lu %s count=%lu inst=%lu baseVtx=%ld pso=%p ds=%p cull=%ld wind=%ld\n", 2000 + lightLogged, kind, count, instances, baseVertex, debugDrawState.pipeline, debugDrawState.depthStencil, debugDrawState.cull, debugDrawState.winding);
++			fprintf(log, "reflect pso=%p frag:%s\n", debugDrawState.pipeline, MTLDebugReflectionFor(debugDrawState.pipeline).c_str());
++			fclose(log);
++		}
++		return;
++	}
++	static unsigned long drawn = 0;
++	static unsigned long bigDrawn = 0;
++	bool big = count >= 600 || instances > 1;
++	if (big && ++bigDrawn <= 120) {
++		MTLDebugDumpBindings(1000 + bigDrawn);
++	} else if (++drawn > 400) {
++		return;
++	}
++	const MTLDebugDrawState& state = debugDrawState;
++	if (drawn == 1 || drawn == 7 || drawn == 13 || drawn == 40) {
++		MTLDebugDumpBindings(drawn);
++		if (indexBuffer && indexBuffer.contents) {
++			if (FILE* log = fopen("/tmp/metal-trace.log", "a")) {
++				const uint16_t* indices = (const uint16_t*)((const char*) indexBuffer.contents + indexOffset);
++				{
++					const unsigned char* base = (const unsigned char*) indexBuffer.contents;
++					NSUInteger from = indexOffset >= 256 ? indexOffset - 256 : 0;
++					fprintf(log, "  before-index bytes from %lu:", (unsigned long) from);
++					for (NSUInteger k = from; k < indexOffset + 16; k += 4) {
++						float f; memcpy(&f, base + k, 4);
++						unsigned u; memcpy(&u, base + k, 4);
++						fprintf(log, " %g/%08x", f, u);
++					}
++					fprintf(log, "\n");
++				}
++				fprintf(log, "  indices(type %lu, off %lu, len %lu):", indexType, (unsigned long) indexOffset, (unsigned long) indexBuffer.length);
++				for (int k = 0; k < 12; ++k) fprintf(log, " %u", indices[k]);
++				fprintf(log, "\n");
++				fclose(log);
++			}
++		}
++	}
++	if (FILE* log = fopen("/tmp/metal-trace.log", "a")) {
++		fprintf(log, "draw #%lu %s count=%lu inst=%lu idxType=%lu baseVtx=%ld pso=%p ds=%p vp=(%.0f %.0f %.0f %.0f %.2f %.2f) sc=(%lu %lu %lu %lu) cull=%ld wind=%ld fill=%ld\n",
++			drawn, kind, count, instances, indexType, baseVertex, state.pipeline, state.depthStencil,
++			state.viewport.originX, state.viewport.originY, state.viewport.width, state.viewport.height, state.viewport.znear, state.viewport.zfar,
++			(unsigned long) state.scissor.x, (unsigned long) state.scissor.y, (unsigned long) state.scissor.width, (unsigned long) state.scissor.height,
++			state.cull, state.winding, state.fill);
++		fclose(log);
++	}
++}
++#endif
++
++
++#if DARLING_METAL_ENABLED
++// Experiment: /tmp/metal-draw-limit holds N; every render pass then executes only its first N draws.
++static thread_local unsigned long passDrawIndex = 0;
++static bool MTLDrawLimited(unsigned long count)
++{
++	static std::atomic<unsigned long> calls { 0 };
++	static std::atomic<long> limit { -1 };
++	static std::atomic<long> minimum { 0 };
++	static std::atomic<long> maximum { -1 };
++	static const bool possible = access("/tmp/metal-debug-draws", F_OK) == 0 || MTLDebugEnabled();
++	if (!possible) {
++		return false;
++	}
++	if (calls.fetch_add(1) % 200 == 0) {
++		long value = -1;
++		if (FILE* file = fopen("/tmp/metal-draw-limit", "r")) {
++			if (fscanf(file, "%ld", &value) != 1) value = -1;
++			fclose(file);
++		}
++		limit = value;
++		long low = 0, high = -1;
++		if (FILE* file = fopen("/tmp/metal-draw-min", "r")) { if (fscanf(file, "%ld", &low) != 1) low = 0; fclose(file); }
++		if (FILE* file = fopen("/tmp/metal-draw-max", "r")) { if (fscanf(file, "%ld", &high) != 1) high = -1; fclose(file); }
++		minimum = low;
++		maximum = high;
++	}
++	// skip draws outside [min, max] index counts (experiment: which draws build which part of the picture)
++	if (count < (unsigned long) (long) minimum || (maximum >= 0 && count > (unsigned long) (long) maximum)) {
++		return true;
++	}
++	long n = limit;
++	return n >= 0 && ++passDrawIndex > (unsigned long) n;
++}
++#endif
++
++#if DARLING_METAL_ENABLED
++// Live experiments (guest flag files, re-read every few hundred state changes): /tmp/metal-flag-nocull, -flipwind, -nodepth
++static bool MTLLiveFlag(int which)
++{
++	static std::atomic<unsigned long> calls { 0 };
++	static std::atomic<unsigned> state { 0 };
++	static const bool possible = access("/tmp/metal-debug-draws", F_OK) == 0 || MTLDebugEnabled();
++	if (!possible) {
++		return false;
++	}
++	if (calls.fetch_add(1) % 100 == 0) {
++		unsigned value = 0;
++		if (access("/tmp/metal-flag-nocull", F_OK) == 0) value |= 1;
++		if (access("/tmp/metal-flag-flipwind", F_OK) == 0) value |= 2;
++		if (access("/tmp/metal-flag-nodepth", F_OK) == 0) value |= 4;
++		state = value;
++	}
++	return (state & (1u << which)) != 0;
++}
++#endif
+ @implementation MTLRenderPassAttachmentDescriptor
+ 
+ #if DARLING_METAL_ENABLED
+@@ -96,11 +362,11 @@ MTL_UNSUPPORTED_CLASS
+ - (Indium::RenderPassAttachmentDescriptor)asIndiumDescriptor
+ {
+ 	return Indium::RenderPassAttachmentDescriptor {
+-		((MTLTextureInternal*)_texture).texture,
++		MTLTextureGetIndium(_texture),
+ 		_level,
+ 		_slice,
+ 		_depthPlane,
+-		((MTLTextureInternal*)_resolveTexture).texture,
++		MTLTextureGetIndium(_resolveTexture),
+ 		_resolveLevel,
+ 		_resolveSlice,
+ 		_resolveDepthPlane,
+@@ -367,7 +633,11 @@ MTL_UNSUPPORTED_CLASS
+ 	std::vector<Indium::RenderPassColorAttachmentDescriptor> result;
+ 
+ 	for (const auto& [key, value]: tmp2) {
+-		result.push_back(value);
++		// A slot that was only looked at (or never given a texture) is not an attachment; depth-only passes rely on this
++		if (value.texture) {
++			result.resize(key + 1);
++			result[key] = value;
++		}
+ 	}
+ 
+ 	return result;
+@@ -404,6 +674,10 @@ MTL_UNSUPPORTED_CLASS
+ - (void)_doInit
+ {
+ 	_colorAttachments = [MTLRenderPassColorAttachmentDescriptorArray new];
++    _depthAttachment = [MTLRenderPassDepthAttachmentDescriptor new];
++    _stencilAttachment = [MTLRenderPassStencilAttachmentDescriptor new];
++    _renderTargetArrayLength = 1;
++    _defaultRasterSampleCount = 1;
+ }
+ 
+ - (void)_doDealloc
+@@ -502,9 +776,9 @@ MTL_UNSUPPORTED_CLASS
+ {
+ 	return Indium::RenderPassDescriptor {
+ 		[_colorAttachments asContiguousIndiumDescriptors],
+-		(_depthAttachment == nil) ? std::nullopt : std::make_optional([_depthAttachment asIndiumDescriptor]),
+-		(_stencilAttachment == nil) ? std::nullopt : std::make_optional([_stencilAttachment asIndiumDescriptor]),
+-		((MTLBufferInternal*)_visibilityResultBuffer).buffer,
++		(_depthAttachment.texture == nil) ? std::nullopt : std::make_optional([_depthAttachment asIndiumDescriptor]),
++		(_stencilAttachment.texture == nil) ? std::nullopt : std::make_optional([_stencilAttachment asIndiumDescriptor]),
++		MTLBufferGetIndium(_visibilityResultBuffer),
+ 		_renderTargetArrayLength,
+ 		_imageblockSampleLength,
+ 		_threadgroupMemoryLength,
+@@ -538,6 +812,7 @@ MTL_UNSUPPORTED_CLASS
+ 	if (self != nil) {
+ 		_encoder = encoder;
+ 		_device = [device retain];
++		passDrawIndex = 0;
+ 	}
+ 	return self;
+ }
+@@ -553,6 +828,34 @@ MTL_UNSUPPORTED_CLASS
+ // overridden methods
+ //
+ 
++- (void)setVertexTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index {
++    _encoder->setVertexTexture(MTLTextureGetIndium(texture), index);
++}
++- (void)setFragmentTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index {
++    if (MTLDrawTracking() && index < 31) debugDrawState.fragmentTextures[index] = texture;
++    _encoder->setFragmentTexture(MTLTextureGetIndium(texture), index);
++}
++- (void)setVertexSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index {
++    _encoder->setVertexSamplerState(MTLSamplerGetIndium(sampler), index);
++}
++- (void)setFragmentSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index {
++    _encoder->setFragmentSamplerState(MTLSamplerGetIndium(sampler), index);
++}
++- (void)setDepthBias:(float)depthBias slopeScale:(float)slopeScale clamp:(float)clamp {
++    _encoder->setDepthBias(depthBias, slopeScale, clamp);
++}
++- (void)setDepthStencilState:(id<MTLDepthStencilState>)state {
++	if (MTLDrawTracking()) debugDrawState.depthStencil = state;
++    if (MTLLiveFlag(2)) return;
++    _encoder->setDepthStencilState(MTLDepthStencilGetIndium(state));
++}
++- (void)setStencilReferenceValue:(uint32_t)value {
++    _encoder->setStencilReferenceValue(value);
++}
++- (void)memoryBarrierWithScope:(MTLBarrierScope)scope afterStages:(MTLRenderStages)after beforeStages:(MTLRenderStages)before {
++    _encoder->memoryBarrier(scope, static_cast<Indium::RenderStages>(after), static_cast<Indium::RenderStages>(before));
++}
++
+ - (void)endEncoding
+ {
+ 	_encoder->endEncoding();
+@@ -564,26 +867,34 @@ MTL_UNSUPPORTED_CLASS
+ 
+ - (void)setRenderPipelineState: (id<MTLRenderPipelineState>)pipelineState
+ {
+-	_encoder->setRenderPipelineState(((MTLRenderPipelineStateInternal*)pipelineState).state);
++	if (MTLDrawTracking()) debugDrawState.pipeline = pipelineState;
++	MTLTraceCount(pipelineState ? "setPipeline" : "setPipelineNil");
++	_encoder->setRenderPipelineState(MTLRenderPipelineGetIndium(pipelineState));
+ }
+ 
+ - (void)setTriangleFillMode: (MTLTriangleFillMode)fillMode
+ {
++	if (MTLDrawTracking()) debugDrawState.fill = (long) fillMode;
+ 	_encoder->setTriangleFillMode(static_cast<Indium::TriangleFillMode>(fillMode));
+ }
+ 
+ - (void)setFrontFacingWinding: (MTLWinding)frontFacingWinding
+ {
++	if (MTLDrawTracking()) debugDrawState.winding = (long) frontFacingWinding;
++	if (MTLLiveFlag(1)) frontFacingWinding = (frontFacingWinding == MTLWindingClockwise) ? MTLWindingCounterClockwise : MTLWindingClockwise;
+ 	_encoder->setFrontFacingWinding(static_cast<Indium::Winding>(frontFacingWinding));
+ }
+ 
+ - (void)setCullMode: (MTLCullMode)cullMode
+ {
++	if (MTLDrawTracking()) debugDrawState.cull = (long) cullMode;
++	if (MTLLiveFlag(0)) cullMode = MTLCullModeNone;
+ 	_encoder->setCullMode(static_cast<Indium::CullMode>(cullMode));
+ }
+ 
+ - (void)setViewport: (MTLViewport)viewport
+ {
++	if (MTLDrawTracking()) debugDrawState.viewport = viewport;
+ 	_encoder->setViewport(MTLViewportToIndium(viewport));
+ }
+ 
+@@ -599,6 +910,8 @@ MTL_UNSUPPORTED_CLASS
+ 
+ - (void)setScissorRect: (MTLScissorRect)rect
+ {
++	if (MTLDrawTracking()) debugDrawState.scissor = rect;
++	if (MTL_DEBUG_FLAG("metal-debug-noscissor")) return;
+ 	_encoder->setScissorRect(MTLScissorRectToIndium(rect));
+ }
+ 
+@@ -616,7 +929,25 @@ MTL_UNSUPPORTED_CLASS
+                  offset: (NSUInteger)offset
+                 atIndex: (NSUInteger)index
+ {
+-	_encoder->setVertexBuffer(((MTLBufferInternal*)buffer).buffer, offset, index);
++	if (MTLDebugEnabled()) {
++		static unsigned long calls = 0;
++		static unsigned long unusual = 0;
++		bool other = index != 3 && index != 4 && index != 10;
++		if (other && ++unusual <= 200) {
++			if (FILE* log = fopen("/tmp/metal-trace.log", "a")) {
++				fprintf(log, "setVertexBuffer-other idx=%lu buf=%p off=%lu\n", (unsigned long) index, buffer, (unsigned long) offset);
++				fclose(log);
++			}
++		}
++		if (++calls <= 120) {
++			if (FILE* log = fopen("/tmp/metal-trace.log", "a")) {
++				fprintf(log, "setVertexBuffer #%lu idx=%lu buf=%p off=%lu len=%lu encoder=%p\n", calls, (unsigned long) index, buffer, (unsigned long) offset, (unsigned long) buffer.length, self);
++				fclose(log);
++			}
++		}
++	}
++	if (MTLDrawTracking() && index < 31) { debugDrawState.vertexBuffers[index] = buffer; debugDrawState.vertexOffsets[index] = offset; debugDrawState.vertexBytesLength[index] = 0; }
++	_encoder->setVertexBuffer(MTLBufferGetIndium(buffer), offset, index);
+ }
+ 
+ - (void)setVertexBuffers: (const id<MTLBuffer>*)buffers
+@@ -626,7 +957,14 @@ MTL_UNSUPPORTED_CLASS
+ 	std::vector<std::shared_ptr<Indium::Buffer>> tmp;
+ 	std::vector<size_t> tmp2(offsets, offsets + range.length);
+ 	for (size_t i = 0; i < range.length; ++i) {
+-		tmp.push_back(((MTLBufferInternal*)buffers[i]).buffer);
++		tmp.push_back(MTLBufferGetIndium(buffers[i]));
++	}
++	if (MTLDrawTracking()) {
++		for (NSUInteger i = 0; i < range.length && range.location + i < 31; ++i) {
++			debugDrawState.vertexBuffers[range.location + i] = buffers[i];
++			debugDrawState.vertexOffsets[range.location + i] = offsets[i];
++			debugDrawState.vertexBytesLength[range.location + i] = 0;
++		}
+ 	}
+ 	_encoder->setVertexBuffers(tmp, tmp2, NSRangeToIndium(range));
+ }
+@@ -634,6 +972,16 @@ MTL_UNSUPPORTED_CLASS
+ - (void)setVertexBufferOffset: (NSUInteger)offset
+                       atIndex: (NSUInteger)index
+ {
++	if (MTLDebugEnabled()) {
++		static unsigned long calls = 0;
++		if (++calls <= 120) {
++			if (FILE* log = fopen("/tmp/metal-trace.log", "a")) {
++				fprintf(log, "setVertexBufferOffset #%lu idx=%lu off=%lu encoder=%p\n", calls, (unsigned long) index, (unsigned long) offset, self);
++				fclose(log);
++			}
++		}
++	}
++	if (MTLDrawTracking() && index < 31) debugDrawState.vertexOffsets[index] = offset;
+ 	_encoder->setVertexBufferOffset(offset, index);
+ }
+ 
+@@ -641,6 +989,7 @@ MTL_UNSUPPORTED_CLASS
+                 length: (NSUInteger)length
+                atIndex: (NSUInteger)index
+ {
++	if (MTLDrawTracking() && index < 31) { debugDrawState.vertexBuffers[index] = nil; debugDrawState.vertexBytesLength[index] = length; memcpy(debugDrawState.vertexBytes[index], bytes, std::min<NSUInteger>(64, length)); }
+ 	_encoder->setVertexBytes(bytes, length, index);
+ }
+ 
+@@ -648,7 +997,8 @@ MTL_UNSUPPORTED_CLASS
+                    offset: (NSUInteger)offset
+                   atIndex: (NSUInteger)index
+ {
+-	_encoder->setFragmentBuffer(((MTLBufferInternal*)buffer).buffer, offset, index);
++	if (MTLDrawTracking() && index < 31) { debugDrawState.fragmentBuffers[index] = buffer; debugDrawState.fragmentOffsets[index] = offset; debugDrawState.fragmentBytesLength[index] = 0; }
++	_encoder->setFragmentBuffer(MTLBufferGetIndium(buffer), offset, index);
+ }
+ 
+ - (void)setFragmentBuffers: (const id<MTLBuffer>*)buffers
+@@ -658,7 +1008,14 @@ MTL_UNSUPPORTED_CLASS
+ 	std::vector<std::shared_ptr<Indium::Buffer>> tmp;
+ 	std::vector<size_t> tmp2(offsets, offsets + range.length);
+ 	for (size_t i = 0; i < range.length; ++i) {
+-		tmp.push_back(((MTLBufferInternal*)buffers[i]).buffer);
++		tmp.push_back(MTLBufferGetIndium(buffers[i]));
++	}
++	if (MTLDrawTracking()) {
++		for (NSUInteger i = 0; i < range.length && range.location + i < 31; ++i) {
++			debugDrawState.fragmentBuffers[range.location + i] = buffers[i];
++			debugDrawState.fragmentOffsets[range.location + i] = offsets[i];
++			debugDrawState.fragmentBytesLength[range.location + i] = 0;
++		}
+ 	}
+ 	_encoder->setFragmentBuffers(tmp, tmp2, NSRangeToIndium(range));
+ }
+@@ -666,6 +1023,7 @@ MTL_UNSUPPORTED_CLASS
+ - (void)setFragmentBufferOffset: (NSUInteger)offset
+                         atIndex: (NSUInteger)index
+ {
++	if (MTLDrawTracking() && index < 31) debugDrawState.fragmentOffsets[index] = offset;
+ 	_encoder->setFragmentBufferOffset(offset, index);
+ }
+ 
+@@ -673,6 +1031,7 @@ MTL_UNSUPPORTED_CLASS
+                   length: (NSUInteger)length
+                  atIndex: (NSUInteger)index
+ {
++	if (MTLDrawTracking() && index < 31) { debugDrawState.fragmentBuffers[index] = nil; debugDrawState.fragmentBytesLength[index] = length; memcpy(debugDrawState.fragmentBytes[index], bytes, std::min<NSUInteger>(64, length)); }
+ 	_encoder->setFragmentBytes(bytes, length, index);
+ }
+ 
+@@ -682,6 +1041,9 @@ MTL_UNSUPPORTED_CLASS
+          instanceCount: (NSUInteger)instanceCount
+           baseInstance: (NSUInteger)baseInstance
+ {
++	if (MTLDrawLimited(vertexCount)) return;
++	MTLTraceCount("draw");
++	if (MTLDrawTracking()) MTLDebugLogDraw("direct", vertexCount, 0, 0, 0, nil, 0);
+ 	_encoder->drawPrimitives(static_cast<Indium::PrimitiveType>(primitiveType), vertexStart, vertexCount, instanceCount, baseInstance);
+ }
+ 
+@@ -690,6 +1052,9 @@ MTL_UNSUPPORTED_CLASS
+            vertexCount: (NSUInteger)vertexCount
+          instanceCount: (NSUInteger)instanceCount
+ {
++	if (MTLDrawLimited(vertexCount)) return;
++	MTLTraceCount("draw");
++	if (MTLDrawTracking()) MTLDebugLogDraw("direct", vertexCount, 0, 0, 0, nil, 0);
+ 	_encoder->drawPrimitives(static_cast<Indium::PrimitiveType>(primitiveType), vertexStart, vertexCount, instanceCount);
+ }
+ 
+@@ -697,6 +1062,9 @@ MTL_UNSUPPORTED_CLASS
+            vertexStart: (NSUInteger)vertexStart
+            vertexCount: (NSUInteger)vertexCount
+ {
++	if (MTLDrawLimited(vertexCount)) return;
++	MTLTraceCount("draw");
++	if (MTLDrawTracking()) MTLDebugLogDraw("direct", vertexCount, 0, 0, 0, nil, 0);
+ 	_encoder->drawPrimitives(static_cast<Indium::PrimitiveType>(primitiveType), vertexStart, vertexCount);
+ }
+ 
+@@ -709,7 +1077,10 @@ MTL_UNSUPPORTED_CLASS
+                    baseVertex: (NSInteger)baseVertex
+                  baseInstance: (NSUInteger)baseInstance
+ {
+-	_encoder->drawIndexedPrimitives(static_cast<Indium::PrimitiveType>(primitiveType), indexCount, static_cast<Indium::IndexType>(indexType), ((MTLBufferInternal*)indexBuffer).buffer, indexBufferOffset, instanceCount, baseVertex, baseInstance);
++	if (MTLDrawLimited(indexCount)) return;
++	MTLTraceCount("drawIndexed");
++	if (MTLDrawTracking()) MTLDebugLogDraw("indexed", indexCount, instanceCount, (unsigned long) indexType, (long) baseVertex, indexBuffer, indexBufferOffset);
++	_encoder->drawIndexedPrimitives(static_cast<Indium::PrimitiveType>(primitiveType), indexCount, static_cast<Indium::IndexType>(indexType), MTLBufferGetIndium(indexBuffer), indexBufferOffset, instanceCount, baseVertex, baseInstance);
+ }
+ 
+ - (void)drawIndexedPrimitives: (MTLPrimitiveType)primitiveType
+@@ -719,7 +1090,10 @@ MTL_UNSUPPORTED_CLASS
+             indexBufferOffset: (NSUInteger)indexBufferOffset
+                 instanceCount: (NSUInteger)instanceCount
+ {
+-	_encoder->drawIndexedPrimitives(static_cast<Indium::PrimitiveType>(primitiveType), indexCount, static_cast<Indium::IndexType>(indexType), ((MTLBufferInternal*)indexBuffer).buffer, indexBufferOffset, instanceCount);
++	if (MTLDrawLimited(indexCount)) return;
++	MTLTraceCount("drawIndexed");
++	if (MTLDrawTracking()) MTLDebugLogDraw("indexed", indexCount, instanceCount, (unsigned long) indexType, 0, indexBuffer, indexBufferOffset);
++	_encoder->drawIndexedPrimitives(static_cast<Indium::PrimitiveType>(primitiveType), indexCount, static_cast<Indium::IndexType>(indexType), MTLBufferGetIndium(indexBuffer), indexBufferOffset, instanceCount);
+ }
+ 
+ - (void)drawIndexedPrimitives: (MTLPrimitiveType)primitiveType
+@@ -728,7 +1102,10 @@ MTL_UNSUPPORTED_CLASS
+                   indexBuffer: (id<MTLBuffer>)indexBuffer
+             indexBufferOffset: (NSUInteger)indexBufferOffset
+ {
+-	_encoder->drawIndexedPrimitives(static_cast<Indium::PrimitiveType>(primitiveType), indexCount, static_cast<Indium::IndexType>(indexType), ((MTLBufferInternal*)indexBuffer).buffer, indexBufferOffset);
++	if (MTLDrawLimited(indexCount)) return;
++	MTLTraceCount("drawIndexed");
++	if (MTLDrawTracking()) MTLDebugLogDraw("indexed", indexCount, 0, (unsigned long) indexType, 0, indexBuffer, indexBufferOffset);
++	_encoder->drawIndexedPrimitives(static_cast<Indium::PrimitiveType>(primitiveType), indexCount, static_cast<Indium::IndexType>(indexType), MTLBufferGetIndium(indexBuffer), indexBufferOffset);
+ }
+ 
+ #else
+diff --git a/src/Metal/MTLRenderPipeline.mm b/src/Metal/MTLRenderPipeline.mm
+index 8aa709b..140d0da 100644
+--- a/src/Metal/MTLRenderPipeline.mm
++++ b/src/Metal/MTLRenderPipeline.mm
+@@ -6,6 +6,7 @@
+ #import <Metal/MTLLibraryInternal.h>
+ #import <Metal/MTLPipelineInternal.h>
+ #import <Metal/MTLDevice.h>
++#import <Metal/MTLVertexDescriptorInternal.h>
+ 
+ #include <map>
+ 
+@@ -204,7 +205,7 @@ MTL_UNSUPPORTED_CLASS
+ 		((MTLFunctionInternal*)_fragmentFunction).function,
+ 		_maxVertexCallStackDepth,
+ 		_maxFragmentCallStackDepth,
+-		std::nullopt, // TODO
++		_vertexDescriptor ? std::make_optional([_vertexDescriptor asIndiumDescriptor]) : std::nullopt,
+ 		[_vertexBuffers asIndiumDescriptors],
+ 		[_fragmentBuffers asIndiumDescriptors],
+ 		[_colorAttachments asContiguousIndiumDescriptors],
+@@ -317,7 +318,10 @@ MTL_UNSUPPORTED_CLASS
+ 	std::vector<Indium::RenderPipelineColorAttachmentDescriptor> result;
+ 
+ 	for (const auto& [key, value]: tmp2) {
+-		result.push_back(value);
++		if (value.pixelFormat != Indium::PixelFormat::Invalid) {
++			result.resize(key + 1);
++			result[key] = value;
++		}
+ 	}
+ 
+ 	return result;
+@@ -420,6 +424,10 @@ MTL_UNSUPPORTED_CLASS
+ #if DARLING_METAL_ENABLED
+ 
+ @synthesize state = _state;
++const std::shared_ptr<Indium::RenderPipelineState>& MTLRenderPipelineGetIndium(id object) {
++	static const std::shared_ptr<Indium::RenderPipelineState> none;
++	return object ? ((MTLRenderPipelineStateInternal*) object)->_state : none;
++}
+ @synthesize device = _device;
+ @synthesize label = _label;
+ 
+diff --git a/src/Metal/MTLSamplerDescriptor.mm b/src/Metal/MTLSamplerDescriptor.mm
+index 242d285..f82d083 100644
+--- a/src/Metal/MTLSamplerDescriptor.mm
++++ b/src/Metal/MTLSamplerDescriptor.mm
+@@ -1,24 +1,69 @@
+-// SPDX-FileCopyrightText: 2026 Darling Developers
+ // SPDX-License-Identifier: MPL-2.0
+-
++#import <Metal/MTLSamplerStateInternal.h>
+ #import <Metal/MTLSamplerDescriptor.h>
+-#import <Foundation/NSMethodSignature.h>
+-#import <Foundation/NSInvocation.h>
+-
++#include <float.h>
+ @implementation MTLSamplerDescriptor
+-
++@synthesize minFilter = _minFilter;
++@synthesize magFilter = _magFilter;
++@synthesize mipFilter = _mipFilter;
++@synthesize maxAnisotropy = _maxAnisotropy;
++@synthesize sAddressMode = _sAddressMode;
++@synthesize tAddressMode = _tAddressMode;
++@synthesize rAddressMode = _rAddressMode;
++@synthesize borderColor = _borderColor;
++@synthesize normalizedCoordinates = _normalizedCoordinates;
++@synthesize lodMinClamp = _lodMinClamp;
++@synthesize lodMaxClamp = _lodMaxClamp;
++@synthesize supportArgumentBuffers = _supportArgumentBuffers;
++@synthesize compareFunction = _compareFunction;
++@synthesize label = _label;
++- (instancetype)init {
++    self = [super init];
++    if (self) {
++        _maxAnisotropy = 1;
++        _normalizedCoordinates = YES;
++        _lodMaxClamp = FLT_MAX;
++    }
++    return self;
++}
++- (void)dealloc { [_label release]; [super dealloc]; }
++- (instancetype)copyWithZone:(NSZone*)zone {
++    MTLSamplerDescriptor* copy = [[[self class] allocWithZone:zone] init];
++    copy.minFilter = _minFilter;
++    copy.magFilter = _magFilter;
++    copy.mipFilter = _mipFilter;
++    copy.maxAnisotropy = _maxAnisotropy;
++    copy.sAddressMode = _sAddressMode;
++    copy.tAddressMode = _tAddressMode;
++    copy.rAddressMode = _rAddressMode;
++    copy.borderColor = _borderColor;
++    copy.normalizedCoordinates = _normalizedCoordinates;
++    copy.lodMinClamp = _lodMinClamp;
++    copy.lodMaxClamp = _lodMaxClamp;
++    copy.supportArgumentBuffers = _supportArgumentBuffers;
++    copy.compareFunction = _compareFunction;
++    copy.label = _label;
++    return copy;
++}
++@end
+ #if DARLING_METAL_ENABLED
+-
+-- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
+-{
+-    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++@implementation MTLSamplerStateInternal
++@synthesize sampler = _sampler;
++const std::shared_ptr<Indium::SamplerState>& MTLSamplerGetIndium(id object) {
++	static const std::shared_ptr<Indium::SamplerState> none;
++	return object ? ((MTLSamplerStateInternal*) object)->_sampler : none;
+ }
+-
+-- (void)forwardInvocation:(NSInvocation *)anInvocation
+-{
+-    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++@synthesize device = _device;
++@synthesize label = _label;
++- (instancetype)initWithSampler:(std::shared_ptr<Indium::SamplerState>)sampler device:(id<MTLDevice>)device label:(NSString*)label {
++    self = [super init];
++    if (self) {
++        _sampler = sampler;
++        _device = [device retain];
++        _label = [label copy];
++    }
++    return self;
+ }
+-
+-#endif
+-
++- (void)dealloc { [_device release]; [_label release]; [super dealloc]; }
+ @end
++#endif
+diff --git a/src/Metal/MTLStencilDescriptor.mm b/src/Metal/MTLStencilDescriptor.mm
+index 66a9056..f28235c 100644
+--- a/src/Metal/MTLStencilDescriptor.mm
++++ b/src/Metal/MTLStencilDescriptor.mm
+@@ -1,24 +1,35 @@
+ // SPDX-FileCopyrightText: 2026 Darling Developers
+ // SPDX-License-Identifier: MPL-2.0
+ 
+-#import <Metal/MTLStencilDescriptor.h>
+-#import <Foundation/NSMethodSignature.h>
+-#import <Foundation/NSInvocation.h>
+-
++#import <Metal/MTLDepthStencilInternal.h>
+ @implementation MTLStencilDescriptor
+-
+-#if DARLING_METAL_ENABLED
+-
+-- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
+-{
+-    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++@synthesize stencilCompareFunction = _stencilCompareFunction;
++@synthesize stencilFailureOperation = _stencilFailureOperation;
++@synthesize depthFailureOperation = _depthFailureOperation;
++@synthesize depthStencilPassOperation = _depthStencilPassOperation;
++@synthesize readMask = _readMask;
++@synthesize writeMask = _writeMask;
++- (instancetype)init {
++    self = [super init];
++    if (self) { _stencilCompareFunction = MTLCompareFunctionAlways; _readMask = UINT32_MAX; _writeMask = UINT32_MAX; }
++    return self;
+ }
+-
+-- (void)forwardInvocation:(NSInvocation *)anInvocation
+-{
+-    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++- (id)copyWithZone:(NSZone*)zone {
++    MTLStencilDescriptor* copy = [[[self class] allocWithZone:zone] init];
++    copy.stencilCompareFunction = _stencilCompareFunction;
++    copy.stencilFailureOperation = _stencilFailureOperation;
++    copy.depthFailureOperation = _depthFailureOperation;
++    copy.depthStencilPassOperation = _depthStencilPassOperation;
++    copy.readMask = _readMask;
++    copy.writeMask = _writeMask;
++    return copy;
++}
++#if DARLING_METAL_ENABLED
++- (Indium::StencilDescriptor)asIndiumDescriptor {
++    return {static_cast<Indium::CompareFunction>(_stencilCompareFunction),
++            static_cast<Indium::StencilOperation>(_stencilFailureOperation),
++            static_cast<Indium::StencilOperation>(_depthFailureOperation),
++            static_cast<Indium::StencilOperation>(_depthStencilPassOperation), _readMask, _writeMask};
+ }
+-
+ #endif
+-
+ @end
+diff --git a/src/Metal/MTLTexture.mm b/src/Metal/MTLTexture.mm
+index 6c71fb9..822c112 100644
+--- a/src/Metal/MTLTexture.mm
++++ b/src/Metal/MTLTexture.mm
+@@ -1,3 +1,5 @@
++#import <Metal/MTLTrace.h>
++#include <algorithm>
+ // SPDX-FileCopyrightText: 2026 Darling Developers
+ // SPDX-License-Identifier: MPL-2.0
+ 
+@@ -7,11 +9,37 @@
+ #import <Metal/MTLPixelFormatInternal.h>
+ #import <Metal/MTLTypesInternal.h>
+ 
++
++#if DARLING_METAL_ENABLED
++// Diagnostic: CPU texture uploads (replaceRegion) block on the GPU queue, so count, time and sample them.
++static void MTLDebugReplaceRegion(id<MTLTexture> texture, MTLRegion region, NSUInteger level, const void* bytes, double seconds)
++{
++	MTLTraceCount("replaceRegion");
++	MTLTraceTiming("replaceRegion", seconds);
++	static unsigned long logged = 0;
++	if ((MTLDebugEnabled() || MTLTimingEnabled()) && ++logged <= 60) {
++		if (FILE* log = fopen("/tmp/metal-trace.log", "a")) {
++			const unsigned char* b = (const unsigned char*) bytes;
++			unsigned long nonZero = 0;
++			size_t probe = std::min<size_t>(4096, (size_t) region.size.width * 4);
++			for (size_t i = 0; i < probe; ++i) if (b[i]) ++nonZero;
++			fprintf(log, "replaceRegion tex=%p %lux%lu fmt=%lu level=%lu region=(%lu,%lu %lux%lu) firstBytesNonZero=%lu/%zu took=%.1fms\n", texture,
++				(unsigned long) texture.width, (unsigned long) texture.height, (unsigned long) texture.pixelFormat, (unsigned long) level,
++				(unsigned long) region.origin.x, (unsigned long) region.origin.y, (unsigned long) region.size.width, (unsigned long) region.size.height, nonZero, probe, seconds * 1000);
++			fclose(log);
++		}
++	}
++}
++#endif
+ @implementation MTLTextureInternal
+ 
+ #if DARLING_METAL_ENABLED
+ 
+ @synthesize texture = _texture;
++const std::shared_ptr<Indium::Texture>& MTLTextureGetIndium(id object) {
++	static const std::shared_ptr<Indium::Texture> none;
++	return object ? ((MTLTextureInternal*) object)->_texture : none;
++}
+ @synthesize device = _device;
+ @synthesize resourceOptions = _resourceOptions;
+ @synthesize label = _label;
+@@ -164,7 +192,9 @@
+             withBytes: (const void*)pixelBytes
+           bytesPerRow: (NSUInteger)bytesPerRow
+ {
++	double start = (MTLDebugEnabled() || MTLTimingEnabled()) ? MTLTraceNow() : 0;
+ 	_texture->replaceRegion(MTLRegionToIndium(region), level, pixelBytes, bytesPerRow);
++	if (start != 0) MTLDebugReplaceRegion(self, region, level, pixelBytes, MTLTraceNow() - start);
+ }
+ 
+ - (void)replaceRegion: (MTLRegion)region
+@@ -174,7 +204,9 @@
+           bytesPerRow: (NSUInteger)bytesPerRow
+         bytesPerImage: (NSUInteger)bytesPerImage
+ {
++	double start = (MTLDebugEnabled() || MTLTimingEnabled()) ? MTLTraceNow() : 0;
+ 	_texture->replaceRegion(MTLRegionToIndium(region), level, slice, pixelBytes, bytesPerRow, bytesPerImage);
++	if (start != 0) MTLDebugReplaceRegion(self, region, level, pixelBytes, MTLTraceNow() - start);
+ }
+ 
+ - (void)getBytes: (void*)pixelBytes
+diff --git a/src/Metal/MTLTextureDescriptor.mm b/src/Metal/MTLTextureDescriptor.mm
+index 37cccb3..79b2350 100644
+--- a/src/Metal/MTLTextureDescriptor.mm
++++ b/src/Metal/MTLTextureDescriptor.mm
+@@ -1,24 +1,64 @@
+-// SPDX-FileCopyrightText: 2026 Darling Developers
+ // SPDX-License-Identifier: MPL-2.0
+-
+ #import <Metal/MTLTextureDescriptor.h>
+-#import <Foundation/NSMethodSignature.h>
+-#import <Foundation/NSInvocation.h>
+-
+ @implementation MTLTextureDescriptor
+-
+-#if DARLING_METAL_ENABLED
+-
+-- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
+-{
+-    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++@synthesize textureType = _textureType;
++@synthesize pixelFormat = _pixelFormat;
++@synthesize width = _width;
++@synthesize height = _height;
++@synthesize depth = _depth;
++@synthesize mipmapLevelCount = _mipmapLevelCount;
++@synthesize sampleCount = _sampleCount;
++@synthesize arrayLength = _arrayLength;
++@synthesize resourceOptions = _resourceOptions;
++@synthesize allowGPUOptimizedContents = _allowGPUOptimizedContents;
++@synthesize usage = _usage;
++@synthesize swizzle = _swizzle;
++- (instancetype)init {
++    self = [super init];
++    if (self) {
++        _textureType = MTLTextureType2D;
++        _pixelFormat = MTLPixelFormatRGBA8Unorm;
++        _width = _height = _depth = _mipmapLevelCount = _sampleCount = _arrayLength = 1;
++        _resourceOptions = MTLResourceStorageModeManaged;
++        _allowGPUOptimizedContents = YES;
++        _swizzle = MTLTextureSwizzleChannelsDefault;
++    }
++    return self;
+ }
+-
+-- (void)forwardInvocation:(NSInvocation *)anInvocation
+-{
+-    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++- (instancetype)copyWithZone:(NSZone*)zone {
++    MTLTextureDescriptor* copy = [[[self class] allocWithZone:zone] init];
++    copy.textureType = _textureType;
++    copy.pixelFormat = _pixelFormat;
++    copy.width = _width;
++    copy.height = _height;
++    copy.depth = _depth;
++    copy.mipmapLevelCount = _mipmapLevelCount;
++    copy.sampleCount = _sampleCount;
++    copy.arrayLength = _arrayLength;
++    copy.resourceOptions = _resourceOptions;
++    copy.allowGPUOptimizedContents = _allowGPUOptimizedContents;
++    copy.usage = _usage;
++    copy.swizzle = _swizzle;
++    return copy;
++}
++- (MTLCPUCacheMode)cpuCacheMode { return static_cast<MTLCPUCacheMode>((_resourceOptions >> 0) & 0xf); }
++- (void)setCpuCacheMode:(MTLCPUCacheMode)value { _resourceOptions = static_cast<MTLResourceOptions>((_resourceOptions & ~(0xful << 0)) | (static_cast<NSUInteger>(value) << 0)); }
++- (MTLStorageMode)storageMode { return static_cast<MTLStorageMode>((_resourceOptions >> 4) & 0xf); }
++- (void)setStorageMode:(MTLStorageMode)value { _resourceOptions = static_cast<MTLResourceOptions>((_resourceOptions & ~(0xful << 4)) | (static_cast<NSUInteger>(value) << 4)); }
++- (MTLHazardTrackingMode)hazardTrackingMode { return static_cast<MTLHazardTrackingMode>((_resourceOptions >> 8) & 0xf); }
++- (void)setHazardTrackingMode:(MTLHazardTrackingMode)value { _resourceOptions = static_cast<MTLResourceOptions>((_resourceOptions & ~(0xful << 8)) | (static_cast<NSUInteger>(value) << 8)); }
+++ (instancetype)texture2DDescriptorWithPixelFormat:(MTLPixelFormat)format width:(NSUInteger)width height:(NSUInteger)height mipmapped:(BOOL)mipmapped {
++    MTLTextureDescriptor* desc = [[[self alloc] init] autorelease];
++    desc.pixelFormat = format; desc.width = width; desc.height = height;
++    if (mipmapped) {
++        NSUInteger size = width > height ? width : height;
++        while (size > 1) { ++desc->_mipmapLevelCount; size >>= 1; }
++    }
++    return desc;
++}
+++ (instancetype)textureCubeDescriptorWithPixelFormat:(MTLPixelFormat)format size:(NSUInteger)size mipmapped:(BOOL)mipmapped {
++    MTLTextureDescriptor* desc = [self texture2DDescriptorWithPixelFormat:format width:size height:size mipmapped:mipmapped];
++    desc.textureType = MTLTextureTypeCube;
++    return desc;
+ }
+-
+-#endif
+-
+ @end
+diff --git a/src/Metal/MTLVertexDescriptor.mm b/src/Metal/MTLVertexDescriptor.mm
+index cde968d..fc7d99d 100644
+--- a/src/Metal/MTLVertexDescriptor.mm
++++ b/src/Metal/MTLVertexDescriptor.mm
+@@ -1,24 +1,168 @@
+ // SPDX-FileCopyrightText: 2026 Darling Developers
+ // SPDX-License-Identifier: MPL-2.0
+ 
+-#import <Metal/MTLVertexDescriptor.h>
+-#import <Foundation/NSMethodSignature.h>
+-#import <Foundation/NSInvocation.h>
+-
++#import <Metal/MTLVertexDescriptorInternal.h>
++#import <objc/runtime.h>
++// The bridge owns these concrete descriptor implementations. Keep their
++// scalar storage accessible within this translation unit so reset/conversion
++// can batch it. Subclasses continue through their public property methods.
++@interface MTLVertexBufferLayoutDescriptor () {
++@public
++    NSUInteger _stride;
++    MTLVertexStepFunction _stepFunction;
++    NSUInteger _stepRate;
++}
++@end
++@interface MTLVertexAttributeDescriptor () {
++@public
++    MTLVertexFormat _format;
++    NSUInteger _offset;
++    NSUInteger _bufferIndex;
++}
++@end
++@implementation MTLVertexBufferLayoutDescriptor
++@synthesize stride = _stride;
++@synthesize stepFunction = _stepFunction;
++@synthesize stepRate = _stepRate;
++- (instancetype)init { self = [super init]; if (self) { _stepFunction = MTLVertexStepFunctionPerVertex; _stepRate = 1; } return self; }
++- (id)copyWithZone:(NSZone*)zone { MTLVertexBufferLayoutDescriptor* copy = [[[self class] allocWithZone:zone] init]; copy.stride = _stride; copy.stepFunction = _stepFunction; copy.stepRate = _stepRate; return copy; }
++@end
++@interface MTLVertexBufferLayoutDescriptorArray (Existing)
++- (MTLVertexBufferLayoutDescriptor*)existingObjectAtIndex:(NSUInteger)index;
++- (void)resetAll;
++@end
++@interface MTLVertexAttributeDescriptorArray (Existing)
++- (MTLVertexAttributeDescriptor*)existingObjectAtIndex:(NSUInteger)index;
++- (void)resetAll;
++@end
++// The arrays used to be NSMutableDictionaries keyed by boxed NSNumbers, and converting a descriptor created all 31 entries;
++// under a game that builds vertex descriptors constantly that was ~30% of the render thread. Fixed storage, entries created lazily.
++@implementation MTLVertexBufferLayoutDescriptorArray {
++    MTLVertexBufferLayoutDescriptor* _items[31];
++    uint32_t _present;   // bit i: _items[i] exists
++    uint32_t _concrete;  // bit i: _items[i] is exactly MTLVertexBufferLayoutDescriptor (ivars can be written directly)
++}
++- (void)dealloc { for (int i = 0; i < 31; ++i) [_items[i] release]; [super dealloc]; }
++- (MTLVertexBufferLayoutDescriptor*)objectAtIndexedSubscript:(NSUInteger)index {
++    if (index >= 31) [NSException raise:NSRangeException format:@"Vertex descriptor index %lu exceeds 30", (unsigned long)index];
++    if (!_items[index]) { _items[index] = [MTLVertexBufferLayoutDescriptor new]; _present |= 1u << index; _concrete |= 1u << index; }
++    return _items[index];
++}
++- (MTLVertexBufferLayoutDescriptor*)existingObjectAtIndex:(NSUInteger)index { return index < 31 ? _items[index] : nil; }
++// reset in place: the game calls -[MTLVertexDescriptor reset] for every draw and then refills it, so keep the objects
++- (void)resetAll {
++    for (uint32_t bits = _present; bits; bits &= bits - 1) {
++        const int i = __builtin_ctz(bits);
++        MTLVertexBufferLayoutDescriptor* item = _items[i];
++        if (_concrete & (1u << i)) {
++            item->_stride = 0; item->_stepFunction = MTLVertexStepFunctionPerVertex; item->_stepRate = 1;
++        } else {
++            item.stride = 0; item.stepFunction = MTLVertexStepFunctionPerVertex; item.stepRate = 1;
++        }
++    }
++}
++- (void)setObject:(MTLVertexBufferLayoutDescriptor*)descriptor atIndexedSubscript:(NSUInteger)index {
++    if (index >= 31) [NSException raise:NSRangeException format:@"Vertex descriptor index %lu exceeds 30", (unsigned long)index];
++    id old = _items[index];
++    _items[index] = [descriptor retain];
++    [old release];
++    const uint32_t bit = 1u << index;
++    if (descriptor) _present |= bit; else _present &= ~bit;
++    if (descriptor && object_getClass(descriptor) == [MTLVertexBufferLayoutDescriptor class]) _concrete |= bit; else _concrete &= ~bit;
++}
++- (id)copyWithZone:(NSZone*)zone {
++    MTLVertexBufferLayoutDescriptorArray* copy = [[[self class] allocWithZone:zone] init];
++    for (int i = 0; i < 31; ++i) if (_items[i]) copy->_items[i] = [_items[i] copy];
++    copy->_present = _present;
++    copy->_concrete = _concrete; // -copy of a concrete item returns the same class
++    return copy;
++}
++@end
++@implementation MTLVertexAttributeDescriptor
++@synthesize format = _format;
++@synthesize offset = _offset;
++@synthesize bufferIndex = _bufferIndex;
++- (id)copyWithZone:(NSZone*)zone { MTLVertexAttributeDescriptor* copy = [[[self class] allocWithZone:zone] init]; copy.format = _format; copy.offset = _offset; copy.bufferIndex = _bufferIndex; return copy; }
++@end
++@implementation MTLVertexAttributeDescriptorArray {
++    MTLVertexAttributeDescriptor* _items[31];
++    uint32_t _present;   // bit i: _items[i] exists
++    uint32_t _concrete;  // bit i: _items[i] is exactly MTLVertexAttributeDescriptor (ivars can be written directly)
++}
++- (void)dealloc { for (int i = 0; i < 31; ++i) [_items[i] release]; [super dealloc]; }
++- (MTLVertexAttributeDescriptor*)objectAtIndexedSubscript:(NSUInteger)index {
++    if (index >= 31) [NSException raise:NSRangeException format:@"Vertex descriptor index %lu exceeds 30", (unsigned long)index];
++    if (!_items[index]) { _items[index] = [MTLVertexAttributeDescriptor new]; _present |= 1u << index; _concrete |= 1u << index; }
++    return _items[index];
++}
++- (MTLVertexAttributeDescriptor*)existingObjectAtIndex:(NSUInteger)index { return index < 31 ? _items[index] : nil; }
++- (void)resetAll {
++    for (uint32_t bits = _present; bits; bits &= bits - 1) {
++        const int i = __builtin_ctz(bits);
++        MTLVertexAttributeDescriptor* item = _items[i];
++        if (_concrete & (1u << i)) {
++            item->_format = MTLVertexFormatInvalid; item->_offset = 0; item->_bufferIndex = 0;
++        } else {
++            item.format = MTLVertexFormatInvalid; item.offset = 0; item.bufferIndex = 0;
++        }
++    }
++}
++- (void)setObject:(MTLVertexAttributeDescriptor*)descriptor atIndexedSubscript:(NSUInteger)index {
++    if (index >= 31) [NSException raise:NSRangeException format:@"Vertex descriptor index %lu exceeds 30", (unsigned long)index];
++    id old = _items[index];
++    _items[index] = [descriptor retain];
++    [old release];
++    const uint32_t bit = 1u << index;
++    if (descriptor) _present |= bit; else _present &= ~bit;
++    if (descriptor && object_getClass(descriptor) == [MTLVertexAttributeDescriptor class]) _concrete |= bit; else _concrete &= ~bit;
++}
++- (id)copyWithZone:(NSZone*)zone {
++    MTLVertexAttributeDescriptorArray* copy = [[[self class] allocWithZone:zone] init];
++    for (int i = 0; i < 31; ++i) if (_items[i]) copy->_items[i] = [_items[i] copy];
++    copy->_present = _present;
++    copy->_concrete = _concrete; // -copy of a concrete item returns the same class
++    return copy;
++}
++@end
+ @implementation MTLVertexDescriptor
+-
+-#if DARLING_METAL_ENABLED
+-
+-- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
+-{
+-    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++@synthesize layouts = _layouts;
++@synthesize attributes = _attributes;
+++ (instancetype)vertexDescriptor { return [[[self alloc] init] autorelease]; }
++- (instancetype)init { self = [super init]; if (self) [self reset]; return self; }
++- (void)dealloc { [_layouts release]; [_attributes release]; [super dealloc]; }
++- (void)reset {
++    if (_layouts && _attributes) { [_layouts resetAll]; [_attributes resetAll]; return; }
++    [_layouts release]; [_attributes release];
++    _layouts = [MTLVertexBufferLayoutDescriptorArray new];
++    _attributes = [MTLVertexAttributeDescriptorArray new];
+ }
+-
+-- (void)forwardInvocation:(NSInvocation *)anInvocation
+-{
+-    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++- (id)copyWithZone:(NSZone*)zone {
++    MTLVertexDescriptor* copy = [[[self class] allocWithZone:zone] init];
++    [copy->_layouts release]; [copy->_attributes release];
++    copy->_layouts = [_layouts copy]; copy->_attributes = [_attributes copy];
++    return copy;
++}
++#if DARLING_METAL_ENABLED
++- (Indium::VertexDescriptor)asIndiumDescriptor {
++    static Class attributeClass = [MTLVertexAttributeDescriptor class];
++    static Class layoutClass = [MTLVertexBufferLayoutDescriptor class];
++    Indium::VertexDescriptor result;
++    for (NSUInteger i = 0; i < 31; ++i) {
++        MTLVertexAttributeDescriptor* attr = [_attributes existingObjectAtIndex: i];
++        if (!attr) continue;
++        const bool concrete = object_getClass(attr) == attributeClass;
++        const auto format = concrete ? attr->_format : attr.format;
++        if (format == MTLVertexFormatInvalid) continue;
++        const auto offset = concrete ? attr->_offset : attr.offset;
++        const auto index = concrete ? attr->_bufferIndex : attr.bufferIndex;
++        result.attributes[i] = {static_cast<Indium::VertexFormat>(format), offset, index};
++        MTLVertexBufferLayoutDescriptor* layout = _layouts[index];
++        if (object_getClass(layout) == layoutClass)
++            result.layouts[index] = {layout->_stride, static_cast<Indium::VertexStepFunction>(layout->_stepFunction), layout->_stepRate};
++        else
++            result.layouts[index] = {layout.stride, static_cast<Indium::VertexStepFunction>(layout.stepFunction), layout.stepRate};
++    }
++    return result;
+ }
+-
+ #endif
+-
+ @end
+diff --git a/include/Metal/MTLArgument.h b/include/Metal/MTLArgument.h
+new file mode 100644
+--- /dev/null
++++ b/include/Metal/MTLArgument.h
+@@ -0,0 +1,29 @@
++#ifndef _METAL_MTLARGUMENT_H_
++#define _METAL_MTLARGUMENT_H_
++#import <Foundation/Foundation.h>
++typedef NS_ENUM(NSUInteger, MTLArgumentType) { MTLArgumentTypeBuffer=0, MTLArgumentTypeThreadgroupMemory=1, MTLArgumentTypeTexture=2, MTLArgumentTypeSampler=3 };
++@interface MTLStructMember : NSObject
++@property(readonly) NSString* name;
++@property(readonly) NSUInteger offset;
++@end
++@interface MTLStructType : NSObject
++@property(readonly) NSArray<MTLStructMember*>* members;
++- (MTLStructMember*)memberByName:(NSString*)name;
++@end
++@interface MTLArgument : NSObject
++@property(readonly) NSString* name;
++@property(readonly) MTLArgumentType type;
++@property(readonly) NSUInteger index;
++@property(readonly, getter=isActive) BOOL active;
++@property(readonly) NSUInteger bufferAlignment;
++@property(readonly) NSUInteger bufferDataSize;
++@property(readonly) MTLStructType* bufferStructType;
++@end
++@interface MTLComputePipelineReflection : NSObject
++@property(readonly) NSArray<MTLArgument*>* arguments;
++@end
++@interface MTLRenderPipelineReflection : NSObject
++@property(readonly) NSArray<MTLArgument*>* vertexArguments;
++@property(readonly) NSArray<MTLArgument*>* fragmentArguments;
++@end
++#endif
+diff --git a/include/Metal/MTLBlitCommandEncoder.h b/include/Metal/MTLBlitCommandEncoder.h
+new file mode 100644
+--- /dev/null
++++ b/include/Metal/MTLBlitCommandEncoder.h
+@@ -0,0 +1,28 @@
++// SPDX-FileCopyrightText: 2026 Darling Developers
++// SPDX-License-Identifier: MPL-2.0
++
++#ifndef _METAL_MTLBLITCOMMANDENCODER_H_
++#define _METAL_MTLBLITCOMMANDENCODER_H_
++#import <Metal/MTLCommandEncoder.h>
++#import <Metal/MTLTypes.h>
++@protocol MTLBuffer;
++@protocol MTLTexture;
++typedef NS_OPTIONS(NSUInteger, MTLBlitOption) {
++    MTLBlitOptionNone = 0,
++    MTLBlitOptionDepthFromDepthStencil = 1,
++    MTLBlitOptionStencilFromDepthStencil = 2,
++    MTLBlitOptionRowLinearPVRTC = 4,
++};
++@protocol MTLBlitCommandEncoder <MTLCommandEncoder>
++- (void)copyFromBuffer:(id<MTLBuffer>)source sourceOffset:(NSUInteger)sourceOffset toBuffer:(id<MTLBuffer>)destination destinationOffset:(NSUInteger)destinationOffset size:(NSUInteger)size;
++- (void)copyFromBuffer:(id<MTLBuffer>)source sourceOffset:(NSUInteger)sourceOffset sourceBytesPerRow:(NSUInteger)sourceBytesPerRow sourceBytesPerImage:(NSUInteger)sourceBytesPerImage sourceSize:(MTLSize)sourceSize toTexture:(id<MTLTexture>)destination destinationSlice:(NSUInteger)destinationSlice destinationLevel:(NSUInteger)destinationLevel destinationOrigin:(MTLOrigin)destinationOrigin;
++- (void)copyFromTexture:(id<MTLTexture>)source sourceSlice:(NSUInteger)sourceSlice sourceLevel:(NSUInteger)sourceLevel sourceOrigin:(MTLOrigin)sourceOrigin sourceSize:(MTLSize)sourceSize toBuffer:(id<MTLBuffer>)destination destinationOffset:(NSUInteger)destinationOffset destinationBytesPerRow:(NSUInteger)destinationBytesPerRow destinationBytesPerImage:(NSUInteger)destinationBytesPerImage;
++- (void)copyFromTexture:(id<MTLTexture>)source toTexture:(id<MTLTexture>)destination;
++- (void)copyFromTexture:(id<MTLTexture>)source sourceSlice:(NSUInteger)sourceSlice sourceLevel:(NSUInteger)sourceLevel toTexture:(id<MTLTexture>)destination destinationSlice:(NSUInteger)destinationSlice destinationLevel:(NSUInteger)destinationLevel sliceCount:(NSUInteger)sliceCount levelCount:(NSUInteger)levelCount;
++- (void)copyFromTexture:(id<MTLTexture>)source sourceSlice:(NSUInteger)sourceSlice sourceLevel:(NSUInteger)sourceLevel sourceOrigin:(MTLOrigin)sourceOrigin sourceSize:(MTLSize)sourceSize toTexture:(id<MTLTexture>)destination destinationSlice:(NSUInteger)destinationSlice destinationLevel:(NSUInteger)destinationLevel destinationOrigin:(MTLOrigin)destinationOrigin;
++- (void)fillBuffer:(id<MTLBuffer>)buffer range:(NSRange)range value:(uint8_t)value;
++- (void)generateMipmapsForTexture:(id<MTLTexture>)texture;
++- (void)copyFromBuffer:(id<MTLBuffer>)source sourceOffset:(NSUInteger)sourceOffset sourceBytesPerRow:(NSUInteger)sourceBytesPerRow sourceBytesPerImage:(NSUInteger)sourceBytesPerImage sourceSize:(MTLSize)sourceSize toTexture:(id<MTLTexture>)destination destinationSlice:(NSUInteger)destinationSlice destinationLevel:(NSUInteger)destinationLevel destinationOrigin:(MTLOrigin)destinationOrigin options:(MTLBlitOption)options;
++- (void)copyFromTexture:(id<MTLTexture>)source sourceSlice:(NSUInteger)sourceSlice sourceLevel:(NSUInteger)sourceLevel sourceOrigin:(MTLOrigin)sourceOrigin sourceSize:(MTLSize)sourceSize toBuffer:(id<MTLBuffer>)destination destinationOffset:(NSUInteger)destinationOffset destinationBytesPerRow:(NSUInteger)destinationBytesPerRow destinationBytesPerImage:(NSUInteger)destinationBytesPerImage options:(MTLBlitOption)options;
++@end
++#endif
+diff --git a/include/Metal/MTLExceptionBridge.h b/include/Metal/MTLExceptionBridge.h
+new file mode 100644
+--- /dev/null
++++ b/include/Metal/MTLExceptionBridge.h
+@@ -0,0 +1,23 @@
++#pragma once
++#import <Foundation/Foundation.h>
++#include <cstdio>
++#include <exception>
++#include <string>
++
++// Metal reports failures with nil and an NSError, while the Indium backend reports them with C++
++// exceptions, which the callers of the Metal API do not expect. Call from a catch block: builds the
++// NSError from the active exception and records it in the guest's /tmp/metal-errors.log.
++static inline NSError* MTLErrorFromCurrentException(const char* where)
++{
++	std::string message = "unknown error";
++	try { throw; }
++	catch (const std::exception& e) { message = e.what(); }
++	catch (...) {}
++
++	if (FILE* log = fopen("/tmp/metal-errors.log", "a")) {
++		fprintf(log, "%s: %s\n", where, message.c_str());
++		fclose(log);
++	}
++	return [NSError errorWithDomain: @"MTLLibraryErrorDomain" code: 3
++	                       userInfo: @{NSLocalizedDescriptionKey: [NSString stringWithUTF8String: message.c_str()]}];
++}
+diff --git a/include/Metal/MTLTrace.h b/include/Metal/MTLTrace.h
+new file mode 100644
+--- /dev/null
++++ b/include/Metal/MTLTrace.h
+@@ -0,0 +1,106 @@
++#pragma once
++#include <atomic>
++#include <cstdio>
++#include <unistd.h>
++#include <ctime>
++#include <map>
++#include <mutex>
++#include <string>
++
++// All the Metal diagnostics (counters, render-pass descriptions, the magenta overrides, drawable readbacks) are
++// off unless /tmp/metal-debug-trace exists when the process starts.
++inline bool MTLDebugEnabled()
++{
++	static const bool enabled = access("/tmp/metal-debug-trace", F_OK) == 0;
++	return enabled;
++}
++
++// Total draw calls seen so far, used to attribute draws to render passes.
++inline std::atomic<unsigned long>& MTLTraceDrawTotal()
++{
++	static std::atomic<unsigned long> total { 0 };
++	return total;
++}
++
++// Diagnostic event counters, appended to the guest's /tmp/metal-trace.log every few seconds.
++inline void MTLTraceCount(const char* name)
++{
++	static const bool countDraws = MTLDebugEnabled() || access("/tmp/metal-debug-timing", F_OK) == 0 || access("/tmp/metal-debug-snapshotdraws", F_OK) == 0;
++	if (countDraws && name[0] == 'd' && name[1] == 'r' && name[2] == 'a' && name[3] == 'w') {
++		++MTLTraceDrawTotal();
++	}
++	if (!MTLDebugEnabled()) {
++		return;
++	}
++
++	static std::mutex lock;
++	static std::map<std::string, unsigned long> counts;
++	static time_t last = 0;
++
++	std::lock_guard<std::mutex> guard(lock);
++	++counts[name];
++
++	time_t now = time(nullptr);
++	if (now - last >= 3) {
++		last = now;
++		if (FILE* log = fopen("/tmp/metal-trace.log", "a")) {
++			fprintf(log, "counts@%ld:", (long) now);
++			for (auto& count: counts) {
++				fprintf(log, " %s=%lu", count.first.c_str(), count.second);
++			}
++			fprintf(log, "\n");
++			fclose(log);
++		}
++	}
++}
++
++// Cheap aggregated timings (flag file /tmp/metal-debug-timing in the guest when the process starts), printed every 5 s.
++inline void MTLTraceTiming(const char* what, double seconds)
++{
++	static const bool enabled = access("/tmp/metal-debug-timing", F_OK) == 0;
++	if (!enabled) {
++		return;
++	}
++	struct Stat { double sum = 0, max = 0; unsigned long count = 0; };
++	static std::mutex lock;
++	static std::map<std::string, Stat> stats;
++	static time_t last = 0;
++	std::lock_guard<std::mutex> guard(lock);
++	Stat& stat = stats[what];
++	stat.sum += seconds;
++	stat.count++;
++	if (seconds > stat.max) stat.max = seconds;
++	time_t now = time(nullptr);
++	if (now - last >= 5) {
++		last = now;
++		if (FILE* log = fopen("/tmp/metal-trace.log", "a")) {
++			fprintf(log, "mtl-timing@%ld:", (long) now);
++			for (auto& entry: stats) {
++				fprintf(log, " %s[n=%lu avg=%.1fms max=%.1fms]", entry.first.c_str(), entry.second.count, entry.second.sum / entry.second.count * 1000, entry.second.max * 1000);
++			}
++			fprintf(log, "\n");
++			fclose(log);
++		}
++		stats.clear();
++	}
++}
++
++inline bool MTLTimingEnabled()
++{
++	static const bool enabled = access("/tmp/metal-debug-timing", F_OK) == 0;
++	return enabled;
++}
++
++inline double MTLTraceNow()
++{
++	struct timespec ts;
++	clock_gettime(CLOCK_MONOTONIC, &ts);
++	return ts.tv_sec + ts.tv_nsec / 1e9;
++}
++
++// Draw-state tracking (cheap bookkeeping for the draw log): on with the trace flag, or with /tmp/metal-debug-draws.
++inline bool MTLDrawTracking()
++{
++	static const bool enabled = MTLDebugEnabled() || access("/tmp/metal-debug-draws", F_OK) == 0;
++	return enabled;
++}
+diff --git a/private-include/Metal/MTLArgumentInternal.h b/private-include/Metal/MTLArgumentInternal.h
+new file mode 100644
+--- /dev/null
++++ b/private-include/Metal/MTLArgumentInternal.h
+@@ -0,0 +1,15 @@
++#ifndef _METAL_MTLARGUMENTINTERNAL_H_
++#define _METAL_MTLARGUMENTINTERNAL_H_
++#import <Metal/MTLArgument.h>
++#import <Metal/MTLVertexDescriptor.h>
++#if DARLING_METAL_ENABLED
++#include <indium/indium.hpp>
++@interface MTLComputePipelineReflection (Internal)
++- (instancetype)initWithFunction:(std::shared_ptr<Indium::Function>)function;
++@end
++@interface MTLRenderPipelineReflection (Internal)
++- (instancetype)initWithVertexFunction:(std::shared_ptr<Indium::Function>)vertex fragmentFunction:(std::shared_ptr<Indium::Function>)fragment;
++- (instancetype)initWithVertexFunction:(std::shared_ptr<Indium::Function>)vertex fragmentFunction:(std::shared_ptr<Indium::Function>)fragment vertexDescriptor:(MTLVertexDescriptor*)vertexDescriptor;
++@end
++#endif
++#endif
+diff --git a/private-include/Metal/MTLBlitCommandEncoderInternal.h b/private-include/Metal/MTLBlitCommandEncoderInternal.h
+new file mode 100644
+--- /dev/null
++++ b/private-include/Metal/MTLBlitCommandEncoderInternal.h
+@@ -0,0 +1,15 @@
++// SPDX-FileCopyrightText: 2026 Darling Developers
++// SPDX-License-Identifier: MPL-2.0
++
++#ifndef _METAL_MTLBLITCOMMANDENCODERINTERNAL_H_
++#define _METAL_MTLBLITCOMMANDENCODERINTERNAL_H_
++#import <Metal/MTLBlitCommandEncoder.h>
++#if DARLING_METAL_ENABLED
++#include <indium/indium.hpp>
++#endif
++@interface MTLBlitCommandEncoderInternal : NSObject <MTLBlitCommandEncoder>
++#if DARLING_METAL_ENABLED
++- (instancetype)initWithEncoder:(std::shared_ptr<Indium::BlitCommandEncoder>)encoder device:(id<MTLDevice>)device;
++#endif
++@end
++#endif
+diff --git a/private-include/Metal/MTLDepthStencilInternal.h b/private-include/Metal/MTLDepthStencilInternal.h
+new file mode 100644
+--- /dev/null
++++ b/private-include/Metal/MTLDepthStencilInternal.h
+@@ -0,0 +1,25 @@
++// SPDX-FileCopyrightText: 2026 Darling Developers
++// SPDX-License-Identifier: MPL-2.0
++
++#ifndef _METAL_MTLDEPTHSTENCILINTERNAL_H_
++#define _METAL_MTLDEPTHSTENCILINTERNAL_H_
++#import <Metal/MTLDepthStencilDescriptor.h>
++#if DARLING_METAL_ENABLED
++#include <indium/indium.hpp>
++@interface MTLStencilDescriptor (Internal)
++- (Indium::StencilDescriptor)asIndiumDescriptor;
++@end
++@interface MTLDepthStencilDescriptor (Internal)
++- (Indium::DepthStencilDescriptor)asIndiumDescriptor;
++@end
++#endif
++@interface MTLDepthStencilStateInternal : NSObject <MTLDepthStencilState>
++#if DARLING_METAL_ENABLED
++@property(nonatomic, readonly) std::shared_ptr<Indium::DepthStencilState> state;
++- (instancetype)initWithState:(std::shared_ptr<Indium::DepthStencilState>)state device:(id<MTLDevice>)device label:(NSString*)label;
++#endif
++@end
++// Direct access for the encoders: the property getter is a message send that returns the shared_ptr by value.
++const std::shared_ptr<Indium::DepthStencilState>& MTLDepthStencilGetIndium(id object);
++
++#endif
+diff --git a/private-include/Metal/MTLSamplerStateInternal.h b/private-include/Metal/MTLSamplerStateInternal.h
+new file mode 100644
+--- /dev/null
++++ b/private-include/Metal/MTLSamplerStateInternal.h
+@@ -0,0 +1,13 @@
++// SPDX-License-Identifier: MPL-2.0
++#pragma once
++#import <Metal/MTLSamplerDescriptor.h>
++#if DARLING_METAL_ENABLED
++#include <indium/indium.hpp>
++@interface MTLSamplerStateInternal : NSObject <MTLSamplerState>
++@property(nonatomic, readonly) std::shared_ptr<Indium::SamplerState> sampler;
++- (instancetype)initWithSampler:(std::shared_ptr<Indium::SamplerState>)sampler device:(id<MTLDevice>)device label:(NSString*)label;
++@end
++// Direct access for the encoders: the property getter is a message send that returns the shared_ptr by value.
++const std::shared_ptr<Indium::SamplerState>& MTLSamplerGetIndium(id object);
++
++#endif
+diff --git a/private-include/Metal/MTLVertexDescriptorInternal.h b/private-include/Metal/MTLVertexDescriptorInternal.h
+new file mode 100644
+--- /dev/null
++++ b/private-include/Metal/MTLVertexDescriptorInternal.h
+@@ -0,0 +1,13 @@
++// SPDX-FileCopyrightText: 2026 Darling Developers
++// SPDX-License-Identifier: MPL-2.0
++
++#ifndef _METAL_MTLVERTEXDESCRIPTORINTERNAL_H_
++#define _METAL_MTLVERTEXDESCRIPTORINTERNAL_H_
++#import <Metal/MTLVertexDescriptor.h>
++#if DARLING_METAL_ENABLED
++#include <indium/indium.hpp>
++@interface MTLVertexDescriptor (Internal)
++- (Indium::VertexDescriptor)asIndiumDescriptor;
++@end
++#endif
++#endif
+diff --git a/src/Metal/MTLArgument.mm b/src/Metal/MTLArgument.mm
+new file mode 100644
+--- /dev/null
++++ b/src/Metal/MTLArgument.mm
+@@ -0,0 +1,78 @@
++#import <Metal/MTLArgumentInternal.h>
++@implementation MTLStructMember
++@synthesize name=_name, offset=_offset;
++- (instancetype)initWithName:(NSString*)name offset:(NSUInteger)offset { self=[super init]; if(self){_name=[name copy];_offset=offset;}return self; }
++- (void)dealloc { [_name release];[super dealloc]; }
++@end
++@implementation MTLStructType
++@synthesize members=_members;
++- (instancetype)initWithMembers:(NSArray*)members { self=[super init];if(self)_members=[members copy];return self; }
++- (MTLStructMember*)memberByName:(NSString*)name { for(MTLStructMember* member in _members) if([member.name isEqualToString:name])return member; return nil; }
++- (void)dealloc { [_members release];[super dealloc]; }
++@end
++@implementation MTLArgument
++@synthesize name=_name, type=_type, index=_index, bufferAlignment=_bufferAlignment, bufferDataSize=_bufferDataSize, bufferStructType=_bufferStructType;
++- (BOOL)isActive { return YES; }
++#if DARLING_METAL_ENABLED
++- (instancetype)initWithInfo:(const Iridium::ArgumentInfo&)info {
++    self=[super init];if(self){
++        _name=[[NSString alloc] initWithUTF8String:info.name.c_str()];_index=info.index;
++        _type=info.type==Iridium::BindingType::Buffer ? MTLArgumentTypeBuffer : (info.type==Iridium::BindingType::Texture ? MTLArgumentTypeTexture : MTLArgumentTypeSampler);
++        _bufferAlignment=info.alignment;_bufferDataSize=info.size;
++        if(!info.members.empty()){
++            NSMutableArray* members=[NSMutableArray new];
++            for(const auto& member:info.members){ MTLStructMember* object=[[MTLStructMember alloc] initWithName:[NSString stringWithUTF8String:member.name.c_str()] offset:member.offset];[members addObject:object];[object release]; }
++            _bufferStructType=[[MTLStructType alloc] initWithMembers:members];[members release];
++        }
++    }return self;
++}
++#endif
++- (void)dealloc { [_name release];[_bufferStructType release];[super dealloc]; }
++@end
++#if DARLING_METAL_ENABLED
++static NSArray* argumentsForFunction(std::shared_ptr<Indium::Function> function) {
++    NSMutableArray* result=[NSMutableArray array];
++    if(function)for(const auto& info:function->argumentInfo()){
++        MTLArgument* argument=[[MTLArgument alloc] initWithInfo:info];[result addObject:argument];[argument release];
++    }
++    return result;
++}
++#endif
++@implementation MTLComputePipelineReflection
++@synthesize arguments=_arguments;
++#if DARLING_METAL_ENABLED
++- (instancetype)initWithFunction:(std::shared_ptr<Indium::Function>)function { self=[super init];if(self)_arguments=[argumentsForFunction(function) copy];return self; }
++#endif
++- (void)dealloc { [_arguments release];[super dealloc]; }
++@end
++@implementation MTLRenderPipelineReflection
++@synthesize vertexArguments=_vertexArguments, fragmentArguments=_fragmentArguments;
++#if DARLING_METAL_ENABLED
++- (instancetype)initWithVertexFunction:(std::shared_ptr<Indium::Function>)vertex fragmentFunction:(std::shared_ptr<Indium::Function>)fragment {
++    return [self initWithVertexFunction:vertex fragmentFunction:fragment vertexDescriptor:nil];
++}
++// Metal lists the vertex buffers that feed [[stage_in]] among the vertex arguments, as buffers named "vertexBuffer.<index>"
++// (the game derives which vertex streams to bind from them).
++- (instancetype)initWithVertexFunction:(std::shared_ptr<Indium::Function>)vertex fragmentFunction:(std::shared_ptr<Indium::Function>)fragment vertexDescriptor:(MTLVertexDescriptor*)vertexDescriptor {
++    self=[super init];if(self){
++        NSMutableArray* vertexArguments=[argumentsForFunction(vertex) mutableCopy];
++        NSMutableIndexSet* seen=[NSMutableIndexSet indexSet];
++        for(NSUInteger attribute=0;vertexDescriptor&&attribute<31;++attribute){
++            MTLVertexAttributeDescriptor* description=vertexDescriptor.attributes[attribute];
++            if(description.format==MTLVertexFormatInvalid||[seen containsIndex:description.bufferIndex])continue;
++            [seen addIndex:description.bufferIndex];
++            Iridium::ArgumentInfo info;
++            info.type=Iridium::BindingType::Buffer;
++            info.index=description.bufferIndex;
++            info.name="vertexBuffer."+std::to_string(description.bufferIndex);
++            info.size=vertexDescriptor.layouts[description.bufferIndex].stride;
++            info.alignment=4;
++            MTLArgument* argument=[[MTLArgument alloc] initWithInfo:info];[vertexArguments addObject:argument];[argument release];
++        }
++        _vertexArguments=vertexArguments;
++        _fragmentArguments=[argumentsForFunction(fragment) copy];
++    }return self;
++}
++#endif
++- (void)dealloc { [_vertexArguments release];[_fragmentArguments release];[super dealloc]; }
++@end
+diff --git a/src/Metal/MTLBlitCommandEncoder.mm b/src/Metal/MTLBlitCommandEncoder.mm
+new file mode 100644
+--- /dev/null
++++ b/src/Metal/MTLBlitCommandEncoder.mm
+@@ -0,0 +1,101 @@
++// SPDX-FileCopyrightText: 2026 Darling Developers
++// SPDX-License-Identifier: MPL-2.0
++
++#import <Metal/MTLTrace.h>
++#include <algorithm>
++#import <Metal/MTLBlitCommandEncoderInternal.h>
++#import <Metal/MTLBufferInternal.h>
++#import <Metal/MTLTextureInternal.h>
++#import <Metal/MTLTypesInternal.h>
++#import <Metal/stubs.h>
++
++#if DARLING_METAL_ENABLED
++// Diagnostic (/tmp/metal-debug-timing): are the texture uploads carrying data? Sample the start of each source.
++static void MTLDebugUpload(id<MTLBuffer> source, NSUInteger offset, id<MTLTexture> destination, NSUInteger level, MTLSize size)
++{
++	if (!MTLTimingEnabled()) {
++		return;
++	}
++	const uint8_t* bytes = (const uint8_t*) source.contents;
++	if (!bytes) {
++		MTLTraceTiming("upload_sourceNotCPUVisible", 0);
++		return;
++	}
++	NSUInteger available = source.length > offset ? source.length - offset : 0;
++	NSUInteger probe = std::min<NSUInteger>(available, 4096);
++	NSUInteger nonZero = 0;
++	for (NSUInteger i = 0; i < probe; ++i) if (bytes[offset + i]) ++nonZero;
++	char name[64];
++	snprintf(name, sizeof(name), "upload_%s_f%lu", nonZero ? "data" : "ZERO", (unsigned long) destination.pixelFormat);
++	MTLTraceTiming(name, 0);
++	static unsigned long logged = 0;
++	if (!nonZero && destination.width >= 256 && ++logged <= 60) {
++		if (FILE* log = fopen("/tmp/metal-trace.log", "a")) {
++			fprintf(log, "zero-upload tex=%lux%lu fmt=%lu mips=%lu level=%lu size=%lux%lu srcOffset=%lu\n", (unsigned long) destination.width, (unsigned long) destination.height, (unsigned long) destination.pixelFormat,
++				(unsigned long) destination.mipmapLevelCount, (unsigned long) level, (unsigned long) size.width, (unsigned long) size.height, (unsigned long) offset);
++			fclose(log);
++		}
++	}
++}
++#endif
++@implementation MTLBlitCommandEncoderInternal
++#if DARLING_METAL_ENABLED
++{
++    std::shared_ptr<Indium::BlitCommandEncoder> _encoder;
++}
++@synthesize device = _device;
++@synthesize label = _label;
++- (instancetype)initWithEncoder:(std::shared_ptr<Indium::BlitCommandEncoder>)encoder device:(id<MTLDevice>)device {
++    self = [super init];
++    if (self) { _encoder = encoder; _device = [device retain]; }
++    return self;
++}
++- (void)dealloc {
++    [_device release]; [_label release]; [super dealloc];
++}
++- (void)endEncoding { _encoder->endEncoding(); }
++- (void)copyFromBuffer:(id<MTLBuffer>)source sourceOffset:(NSUInteger)sourceOffset toBuffer:(id<MTLBuffer>)destination destinationOffset:(NSUInteger)destinationOffset size:(NSUInteger)size {
++	MTLTraceCount("blitBufferToBuffer");
++    _encoder->copy(((MTLBufferInternal*)source).buffer, sourceOffset, ((MTLBufferInternal*)destination).buffer, destinationOffset, size);
++}
++- (void)copyFromBuffer:(id<MTLBuffer>)source sourceOffset:(NSUInteger)sourceOffset sourceBytesPerRow:(NSUInteger)sourceBytesPerRow sourceBytesPerImage:(NSUInteger)sourceBytesPerImage sourceSize:(MTLSize)sourceSize toTexture:(id<MTLTexture>)destination destinationSlice:(NSUInteger)destinationSlice destinationLevel:(NSUInteger)destinationLevel destinationOrigin:(MTLOrigin)destinationOrigin {
++	MTLTraceCount("blitBufferToTexture");
++	MTLDebugUpload(source, sourceOffset, destination, destinationLevel, sourceSize);
++    _encoder->copy(((MTLBufferInternal*)source).buffer, sourceOffset, sourceBytesPerRow, sourceBytesPerImage, MTLSizeToIndium(sourceSize), ((MTLTextureInternal*)destination).texture, destinationSlice, destinationLevel, (Indium::Origin {destinationOrigin.x, destinationOrigin.y, destinationOrigin.z}));
++}
++- (void)copyFromTexture:(id<MTLTexture>)source sourceSlice:(NSUInteger)sourceSlice sourceLevel:(NSUInteger)sourceLevel sourceOrigin:(MTLOrigin)sourceOrigin sourceSize:(MTLSize)sourceSize toBuffer:(id<MTLBuffer>)destination destinationOffset:(NSUInteger)destinationOffset destinationBytesPerRow:(NSUInteger)destinationBytesPerRow destinationBytesPerImage:(NSUInteger)destinationBytesPerImage {
++	MTLTraceCount("blitTextureToBuffer");
++    _encoder->copy(((MTLTextureInternal*)source).texture, sourceSlice, sourceLevel, (Indium::Origin {sourceOrigin.x, sourceOrigin.y, sourceOrigin.z}), MTLSizeToIndium(sourceSize), ((MTLBufferInternal*)destination).buffer, destinationOffset, destinationBytesPerRow, destinationBytesPerImage);
++}
++- (void)copyFromTexture:(id<MTLTexture>)source toTexture:(id<MTLTexture>)destination {
++	MTLTraceCount("blitTextureToTexture");
++    _encoder->copy(((MTLTextureInternal*)source).texture, ((MTLTextureInternal*)destination).texture);
++}
++- (void)copyFromTexture:(id<MTLTexture>)source sourceSlice:(NSUInteger)sourceSlice sourceLevel:(NSUInteger)sourceLevel toTexture:(id<MTLTexture>)destination destinationSlice:(NSUInteger)destinationSlice destinationLevel:(NSUInteger)destinationLevel sliceCount:(NSUInteger)sliceCount levelCount:(NSUInteger)levelCount {
++	MTLTraceCount("blitTextureToTexture");
++    _encoder->copy(((MTLTextureInternal*)source).texture, sourceSlice, sourceLevel, ((MTLTextureInternal*)destination).texture, destinationSlice, destinationLevel, sliceCount, levelCount);
++}
++- (void)copyFromTexture:(id<MTLTexture>)source sourceSlice:(NSUInteger)sourceSlice sourceLevel:(NSUInteger)sourceLevel sourceOrigin:(MTLOrigin)sourceOrigin sourceSize:(MTLSize)sourceSize toTexture:(id<MTLTexture>)destination destinationSlice:(NSUInteger)destinationSlice destinationLevel:(NSUInteger)destinationLevel destinationOrigin:(MTLOrigin)destinationOrigin {
++	MTLTraceCount("blitTextureToTexture");
++    _encoder->copy(((MTLTextureInternal*)source).texture, sourceSlice, sourceLevel, (Indium::Origin {sourceOrigin.x, sourceOrigin.y, sourceOrigin.z}), MTLSizeToIndium(sourceSize), ((MTLTextureInternal*)destination).texture, destinationSlice, destinationLevel, (Indium::Origin {destinationOrigin.x, destinationOrigin.y, destinationOrigin.z}));
++}
++- (void)fillBuffer:(id<MTLBuffer>)buffer range:(NSRange)range value:(uint8_t)value {
++    _encoder->fillBuffer(((MTLBufferInternal*)buffer).buffer, NSRangeToIndium(range), value);
++}
++- (void)generateMipmapsForTexture:(id<MTLTexture>)texture {
++	MTLTraceCount("generateMipmaps");
++    _encoder->generateMipmapsForTexture(((MTLTextureInternal*)texture).texture);
++}
++- (void)copyFromBuffer:(id<MTLBuffer>)source sourceOffset:(NSUInteger)sourceOffset sourceBytesPerRow:(NSUInteger)sourceBytesPerRow sourceBytesPerImage:(NSUInteger)sourceBytesPerImage sourceSize:(MTLSize)sourceSize toTexture:(id<MTLTexture>)destination destinationSlice:(NSUInteger)destinationSlice destinationLevel:(NSUInteger)destinationLevel destinationOrigin:(MTLOrigin)destinationOrigin options:(MTLBlitOption)options {
++	MTLTraceCount("blitBufferToTexture");
++    _encoder->copy(((MTLBufferInternal*)source).buffer, sourceOffset, sourceBytesPerRow, sourceBytesPerImage, MTLSizeToIndium(sourceSize), ((MTLTextureInternal*)destination).texture, destinationSlice, destinationLevel, (Indium::Origin {destinationOrigin.x, destinationOrigin.y, destinationOrigin.z}), static_cast<Indium::BlitOption>(options));
++}
++- (void)copyFromTexture:(id<MTLTexture>)source sourceSlice:(NSUInteger)sourceSlice sourceLevel:(NSUInteger)sourceLevel sourceOrigin:(MTLOrigin)sourceOrigin sourceSize:(MTLSize)sourceSize toBuffer:(id<MTLBuffer>)destination destinationOffset:(NSUInteger)destinationOffset destinationBytesPerRow:(NSUInteger)destinationBytesPerRow destinationBytesPerImage:(NSUInteger)destinationBytesPerImage options:(MTLBlitOption)options {
++	MTLTraceCount("blitTextureToBuffer");
++    _encoder->copy(((MTLTextureInternal*)source).texture, sourceSlice, sourceLevel, (Indium::Origin {sourceOrigin.x, sourceOrigin.y, sourceOrigin.z}), MTLSizeToIndium(sourceSize), ((MTLBufferInternal*)destination).buffer, destinationOffset, destinationBytesPerRow, destinationBytesPerImage, static_cast<Indium::BlitOption>(options));
++}
++#else
++@dynamic device, label;
++MTL_UNSUPPORTED_CLASS
++#endif
++@end

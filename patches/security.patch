@@ -1,0 +1,225 @@
+diff --git a/OSX/libsecurity_codesigning/lib/StaticCode.cpp b/OSX/libsecurity_codesigning/lib/StaticCode.cpp
+index 0c4be9d3..0a3c75d9 100644
+--- a/OSX/libsecurity_codesigning/lib/StaticCode.cpp
++++ b/OSX/libsecurity_codesigning/lib/StaticCode.cpp
+@@ -1247,7 +1247,11 @@ void SecStaticCode::validateExecutable()
+ 			if (!cd)
+ 				MacOSError::throwMe(errSecCSUnsigned);
+ 			AutoFileDesc fd(mainExecutablePath(), O_RDONLY);
++#ifndef DARLING
++			// This is only an I/O optimization. Darling does not implement this
++			// Darwin cache hint; retain the complete page-by-page hash validation.
+ 			fd.fcntl(F_NOCACHE, true);		// turn off page caching (one-pass)
++#endif
+ 			if (Universal *fat = mRep->mainExecutableImage())
+ 				fd.seek(fat->archOffset());
+ 			size_t pageSize = cd->pageSize ? (1 << cd->pageSize) : 0;
+@@ -1328,8 +1332,14 @@ void SecStaticCode::validateResources(SecCSFlags flags)
+ 				itemIsOnRootFS, skipRootVolumeExceptions, useRootFSPolicy, itemMightUseXattrFiles, skipXattrFiles);
+ 
+ 		if (mLimitedAsync == NULL) {
++#ifdef DARLING
++			// Darling cannot query disk media through Apple's I/O registry.
++			// Use the existing serial resource validator without that SSD hint.
++			bool runMultiThreaded = false;
++#else
+ 			bool runMultiThreaded = ((flags & kSecCSSingleThreaded) == kSecCSSingleThreaded) ? false :
+ 					(diskRep()->fd().mediumType() == kIOPropertyMediumTypeSolidStateKey);
++#endif
+ 			mLimitedAsync = new LimitedAsync(runMultiThreaded);
+ 		}
+ 
+diff --git a/OSX/libsecurity_codesigning/lib/reqparser.cpp b/OSX/libsecurity_codesigning/lib/reqparser.cpp
+index e3657a19..26b8838a 100644
+--- a/OSX/libsecurity_codesigning/lib/reqparser.cpp
++++ b/OSX/libsecurity_codesigning/lib/reqparser.cpp
+@@ -51,6 +51,12 @@ ModuleNexus<PluginHost> plugin;
+ //
+ PluginHost::PluginHost()
+ {
++#ifdef DARLING
++	// Darling links the genuine requirement parser into Security itself rather
++	// than shipping Apple's separate csparser.bundle.
++	antlr = findAntlrPlugin();
++	CODESIGN_LOAD_ANTLR();
++#else
+ 	if (CFBundleRef securityFramework = CFBundleGetBundleWithIdentifier(CFSTR("com.apple.security")))
+ 		if (CFRef<CFURLRef> plugins = CFBundleCopyBuiltInPlugInsURL(securityFramework))
+ 			if (CFRef<CFURLRef> pluginURL = makeCFURL("csparser.bundle", true, plugins)) {
+@@ -64,6 +70,7 @@ PluginHost::PluginHost()
+ 	// can't load plugin - fail
+     Syslog::warning("code signing problem: unable to load csparser plug-in");
+ 	MacOSError::throwMe(errSecCSInternalError);
++#endif
+ }
+ 
+ 
+diff --git a/securityd/CMakeLists.txt b/securityd/CMakeLists.txt
+index 32d90f4d..cec9f05d 100644
+--- a/securityd/CMakeLists.txt
++++ b/securityd/CMakeLists.txt
+@@ -66,6 +66,11 @@ target_include_directories(securityd_exe PRIVATE
+ )
+ target_compile_options(securityd_exe PRIVATE
+ 	-fobjc-arc
++	# Darling runs unprivileged, and the NDEBUG=1 set for the whole
++	# security subtree would make securityd refuse to start for any
++	# user. Undefining it selects Apple's own "unprivileged, some
++	# features may not work" path so trust evaluation can run.
++	-UNDEBUG
+ )
+ make_fat(securityd_exe)
+ 
+diff --git a/trust/trustd/CMakeLists.txt b/trust/trustd/CMakeLists.txt
+index c2a70718..2bccd840 100644
+--- a/trust/trustd/CMakeLists.txt
++++ b/trust/trustd/CMakeLists.txt
+@@ -41,6 +41,14 @@ add_lib_ios_shim(libtrustd
+ 		LIBTRUSTD=1
+ )
+ 
++# Apple's trustd sources are written for ARC (e.g. assign-by-default properties
++# would otherwise dangle). Without it the library's object ownership is wrong.
++target_compile_options(libtrustd PRIVATE
++	$<$<COMPILE_LANGUAGE:C>:-fobjc-arc>
++)
++# these use Foundation/MobileAsset APIs Darling lacks, which ARC refuses to compile; they stay as they were
++set_source_files_properties(OTATrustUtilities.m SecRevocationNetworking.m trustdFileLocations.m PROPERTIES COMPILE_OPTIONS -fno-objc-arc)
++
+ add_darling_executable(trustd
+ 	../../OSX/sec/ipc/server_entitlement_helpers.c
+ 	trustd.c
+@@ -79,3 +87,27 @@ target_link_libraries(trustd
+ install(TARGETS trustd DESTINATION libexec/darling/usr/libexec)
+ install(FILES macOS/com.apple.trustd.plist DESTINATION libexec/darling/System/Library/LaunchDaemons)
+ install(FILES macOS/com.apple.trustd.agent.plist DESTINATION libexec/darling/System/Library/LaunchAgents)
++
++add_darling_executable(trustdFileHelper
++	trustdFileHelper/main.m
++	trustdFileHelper/trustdFileHelper.m
++)
++target_compile_options(trustdFileHelper PRIVATE
++	-fobjc-arc
++	-DDARLING
++)
++target_compile_definitions(trustdFileHelper PRIVATE
++	LIBTRUSTD
++	SECITEM_SHIM_OSX=1
++	SEC_IOS_ON_OSX=1
++)
++target_link_libraries(trustdFileHelper
++	libtrustd
++	utilities
++	Security
++	CoreFoundation
++	Foundation
++	objc
++	system
++)
++install(TARGETS trustdFileHelper DESTINATION libexec/darling/usr/libexec)
+diff --git a/trust/trustd/SecRevocationNetworking.m b/trust/trustd/SecRevocationNetworking.m
+index 0f61efd0..1d0c6364 100644
+--- a/trust/trustd/SecRevocationNetworking.m
++++ b/trust/trustd/SecRevocationNetworking.m
+@@ -358,6 +358,11 @@ static ValidUpdateRequest *request = nil;
+ }
+ 
+ - (BOOL) scheduleUpdateFromServer:(NSString *)server forVersion:(NSUInteger)version withQueue:(dispatch_queue_t)updateQueue {
++    if (!TrustURLSessionsAvailable()) {
++        // no URL session support on this platform; keep the built-in database
++        secnotice("validupdate", "no URL session support, skipping update");
++        return NO;
++    }
+     if (!server) {
+         secnotice("validupdate", "invalid update request");
+         return NO;
+diff --git a/trust/trustd/TrustURLSessionCache.h b/trust/trustd/TrustURLSessionCache.h
+index 988d6eb3..9d151ea1 100644
+--- a/trust/trustd/TrustURLSessionCache.h
++++ b/trust/trustd/TrustURLSessionCache.h
+@@ -30,6 +30,10 @@
+ 
+ extern const NSString *TrustdUserAgent;
+ 
++// darling-lol: whether this platform's Foundation can create the URL sessions
++// trustd's network fetches (OCSP, CRL, CA issuers, database updates) need.
++bool TrustURLSessionsAvailable(void);
++
+ @interface TrustURLSessionCache : NSObject
+ - (instancetype)initWithDelegate:(TrustURLSessionDelegate *)delegate;
+ - (NSURLSession *)sessionForAuditToken:(NSData *)auditToken;
+diff --git a/trust/trustd/TrustURLSessionCache.m b/trust/trustd/TrustURLSessionCache.m
+index b4dd9ba7..d4b9aeb4 100644
+--- a/trust/trustd/TrustURLSessionCache.m
++++ b/trust/trustd/TrustURLSessionCache.m
+@@ -44,6 +44,15 @@ static NSTimeInterval TrustURLSessionGetResourceTimeout(void) {
+ @property NSMutableArray <NSData *>* _clientLRUList;
+ @end
+ 
++bool TrustURLSessionsAvailable(void)
++{
++    // Darling's Foundation has no working NSURLSession yet: the configuration
++    // class cannot even be messaged from trustd (ephemeral sessions are
++    // unrecognized, and class introspection aborts in the runtime). Report
++    // network fetches as unavailable until that exists.
++    return false;
++}
++
+ @implementation TrustURLSessionCache
+ 
+ - (instancetype)initWithDelegate:(TrustURLSessionDelegate *)delegate
+@@ -58,6 +67,11 @@ static NSTimeInterval TrustURLSessionGetResourceTimeout(void) {
+ 
+ - (NSURLSession *)createSessionForAuditToken:(NSData *)auditToken
+ {
++    if (!TrustURLSessionsAvailable()) {
++        // network fetches (OCSP, CRL, CA issuers) are unavailable; callers
++        // treat a nil session like an unreachable server
++        return nil;
++    }
+     NSURLSessionConfiguration *config = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+     config.timeoutIntervalForResource = TrustURLSessionGetResourceTimeout();
+     config.HTTPAdditionalHeaders = @{@"User-Agent" : TrustdUserAgent};
+@@ -82,6 +96,9 @@ static NSTimeInterval TrustURLSessionGetResourceTimeout(void) {
+         }
+         /* Cache miss: create new session */
+         result = [self createSessionForAuditToken:auditToken];
++        if (result == nil) {
++            return nil;
++        }
+         [self._clientLRUList insertObject:auditToken atIndex:0];
+         [self._clientSessionMap setObject:result forKey:auditToken];
+         secdebug("http", "creating session for %@", auditToken);
+diff --git a/trust/trustd/TrustURLSessionDelegate.m b/trust/trustd/TrustURLSessionDelegate.m
+index 06c5d4aa..9f24ea91 100644
+--- a/trust/trustd/TrustURLSessionDelegate.m
++++ b/trust/trustd/TrustURLSessionDelegate.m
+@@ -283,6 +283,10 @@ NSString *kSecTrustRequestHeaderUUID = @"X-Apple-Request-UUID";
+ }
+ 
+ - (BOOL)fetchNext:(NSURLSession *)session context:(TrustURLSessionContext *)context {
++    if (session == nil) {
++        secnotice("http", "no URL session available, skipping network fetch");
++        return true;
++    }
+     if (context.numTasks >= MAX_TASKS) {
+         secnotice("http", "Too many fetch %@ requests for this cert", [self class]);
+         return true;
+diff --git a/trust/trustd/trustdFileHelper/main.m b/trust/trustd/trustdFileHelper/main.m
+index f6d166e2..fb7ae819 100644
+--- a/trust/trustd/trustdFileHelper/main.m
++++ b/trust/trustd/trustdFileHelper/main.m
+@@ -12,10 +12,13 @@
+ 
+ #import <xpc/private.h>
+ #import <xpc/xpc.h>
++#if !defined(__DARLING__) && !defined(DARLING)
+ #import <xpc/activity_private.h>
++#endif
+ 
+ #import <dirhelper_priv.h>
+ #include <sandbox.h>
++#include <sys/stat.h>
+ #include <utilities/SecCFWrappers.h>
+ #include <utilities/SecFileLocations.h>
+ 

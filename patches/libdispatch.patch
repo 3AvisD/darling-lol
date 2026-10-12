@@ -1,0 +1,27 @@
+diff --git a/src/queue.c b/src/queue.c
+index 336c657..9c15faa 100644
+--- a/src/queue.c
++++ b/src/queue.c
+@@ -3667,8 +3667,9 @@ _dispatch_lane_drain(dispatch_lane_t dq, dispatch_invoke_context_t dic,
+ 			break;
+ 		}
+ 		if (likely(flags & DISPATCH_INVOKE_WORKLOOP_DRAIN)) {
+-			dispatch_workloop_t dwl = (dispatch_workloop_t)_dispatch_get_wlh();
+-			if (unlikely(_dispatch_queue_max_qos(dwl) > dwl->dwl_drained_qos)) {
++			// a workloop drained from a root queue thread has no workloop wlh
++			dispatch_workloop_t dwl = _dispatch_wlh_to_workloop(_dispatch_get_wlh());
++			if (dwl && unlikely(_dispatch_queue_max_qos(dwl) > dwl->dwl_drained_qos)) {
+ 				break;
+ 			}
+ 		}
+@@ -5355,8 +5356,8 @@ _dispatch_channel_invoke_checks(dispatch_channel_t dch,
+ 		_dispatch_return_to_kernel();
+ 	}
+ 	if (likely(dcic->dcic_flags & DISPATCH_INVOKE_WORKLOOP_DRAIN)) {
+-		dispatch_workloop_t dwl = (dispatch_workloop_t)_dispatch_get_wlh();
+-		if (unlikely(_dispatch_queue_max_qos(dwl) > dwl->dwl_drained_qos)) {
++		dispatch_workloop_t dwl = _dispatch_wlh_to_workloop(_dispatch_get_wlh());
++		if (dwl && unlikely(_dispatch_queue_max_qos(dwl) > dwl->dwl_drained_qos)) {
+ 			dcic->dcic_tq = dch->do_targetq;
+ 			return false;
+ 		}

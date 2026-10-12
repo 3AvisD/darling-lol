@@ -1,0 +1,32 @@
+diff --git a/IOKitLib.c b/IOKitLib.c
+index 81ed8f7..3120abb 100644
+--- a/IOKitLib.c
++++ b/IOKitLib.c
+@@ -884,6 +884,15 @@ IONotificationPortGetRunLoopSource(
+     CFMachPortContext 	    context;
+     Boolean		            cfReusedPort = false;
+ 
++#ifdef DARLING
++    /* Fail soft instead of crashing: without iokitd some registry/power
++     * lookups never produce a port, and callers (e.g. Chromium's power
++     * monitor) pass the NULL through unchecked. CFRunLoopAddSource
++     * already ignores NULL sources, so returning NULL here is safe. */
++    if (!notify)
++        return NULL;
++#endif
++
+     if (notify->source)
+         return (notify->source);
+     
+@@ -934,6 +943,11 @@ mach_port_t
+ IONotificationPortGetMachPort(
+ 	IONotificationPortRef	notify )
+ {
++#ifdef DARLING
++    /* See IONotificationPortGetRunLoopSource: fail soft on NULL. */
++    if (!notify)
++        return MACH_PORT_NULL;
++#endif
+     return( notify->wakePort );
+ }
+ 

@@ -1,0 +1,494 @@
+diff --git a/src/ccder.c b/src/ccder.c
+index 5543c42..e843f46 100644
+--- a/src/ccder.c
++++ b/src/ccder.c
+@@ -308,8 +308,15 @@ ccder_encode_body(size_t size, const uint8_t* body,
+ 	return body_start;
+ }
+ 
++// As in Apple's implementation, the decoders accept a NULL `der` (the failed
++// result of a previous decode step) and return NULL for input that is
++// truncated or does not carry the expected tag.
+ const uint8_t *ccder_decode_tag(ccder_tag *tagp, const uint8_t *der, const uint8_t *der_end) {
+ 	size_t tag_len = 1;
++
++	if (der == NULL || der >= der_end)
++		return NULL;
++
+ 	*tagp = ((ccder_tag)(der[0] >> 5)) << CCDER_TAG_MASK_SHIFT_BACK;
+ 
+ 	if ((der[0] & 0x1f) == 0x1f) {
+@@ -317,11 +324,13 @@ const uint8_t *ccder_decode_tag(ccder_tag *tagp, const uint8_t *der, const uint8
+ 		// 0x80 == 0b10000000
+ 		size_t i = 0;
+ 		do {
++			if (der + i + 1 >= der_end)
++				return NULL;
+ 			// 0x7f == 0b01111111
+ 			*tagp |= (((ccder_tag)der[i + 1] & 0x7fU) << (i * 7));
+ 			++i;
+ 			++tag_len;
+-		} while (der[i + 1] & 0x80);
++		} while (der[i] & 0x80);
+ 		*tagp <<= 5;
+ 		*tagp |= 0x1f;
+ 	} else {
+@@ -333,26 +342,40 @@ const uint8_t *ccder_decode_tag(ccder_tag *tagp, const uint8_t *der, const uint8
+ }
+ 
+ const uint8_t* ccder_decode_len(size_t* lenp, const uint8_t* der, const uint8_t* der_end) {
+-	size_t len_len = 1;
++	size_t len = 0;
++
++	if (der == NULL || der >= der_end)
++		return NULL;
+ 
+ 	if (der[0] & 0x80) {
+ 		// long form
+-		len_len = der[0] & 0x7f;
++		size_t len_len = der[0] & 0x7f;
+ 		++der;
++		if (len_len == 0 || len_len > sizeof(size_t) || (size_t)(der_end - der) < len_len)
++			return NULL;
+ 		for (size_t i = len_len; i > 0; --i)
+-			*lenp |= (size_t)der[len_len - i] << ((i - 1) * 8);
++			len |= (size_t)der[len_len - i] << ((i - 1) * 8);
++		der += len_len;
+ 	} else {
+ 		// short form
+-		*lenp = der[0] & 0x7f;
++		len = der[0] & 0x7f;
++		++der;
+ 	}
+ 
+-	return der + len_len;
++	if ((size_t)(der_end - der) < len)
++		return NULL;
++
++	*lenp = len;
++	return der;
+ }
+ 
+ const uint8_t *ccder_decode_tl(ccder_tag expected_tag, size_t *lenp,
+                                const uint8_t *der, const uint8_t *der_end) {
+ 	ccder_tag tag_found = 0;
+-	return ccder_decode_len(lenp, ccder_decode_tag(&tag_found, der, der_end), der_end);
++	der = ccder_decode_tag(&tag_found, der, der_end);
++	if (der == NULL || tag_found != expected_tag)
++		return NULL;
++	return ccder_decode_len(lenp, der, der_end);
+ }
+ 
+ const uint8_t *
+@@ -360,6 +383,10 @@ ccder_decode_constructed_tl(ccder_tag expected_tag, const uint8_t **body_end,
+                             const uint8_t *der, const uint8_t *der_end) {
+ 	size_t body_len = 0;
+ 	const uint8_t* body_start = ccder_decode_tl(expected_tag, &body_len, der, der_end);
++	if (body_start == NULL) {
++		*body_end = der;
++		return NULL;
++	}
+ 	*body_end = body_start + body_len;
+ 	return body_start;
+ }
+@@ -367,21 +394,16 @@ ccder_decode_constructed_tl(ccder_tag expected_tag, const uint8_t **body_end,
+ const uint8_t *
+ ccder_decode_sequence_tl(const uint8_t **body_end,
+                          const uint8_t *der, const uint8_t *der_end) {
+-	// NOTE(@facekapow):
+-	// we don't just call `ccder_decode_constructed_tl` because in the future,
+-	// that method will check that the decoded tag is a CONSTRUCTED tag
+-
+-	size_t body_len = 0;
+-	const uint8_t* body_start = ccder_decode_tl(CCDER_SEQUENCE, &body_len, der, der_end);
+-	*body_end = body_start + body_len;
+-	return body_start;
++	return ccder_decode_constructed_tl(CCDER_CONSTRUCTED_SEQUENCE, body_end, der, der_end);
+ }
+ 
+ const uint8_t *ccder_decode_uint_n(cc_size *n, 
+                                  const uint8_t *der, const uint8_t *der_end) {
+ 	size_t num_len = 0;
+ 	const uint8_t* num_start = ccder_decode_tl(CCDER_INTEGER, &num_len, der, der_end);
+-	while (num_start[0] == 0) {
++	if (num_start == NULL)
++		return NULL;
++	while (num_len > 0 && num_start[0] == 0) {
+ 		--num_len;
+ 		++num_start;
+ 	}
+@@ -393,7 +415,9 @@ const uint8_t *ccder_decode_uint(cc_size n, cc_unit *r,
+                                  const uint8_t *der, const uint8_t *der_end) {
+ 	size_t num_len = 0;
+ 	const uint8_t* num_start = ccder_decode_tl(CCDER_INTEGER, &num_len, der, der_end);
+-	while (num_start[0] == 0) {
++	if (num_start == NULL)
++		return NULL;
++	while (num_len > 0 && num_start[0] == 0) {
+ 		--num_len;
+ 		++num_start;
+ 	}
+@@ -405,7 +429,9 @@ const uint8_t *ccder_decode_uint64(uint64_t* r,
+                                    const uint8_t *der, const uint8_t *der_end) {
+ 	size_t num_len = 0;
+ 	const uint8_t* num_start = ccder_decode_tl(CCDER_INTEGER, &num_len, der, der_end);
+-	while (num_start[0] == 0) {
++	if (num_start == NULL)
++		return NULL;
++	while (num_len > 0 && num_start[0] == 0) {
+ 		--num_len;
+ 		++num_start;
+ 	}
+@@ -422,13 +448,15 @@ const uint8_t *ccder_decode_uint64(uint64_t* r,
+ const uint8_t *ccder_decode_seqii(cc_size n, cc_unit *r, cc_unit *s,
+                                   const uint8_t *der, const uint8_t *der_end) {
+ 	size_t seq_len = 0;
+-	return ccder_decode_uint(n, s, ccder_decode_uint(n, r, ccder_decode_tl(CCDER_SEQUENCE, &seq_len, der, der_end), der_end), der_end);
++	return ccder_decode_uint(n, s, ccder_decode_uint(n, r, ccder_decode_tl(CCDER_CONSTRUCTED_SEQUENCE, &seq_len, der, der_end), der_end), der_end);
+ }
+ 
+ const uint8_t *ccder_decode_oid(ccoid_t *oidp,
+                                 const uint8_t *der, const uint8_t *der_end) {
+ 	size_t oid_len = 0;
+ 	const uint8_t* oid_start = ccder_decode_tl(CCDER_OBJECT_IDENTIFIER, &oid_len, der, der_end);
++	if (oid_start == NULL)
++		return NULL;
+ 	size_t total_len = (size_t)(oid_start - der) + oid_len;
+ 
+ 	CCOID(*oidp) = der;
+@@ -441,6 +469,8 @@ const uint8_t *ccder_decode_bitstring(const uint8_t **bit_string,
+                                 const uint8_t *der, const uint8_t *der_end) {
+ 	size_t byte_len = 0;
+ 	const uint8_t* bit_start = ccder_decode_tl(CCDER_BIT_STRING, &byte_len, der, der_end);
++	if (bit_start == NULL)
++		return NULL;
+ 
+ 	// NOTE(@facekapow):
+ 	// i'm not sure if Apple's API meant to include the *entire* bitstring including the leading
+diff --git a/src/ccec.c b/src/ccec.c
+index 8efd8fb..8c8dfcc 100644
+--- a/src/ccec.c
++++ b/src/ccec.c
+@@ -458,18 +458,17 @@ static const struct {
+ 			CC_UNIT_FORMAT_2(01, ff),
+ 		// }
+ 		// reciprocal of modulus p {
+-			// full hex = 20000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001
+-			CC_UNIT_FORMAT_8(00, 00, 00, 00, 00, 00, 00, 01),
++			// full hex = 80000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000
+ 			CC_UNIT_FORMAT_8(00, 00, 00, 00, 00, 00, 00, 00),
++			CC_UNIT_FORMAT_8(00, 00, 40, 00, 00, 00, 00, 00),
+ 			CC_UNIT_FORMAT_8(00, 00, 00, 00, 00, 00, 00, 00),
+ 			CC_UNIT_FORMAT_8(00, 00, 00, 00, 00, 00, 00, 00),
+ 			CC_UNIT_FORMAT_8(00, 00, 00, 00, 00, 00, 00, 00),
+ 			CC_UNIT_FORMAT_8(00, 00, 00, 00, 00, 00, 00, 00),
+ 			CC_UNIT_FORMAT_8(00, 00, 00, 00, 00, 00, 00, 00),
+ 			CC_UNIT_FORMAT_8(00, 00, 00, 00, 00, 00, 00, 00),
+-			CC_UNIT_FORMAT_2(02, 00),
+-			// necessary because the reciprocal *must* be `n + 1` units in length
+-			CC_UNIT_FORMAT_1(00),
++			CC_UNIT_FORMAT_8(00, 00, 00, 00, 00, 00, 00, 00),
++			CC_UNIT_FORMAT_8(00, 80, 00, 00, 00, 00, 00, 00),
+ 		// }
+ 		// coefficient a {
+ 			// full hex = 01fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffc
+@@ -532,18 +531,17 @@ static const struct {
+ 			CC_UNIT_FORMAT_2(01, ff),
+ 		// }
+ 		// reciprocal of order n {
+-			// full hex = 2000000000000000000000000000000000000000000000000000000000000000005ae79787c40d069948033feb708f65a2fc44a36477663b851449048e16ec79bf7
+-			CC_UNIT_FORMAT_8(44, 90, 48, e1, 6e, c7, 9b, f7),
+-			CC_UNIT_FORMAT_8(c4, 4a, 36, 47, 76, 63, b8, 51),
+-			CC_UNIT_FORMAT_8(80, 33, fe, b7, 08, f6, 5a, 2f),
+-			CC_UNIT_FORMAT_8(ae, 79, 78, 7c, 40, d0, 69, 94),
+-			CC_UNIT_FORMAT_8(00, 00, 00, 00, 00, 00, 00, 05),
++			// full hex = 8000000000000000000000000000000000000000000000000000000000000000016b9e5e1f10341a65200cffadc23d968bf1128d91dd98ee14512412385bb1e6fdc408f501c8d1cd2dad1d7f46221c
++			CC_UNIT_FORMAT_8(cd, 2d, ad, 1d, 7f, 46, 22, 1c),
++			CC_UNIT_FORMAT_8(e6, fd, c4, 08, f5, 01, c8, d1),
++			CC_UNIT_FORMAT_8(ee, 14, 51, 24, 12, 38, 5b, b1),
++			CC_UNIT_FORMAT_8(96, 8b, f1, 12, 8d, 91, dd, 98),
++			CC_UNIT_FORMAT_8(1a, 65, 20, 0c, ff, ad, c2, 3d),
++			CC_UNIT_FORMAT_8(00, 01, 6b, 9e, 5e, 1f, 10, 34),
+ 			CC_UNIT_FORMAT_8(00, 00, 00, 00, 00, 00, 00, 00),
+ 			CC_UNIT_FORMAT_8(00, 00, 00, 00, 00, 00, 00, 00),
+ 			CC_UNIT_FORMAT_8(00, 00, 00, 00, 00, 00, 00, 00),
+-			CC_UNIT_FORMAT_2(02, 00),
+-			// necessary because the reciprocal *must* be `n + 1` units in length
+-			CC_UNIT_FORMAT_1(00),
++			CC_UNIT_FORMAT_8(00, 80, 00, 00, 00, 00, 00, 00),
+ 		// }
+ 		// cofactor h {
+ 			// full hex = 01
+@@ -624,7 +622,9 @@ int ccec_import_pub(ccec_const_cp_t cp, size_t in_len, const uint8_t* in, ccec_p
+ 	}
+ 
+ 	const cc_size n = cczp_n(cp.zp);
+-	const cc_size size = ccn_sizeof_n(n);
++	// X9.63 coordinates are as wide as the prime, not as the limbs holding it
++	// (P-521 is 66 bytes in 9 limbs, i.e. 72 bytes)
++	const size_t size = ccec_cp_prime_size(cp);
+ 
+ 	if (in_len != (2 * size) + 1) {
+ 		#if DEBUG
+@@ -675,7 +675,24 @@ int ccec_verify(ccec_pub_ctx_t key, size_t digest_len, const uint8_t* digest, si
+ 	cc_unit e[n];
+ 	memset(e, 0, sizeof e);
+ 
+-	ccn_read_uint(n, e, (log_2_n >= 8 * digest_len) ? (log_2_n + 7) / 8 : digest_len, digest);
++	{
++		// ANSI X9.62: e is the leftmost bitlen(order) bits of the digest
++		size_t use_len = digest_len;
++		if (8 * use_len > log_2_n)
++			use_len = (log_2_n + 7) / 8;
++
++		ccn_read_uint(n, e, use_len, digest);
++
++		const size_t excess_bits = 8 * use_len - log_2_n;
++		if (8 * use_len > log_2_n && excess_bits > 0) {
++			// excess_bits is below 8, so a single pass over the units suffices
++			for (cc_size i = 0; i < n; ++i) {
++				e[i] >>= excess_bits;
++				if (i + 1 < n)
++					e[i] |= e[i + 1] << (CCN_UNIT_BITS - excess_bits);
++			}
++		}
++	}
+ 
+ 	cc_unit r[n];
+ 	cc_unit s[n];
+diff --git a/src/ccn.c b/src/ccn.c
+index 3bfc8d1..e5c26b0 100644
+--- a/src/ccn.c
++++ b/src/ccn.c
+@@ -216,185 +216,37 @@ void ccn_lcm(cc_size n, cc_unit *r2n, const cc_unit *s, const cc_unit *t) {
+ #define CC_COMBINE(lo, hi) ((hi << (CCN_UNIT_BITS >> 1)) | lo)
+ 
+ void ccn_mul(cc_size n, cc_unit *r_2n, const cc_unit *s, const cc_unit *t) {
+-  // we're using the karatsuba algorithm in base 2^64
+-  // in the following pseudocode, B is the base of the numbers
+-  /*
+-    procedure karatsuba(num1, num2)
+-      if (num1 < B) and (num2 < B)
+-          return num1 * num2
+-
+-      // Calculates the size of the numbers.
+-      m = max(size_base(num1, B), size_base(num2, B))
+-      m2 = floor(m / 2)
+-
+-      // Split the digit sequences in the middle.
+-      high1, low1 = split_at(num1, m2)
+-      high2, low2 = split_at(num2, m2)
+-
+-      // 3 calls made to numbers approximately half the size.
+-      z0 = karatsuba(low1, low2)
+-      z1 = karatsuba(high1, high2)
+-      z2 = karatsuba((low1 + high1), (low2 + high2))
+-
+-      t0 = (z2 - z0 - z1) * (B ** m2)
+-      t1 = z1 * (B ** (m2 * 2))
+-      // this is equivalent to:
+-      // t0 = (z2 - z0 - z1) << m2
+-      // t1 = z1 << (m2 * 2)
+-
+-      return t0 + t1 + z0
+-  */
+-  cc_size s_n = ccn_n(n, s);
+-  cc_size t_n = ccn_n(n, t);
+-
++  // schoolbook multiplication; the operands here are at most a few dozen
++  // units, where it is faster than any divide and conquer scheme.
++  // the result must not overlap the operands.
+   memset(r_2n, 0, ccn_sizeof_n(n * 2));
+ 
+-  if (s_n < 2 && t_n < 2) {
+-    // multiplication algorithm that prevents overflow
+-    // based on https://stackoverflow.com/a/1815371
+-    const cc_unit s_hi = CC_HI_BITS(s[0]);
+-    const cc_unit s_lo = CC_LO_BITS(s[0]);
+-    const cc_unit t_hi = CC_HI_BITS(t[0]);
+-    const cc_unit t_lo = CC_LO_BITS(t[0]);
+-
+-    cc_unit x = s_lo * t_lo;
+-    const cc_unit prod_0 = CC_LO_BITS(x);
+-
+-    x = s_hi * t_lo + CC_HI_BITS(x);
+-    cc_unit prod_1 = CC_LO_BITS(x);
+-    cc_unit prod_2 = CC_HI_BITS(x);
+-
+-    x = prod_1 + s_lo * t_hi;
+-    prod_1 = CC_LO_BITS(x);
+-
+-    x = prod_2 + s_hi * t_hi + CC_HI_BITS(x);
++#if CCN_UNIT_SIZE == 8
++  for (cc_size i = 0; i < n; ++i) {
++    unsigned __int128 carry = 0;
++    const cc_unit s_i = s[i];
+ 
+-    r_2n[0] = CC_COMBINE(prod_0, prod_1);
+-    r_2n[1] = x;
++    for (cc_size j = 0; j < n; ++j) {
++      const unsigned __int128 accumulator = (unsigned __int128)s_i * t[j] + r_2n[i + j] + carry;
++      r_2n[i + j] = (cc_unit)accumulator;
++      carry = accumulator >> 64;
++    }
+ 
+-    return;
++    r_2n[i + n] = (cc_unit)carry;
+   }
++#else
++  for (cc_size i = 0; i < n; ++i) {
++    uint64_t carry = 0;
+ 
+-  cc_size max_n = s_n > t_n ? s_n : t_n;
+-  cc_size half_n = (max_n + 1) / 2;
+-  cc_size result_n = max_n * 2;
+-  cc_size intermediate_mul_n = (half_n * 2) + 2;
+-
+-  cc_size max_size = ccn_sizeof_n(max_n);
+-  cc_size half_size = ccn_sizeof_n(half_n);
+-  cc_size half_size_for_addition = ccn_sizeof_n(half_n + 1);
+-  cc_size result_size = ccn_sizeof_n(result_n);
+-  cc_size intermediate_mul_size = ccn_sizeof_n(intermediate_mul_n);
+-  cc_size hi_half_size = max_size - half_size;
+-
+-  // half_size_for_addition is used to allocate enough for addition
+-  // later when we do `hi + lo -> lo`
+-
+-  cc_unit* s_hi = __builtin_alloca(half_size);
+-  cc_unit* s_lo = __builtin_alloca(half_size_for_addition);
+-
+-  cc_unit* t_hi = __builtin_alloca(half_size);
+-  cc_unit* t_lo = __builtin_alloca(half_size_for_addition);
+-
+-  memset(s_hi, 0, half_size);
+-  memset(s_lo, 0, half_size_for_addition);
+-  memset(t_hi, 0, half_size);
+-  memset(t_lo, 0, half_size_for_addition);
+-
+-  // copy `half_size` bytes from `s` into `s_lo`
+-  memcpy(s_lo, s, half_size);
+-  // copy the rest into `s_hi`
+-  memcpy(s_hi, (uint8_t*)s + half_size, hi_half_size);
+-
+-  // copy `half_size` bytes from `t` into `t_lo`
+-  memcpy(t_lo, t, half_size);
+-  // copy the rest into `t_hi`
+-  memcpy(t_hi, (uint8_t*)t + half_size, hi_half_size);
+-
+-  cc_unit* z0 = __builtin_alloca(intermediate_mul_size);
+-  cc_unit* z1 = __builtin_alloca(intermediate_mul_size);
+-  cc_unit* z2 = __builtin_alloca(intermediate_mul_size);
+-
+-  memset(z0, 0, intermediate_mul_size);
+-  memset(z1, 0, intermediate_mul_size);
+-  memset(z2, 0, intermediate_mul_size);
+-
+-  // z0 = s_lo * t_lo
+-  ccn_mul(half_n, z0, s_lo, t_lo);
+-  // z1 = s_hi * t_hi
+-  ccn_mul(half_n, z1, s_hi, t_hi);
+-
+-  // we add the `hi`s directly into the `lo`s to avoid additional allocations
+-
+-  // s_lo = s_lo + s_hi
+-  cc_unit s_carry = ccn_add(half_n, s_lo, s_lo, s_hi);
+-  // t_lo = t_lo + s_hi
+-  cc_unit t_carry = ccn_add(half_n, t_lo, t_lo, t_hi);
+-
+-  // this is safe; remember we already allocated an extra unit in the `lo`s
+-  s_lo[half_n] = s_carry;
+-  t_lo[half_n] = t_carry;
+-
+-  // z2 = (s_lo + s_hi) * (t_lo + t_hi)
+-  ccn_mul(half_n + 1, z2, s_lo, t_lo);
+-
+-  cc_unit* t0 = __builtin_alloca(result_size);
+-  cc_unit* t1 = __builtin_alloca(result_size);
+-
+-  memset(t0, 0, result_size);
+-  memset(t1, 0, result_size);
+-
+-  // since we don't use z2 anymore, we can just subtract z1 and z0
+-  // directly into it to avoid additional allocations
+-
+-  // z2 = z2 - z1
+-  ccn_sub(intermediate_mul_n, z2, z2, z1);
+-  // z2 = z2 - z0
+-  ccn_sub(intermediate_mul_n, z2, z2, z0);
+-
+-  // t0 = z2 - z1 - z0
+-  // technically, this is `t0 = z2` because we already subtracted them into z2
+-  ccn_set(intermediate_mul_n, t0, z2);
+-  // t0 = z1
+-  ccn_set(intermediate_mul_n, t1, z1);
+-
+-  const cc_unit* t0_end = t0 + result_n;
+-  const cc_unit* t1_end = t1 + result_n;
+-
+-  // t0 = t0 << half_n
+-  //
+-  // shift t0 to the left by `half_n` units
+-  // (which in little endian is actually shifting the bytes right)
+-  //
+-  // why don't we use `ccn_shift_left`? remember that we're in base 2^64
+-  // `ccn_shift_left` shifts base-2 bits, not base-2^64 bits (i.e. units)
+-  for (cc_size i = intermediate_mul_n; i > 0; --i) {
+-    cc_unit* tgt = t0 + half_n + (i - 1);
+-    // make sure that the target isn't past our boundary
+-    if (tgt < t0_end)
+-      *tgt = t0[i - 1];
+-  }
+-  // zero the previously occupied bytes
+-  for (cc_size i = 0; i < half_n; ++i)
+-    t0[i] = 0;
++    for (cc_size j = 0; j < n; ++j) {
++      const uint64_t accumulator = (uint64_t)s[i] * t[j] + r_2n[i + j] + carry;
++      r_2n[i + j] = (cc_unit)accumulator;
++      carry = accumulator >> CCN_UNIT_BITS;
++    }
+ 
+-  // t1 = t1 << (half_n * 2)
+-  //
+-  // shift t1 to the left by `half_n * 2` units
+-  for (cc_size i = intermediate_mul_n; i > 0; --i) {
+-    cc_unit* tgt = t1 + (half_n * 2) + (i - 1);
+-    // make sure that the target isn't past our boundary
+-    if (tgt < t1_end)
+-      *tgt = t1[i - 1];
++    r_2n[i + n] = (cc_unit)carry;
+   }
+-  // zero the previously occupied bytes
+-  for (cc_size i = 0; i < half_n * 2; ++i)
+-    t1[i] = 0;
+-
+-  // r_2n = z0 + t0 + t1
+-  ccn_set(intermediate_mul_n, r_2n, z0);
+-  ccn_add(result_n, r_2n, r_2n, t0);
+-  ccn_add(result_n, r_2n, r_2n, t1);
++#endif
+ }
+ 
+ void ccn_mul_ws(cc_size count, cc_unit *r, const cc_unit *s, const cc_unit *t, cc_ws_t ws) {
+diff --git a/src/cczp.c b/src/cczp.c
+index 7a7d0a6..b4d3081 100644
+--- a/src/cczp.c
++++ b/src/cczp.c
+@@ -114,13 +114,11 @@ void cczp_mod(cczp_const_t zp, cc_unit* result, const cc_unit* operand, cc_ws_t
+ 	memset(r_extra, 0, normal_size);
+ 	bool underflow = ccn_sub(n + 1, r_extra, r_1, r_2);
+ 
+-	// `if r < 0`
+-	if (underflow) {
+-		for (cc_size i = 0; i < n + 1; ++i)
+-			r_extra[i] = ~r_extra[i];
+-
+-		ccn_add1(n + 1, r_extra, r_extra, 1);
+-	}
++	// `if r < 0, r = r + b^(k + 1)`
++	// the subtraction above wrapped modulo b^(k + 1), which is exactly that
++	// addition. (Negating the wrapped value instead yields something close to
++	// b^(k + 1), and the loop below would then run for ~2^64 iterations.)
++	(void)underflow;
+ 
+ 	// `while r >= m`
+ 	while (ccn_cmp(n + 1, r_extra, m_copy) >= 0) {

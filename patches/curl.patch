@@ -1,0 +1,49 @@
+diff --git a/curl/lib/sendf.c b/curl/lib/sendf.c
+index 5008d93..6419694 100644
+--- a/curl/lib/sendf.c
++++ b/curl/lib/sendf.c
+@@ -261,14 +261,29 @@ void Curl_infof(struct Curl_easy *data, const char *fmt, ...)
+ 
+ void Curl_failf(struct Curl_easy *data, const char *fmt, ...)
+ {
+-  if(data->set.verbose || data->set.errorbuffer) {
+-    va_list ap;
+-    size_t len;
+-    char error[CURL_ERROR_SIZE + 2];
+-    va_start(ap, fmt);
+-    mvsnprintf(error, CURL_ERROR_SIZE, fmt, ap);
+-    len = strlen(error);
++  va_list ap;
++  size_t len;
++  char error[CURL_ERROR_SIZE + 2];
+ 
++  va_start(ap, fmt);
++  mvsnprintf(error, CURL_ERROR_SIZE, fmt, ap);
++  va_end(ap);
++  len = strlen(error);
++
++  /* darling-lol M58F139: always emit the libcurl error to the guest console
++   * (fd 2) so the Riot launcher/patcher failure under Darling is named. */
++  {
++    extern long write(int, const void *, unsigned long);
++    char buf[CURL_ERROR_SIZE + 16];
++    size_t n = len;
++    if(n > CURL_ERROR_SIZE) n = CURL_ERROR_SIZE;
++    memcpy(buf, "LOLCURL ", 8);
++    memcpy(buf + 8, error, n);
++    buf[8 + n] = '\n';
++    write(2, buf, 8 + n + 1);
++  }
++
++  if(data->set.verbose || data->set.errorbuffer) {
+     if(data->set.errorbuffer && !data->state.errorbuf) {
+       strcpy(data->set.errorbuffer, error);
+       data->state.errorbuf = TRUE; /* wrote error string */
+@@ -278,7 +293,6 @@ void Curl_failf(struct Curl_easy *data, const char *fmt, ...)
+       error[++len] = '\0';
+       Curl_debug(data, CURLINFO_TEXT, error, len);
+     }
+-    va_end(ap);
+   }
+ }
+ 
