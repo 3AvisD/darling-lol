@@ -1273,10 +1273,18 @@ index d46bdb4..9a58727 100644
  		};
  	};
 diff --git a/internal-include/darlingserver/message.hpp b/internal-include/darlingserver/message.hpp
-index 708f3f3..56218a5 100644
+index 708f3f3..e68cd28 100644
 --- a/internal-include/darlingserver/message.hpp
 +++ b/internal-include/darlingserver/message.hpp
-@@ -71,6 +71,11 @@ namespace DarlingServer {
+@@ -28,6 +28,7 @@
+ #include <mutex>
+ #include <optional>
+ #include <functional>
++#include <array>
+ 
+ namespace DarlingServer {
+ 	class Address {
+@@ -71,6 +72,11 @@ namespace DarlingServer {
  		void _ensureDescriptorHeader(size_t descriptorSpace);
  
  	public:
@@ -1288,6 +1296,15 @@ index 708f3f3..56218a5 100644
  		/**
  		 * Default-initializes a Message.
  		 *
+@@ -161,6 +167,8 @@ namespace DarlingServer {
+ 	class MessageQueue {
+ 	private:
+ 		std::deque<Message> _messages;
++		// Retain unused receive storage; queued Messages own their buffers and FDs.
++		std::array<std::optional<Message>, 16> _receiveMessages;
+ 		mutable std::mutex _lock;
+ 		std::function<void()> _messageArrivalNotificationCallback = nullptr;
+ 
 diff --git a/internal-include/darlingserver/process.hpp b/internal-include/darlingserver/process.hpp
 index c97be30..31772dc 100644
 --- a/internal-include/darlingserver/process.hpp
@@ -1334,7 +1351,7 @@ index e35221c..1068426 100755
  	# pthread cancelation
  	#
 diff --git a/src/call.cpp b/src/call.cpp
-index cc10f1d..8c8d6b3 100644
+index cc10f1d..7df0056 100644
 --- a/src/call.cpp
 +++ b/src/call.cpp
 @@ -18,9 +18,20 @@
@@ -1435,10 +1452,19 @@ index cc10f1d..8c8d6b3 100644
  	std::shared_ptr<Call> result = nullptr;
  	std::shared_ptr<Process> process = nullptr;
  	std::shared_ptr<Thread> thread = nullptr;
-@@ -127,6 +198,38 @@ std::shared_ptr<DarlingServer::Call> DarlingServer::Call::callFromMessage(Messag
- 	auto tidString = (thread) ? (std::to_string(thread->id()) + " (" + std::to_string(thread->nsid()) + ")") : (std::to_string(header->tid) + " (-1)");
- 	callLog.debug() << "Received call #" << header->number << " (" << dserver_callnum_to_string(header->number) << ") from PID " << pidString << ", TID " << tidString << callLog.endLog;
+@@ -123,9 +194,43 @@ std::shared_ptr<DarlingServer::Call> DarlingServer::Call::callFromMessage(Messag
+ 		}
+ 	}
  
+-	auto pidString = (process) ? (std::to_string(process->id()) + " (" + std::to_string(process->nsid()) + ")") : (std::to_string(header->pid) + " (-1)");
+-	auto tidString = (thread) ? (std::to_string(thread->id()) + " (" + std::to_string(thread->nsid()) + ")") : (std::to_string(header->tid) + " (-1)");
+-	callLog.debug() << "Received call #" << header->number << " (" << dserver_callnum_to_string(header->number) << ") from PID " << pidString << ", TID " << tidString << callLog.endLog;
++	if (callLog.levelEnabled(1)) {
++		auto pidString = (process) ? (std::to_string(process->id()) + " (" + std::to_string(process->nsid()) + ")") : (std::to_string(header->pid) + " (-1)");
++		auto tidString = (thread) ? (std::to_string(thread->id()) + " (" + std::to_string(thread->nsid()) + ")") : (std::to_string(header->tid) + " (-1)");
++		callLog.debug() << "Received call #" << header->number << " (" << dserver_callnum_to_string(header->number) << ") from PID " << pidString << ", TID " << tidString << callLog.endLog;
++	}
++
 +	/* darling-lol M634: rate-limited trace of EVERY call through dserver, to
 +	 * see which RPCs the launcher's blocked service threads are waiting on
 +	 * and whether an S2C/interrupt round-trip is wedged. */
@@ -1470,11 +1496,10 @@ index cc10f1d..8c8d6b3 100644
 +			}
 +		}
 +	}
-+
+ 
  	if (header->number == dserver_callnum_s2c) {
  		// this is an S2C reply
- 
-@@ -694,6 +797,60 @@ void DarlingServer::Call::KqchanProcOpen::processCall() {
+@@ -694,6 +799,60 @@ void DarlingServer::Call::KqchanProcOpen::processCall() {
  	_sendReply(code, socket);
  };
  
@@ -1535,7 +1560,7 @@ index cc10f1d..8c8d6b3 100644
  void DarlingServer::Call::ForkWaitForChild::processCall() {
  	int code = 0;
  
-@@ -714,6 +871,24 @@ void DarlingServer::Call::Sigprocess::processCall() {
+@@ -714,6 +873,24 @@ void DarlingServer::Call::Sigprocess::processCall() {
  	int code = 0;
  	int newBSDSignal = 0;
  
@@ -1846,14 +1871,16 @@ index 7b8000f..dbaf832 100644
  	}
  
 diff --git a/src/message.cpp b/src/message.cpp
-index 414c1d6..995e184 100644
+index 414c1d6..06b3f67 100644
 --- a/src/message.cpp
 +++ b/src/message.cpp
-@@ -24,6 +24,23 @@
+@@ -24,6 +24,25 @@
  #include <new>
  #include <mutex>
  #include <system_error>
 +#include <pthread.h>
++#include <cstdio>
++#include <cstring>
 +
 +namespace {
 +	std::optional<struct ucred> serverCredentials;
@@ -1873,7 +1900,16 @@ index 414c1d6..995e184 100644
  
  DarlingServer::Address::Address() {
  	_address.sun_family = AF_UNIX;
-@@ -65,10 +82,7 @@ DarlingServer::Message::Message(size_t bufferSpace, size_t descriptorSpace, std:
+@@ -55,6 +74,8 @@ void DarlingServer::Address::setRawSize(size_t newRawSize) {
+ DarlingServer::Message::Message(size_t bufferSpace, size_t descriptorSpace, std::function<void()> sendNotificationCallback):
+ 	_sendNotificationCallback(sendNotificationCallback)
+ {
++	// Allocate the vector first: if it throws, there is no raw control buffer to leak.
++	_buffer.resize(bufferSpace);
+ 	size_t controlLen = CMSG_SPACE(sizeof(struct ucred)) + (descriptorSpace > 0 ? CMSG_SPACE(sizeof(int) * descriptorSpace) : 0);
+ 	_controlHeader = static_cast<decltype(_controlHeader)>(malloc(controlLen));
+ 
+@@ -65,10 +86,7 @@ DarlingServer::Message::Message(size_t bufferSpace, size_t descriptorSpace, std:
  	_controlHeader->cmsg_len = CMSG_LEN(sizeof(struct ucred));
  	_controlHeader->cmsg_level = SOL_SOCKET;
  	_controlHeader->cmsg_type = SCM_CREDENTIALS;
@@ -1885,7 +1921,16 @@ index 414c1d6..995e184 100644
  	// the cmsg man page says memcpy should be used with CMSG_DATA instead of direct pointer access
  	memcpy(CMSG_DATA(_controlHeader), &ourCreds, sizeof(ourCreds));
  
-@@ -348,10 +362,7 @@ void DarlingServer::Message::_ensureCredentialsHeader() {
+@@ -83,8 +101,6 @@ DarlingServer::Message::Message(size_t bufferSpace, size_t descriptorSpace, std:
+ 		}
+ 	}
+ 
+-	_buffer.resize(bufferSpace);
+-
+ 	_header.msg_name = &_socketAddress.raw();
+ 	_header.msg_namelen = _socketAddress.rawSize();
+ 	_header.msg_iov = &_dataDescriptor;
+@@ -348,10 +364,7 @@ void DarlingServer::Message::_ensureCredentialsHeader() {
  	credHeader->cmsg_level = SOL_SOCKET;
  	credHeader->cmsg_type = SCM_CREDENTIALS;
  
@@ -1897,7 +1942,7 @@ index 414c1d6..995e184 100644
  	memcpy(CMSG_DATA(credHeader), &creds, sizeof(struct ucred));
  };
  
-@@ -496,13 +507,47 @@ std::optional<DarlingServer::Message> DarlingServer::MessageQueue::pop() {
+@@ -496,13 +509,47 @@ std::optional<DarlingServer::Message> DarlingServer::MessageQueue::pop() {
  	}
  };
  
@@ -1946,7 +1991,7 @@ index 414c1d6..995e184 100644
  	while (ret >= 0) {
  		len = 0;
  		for (size_t i = 0; i < _messages.size() && i < sizeof(mmsgs) / sizeof(*mmsgs); ++i) {
-@@ -549,6 +594,7 @@ bool DarlingServer::MessageQueue::sendMany(int socket) {
+@@ -549,6 +596,7 @@ bool DarlingServer::MessageQueue::sendMany(int socket) {
  		}
  
  		for (size_t i = 0; i < ret; ++i) {
@@ -1954,14 +1999,53 @@ index 414c1d6..995e184 100644
  			auto cb = _messages.front().sendNotificationCallback();
  			_messages.pop_front();
  			if (cb) {
-@@ -591,6 +637,7 @@ bool DarlingServer::MessageQueue::receiveMany(int socket) {
- 			messages[i].rawHeader() = mmsgs[i].msg_hdr;
- 			messages[i].data().resize(mmsgs[i].msg_len);
- 			messages[i].setAddress(Address(*(const struct sockaddr_un*)mmsgs[i].msg_hdr.msg_name, mmsgs[i].msg_hdr.msg_namelen));
-+			m58ak_log_message("recv", socket, &messages[i].address().raw(), messages[i].data().data(), messages[i].data().size());
- 			_messages.push_back(std::move(messages[i]));
+@@ -567,10 +615,11 @@ bool DarlingServer::MessageQueue::receiveMany(int socket) {
+ 	int ret = 0;
+ 
+ 	while (ret >= 0) {
+-		std::array<Message, sizeof(mmsgs) / sizeof(*mmsgs)> messages;
+-
+-		for (size_t i = 0; i < messages.size(); ++i) {
+-			mmsgs[i].msg_hdr = messages[i].rawHeader();
++		for (size_t i = 0; i < _receiveMessages.size(); ++i) {
++			if (!_receiveMessages[i]) {
++				_receiveMessages[i].emplace();
++			}
++			mmsgs[i].msg_hdr = _receiveMessages[i]->rawHeader();
+ 			mmsgs[i].msg_len = 0;
+ 		}
+ 
+@@ -587,11 +636,25 @@ bool DarlingServer::MessageQueue::receiveMany(int socket) {
+ 			}
+ 		}
+ 
+-		for (size_t i = 0; i < ret; ++i) {
+-			messages[i].rawHeader() = mmsgs[i].msg_hdr;
+-			messages[i].data().resize(mmsgs[i].msg_len);
+-			messages[i].setAddress(Address(*(const struct sockaddr_un*)mmsgs[i].msg_hdr.msg_name, mmsgs[i].msg_hdr.msg_namelen));
+-			_messages.push_back(std::move(messages[i]));
++		// Adopt every returned control header before anything can throw, so all
++		// received descriptors have an owner even if deque allocation later fails.
++		for (size_t i = 0; i < static_cast<size_t>(ret); ++i) {
++			_receiveMessages[i]->rawHeader() = mmsgs[i].msg_hdr;
++		}
++		struct ReceivedMessages {
++			decltype(_receiveMessages)& slots;
++			size_t count;
++			~ReceivedMessages() {
++				for (size_t i = 0; i < count; ++i) slots[i].reset();
++			}
++		} receivedMessages{_receiveMessages, static_cast<size_t>(ret)};
++
++		for (size_t i = 0; i < static_cast<size_t>(ret); ++i) {
++			auto& message = *_receiveMessages[i];
++			message.data().resize(mmsgs[i].msg_len);
++			message.setAddress(Address(*(const struct sockaddr_un*)mmsgs[i].msg_hdr.msg_name, mmsgs[i].msg_hdr.msg_namelen));
++			m58ak_log_message("recv", socket, &message.address().raw(), message.data().data(), message.data().size());
++			_messages.push_back(std::move(message));
  		}
  	}
+ 
 diff --git a/src/process.cpp b/src/process.cpp
 index 9cd7b81..180f372 100644
 --- a/src/process.cpp

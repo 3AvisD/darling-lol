@@ -20,7 +20,7 @@ index 393a1eb3..6a47ac89 100644
  		xkbfile
  )
 diff --git a/AppKit/MacWorkspace.m b/AppKit/MacWorkspace.m
-index ba52cd3b..ad8ba2a2 100644
+index ba52cd3b..423c0716 100644
 --- a/AppKit/MacWorkspace.m
 +++ b/AppKit/MacWorkspace.m
 @@ -13,6 +13,32 @@
@@ -56,6 +56,20 @@ index ba52cd3b..ad8ba2a2 100644
  - (NSImage *) iconForFile: (NSString *) path {
      // TODO: call GetIconRefFromFileInfo()
      NSUnimplementedMethod();
+@@ -94,10 +120,10 @@
+     return NO;
+ }
+ 
++extern BOOL RCLOLOpenURLViaHost(NSURL *url);
++
+ - (BOOL) openURL: (NSURL *) url {
+-    // TODO: Call LSOpenFromURLSpec()
+-    NSUnimplementedMethod();
+-    return NO;
++    return RCLOLOpenURLViaHost(url);
+ }
+ 
+ - (BOOL) selectFile: (NSString *) path
 diff --git a/AppKit/NSAccessibility.m b/AppKit/NSAccessibility.m
 index 39d1b104..3662bc4b 100644
 --- a/AppKit/NSAccessibility.m
@@ -1409,7 +1423,7 @@ index 8ac2bbdc..7486ebf5 100644
  
          [_subviews
 diff --git a/AppKit/NSWindow.m b/AppKit/NSWindow.m
-index d545120a..9b995b5a 100644
+index d545120a..db2c12d9 100644
 --- a/AppKit/NSWindow.m
 +++ b/AppKit/NSWindow.m
 @@ -45,6 +45,20 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
@@ -1433,7 +1447,33 @@ index d545120a..9b995b5a 100644
  
  const NSNotificationName NSWindowDidBecomeKeyNotification =
          @"NSWindowDidBecomeKeyNotification";
-@@ -218,7 +232,8 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -204,6 +218,25 @@ NSInteger NSBitsPerPixelFromDepth(NSWindowDepth depth) {
+ 
+ @end
+ 
++/* darling-lol: whether a mouse-down may move the window must be decided by the frontmost view
++ * under the pointer by GEOMETRY, not by -hitTest:. Electron implements draggable regions as a
++ * web view that can move the window plus ControlRegionView overlays (mouseDownCanMoveWindow == NO)
++ * on top of everything that must not drag; those overlays return nil from -hitTest: so the click
++ * still reaches the page. Using the hitTest result here always found the web view, so every click
++ * started a window drag and never reached the page. `point` is in `view`'s own coordinates. */
++static NSView *DarlingFrontmostViewAtPoint(NSView *view, NSPoint point) {
++    if (view == nil || [view isHidden] || !NSPointInRect(point, [view bounds]))
++        return nil;
++    NSArray *subviews = [view subviews];
++    for (NSInteger i = (NSInteger)[subviews count] - 1; i >= 0; i--) {
++        NSView *subview = [subviews objectAtIndex: i];
++        NSView *found = DarlingFrontmostViewAtPoint(subview, [subview convertPoint: point fromView: view]);
++        if (found != nil)
++            return found;
++    }
++    return view;
++}
++
+ @implementation NSWindow
+ 
+ @synthesize identifier = _identifier;
+@@ -218,7 +251,8 @@ static BOOL _allowsAutomaticWindowTabbing;
  /* This method is Cococtron specific and can be override by subclasses, do not
   * change method name */
  + (BOOL) hasMainMenuForStyleMask: (NSWindowStyleMask) styleMask {
@@ -1443,7 +1483,7 @@ index d545120a..9b995b5a 100644
  }
  
  /* This method is Cococtron specific and can be override by subclasses, do not
-@@ -318,6 +333,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -318,6 +352,7 @@ static BOOL _allowsAutomaticWindowTabbing;
          [NSApplication sharedApplication];
      }
      _styleMask = styleMask;
@@ -1451,7 +1491,7 @@ index d545120a..9b995b5a 100644
      _backingType = backing;
      _isDeferred = defer;
  
-@@ -351,7 +367,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -351,7 +386,7 @@ static BOOL _allowsAutomaticWindowTabbing;
      [_backgroundView _setWindow: self];
      [_backgroundView setNextResponder: self];
  
@@ -1460,7 +1500,7 @@ index d545120a..9b995b5a 100644
      _contentView = [[NSView alloc] initWithFrame: contentViewFrame];
      [_contentView setAutoresizesSubviews: YES];
      [_contentView
-@@ -399,6 +415,8 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -399,6 +434,8 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (void) dealloc {
@@ -1469,7 +1509,7 @@ index d545120a..9b995b5a 100644
      [[NSNotificationCenter defaultCenter] removeObserver: self];
      [_childWindows release];
      [_title release];
-@@ -1025,7 +1043,34 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1025,7 +1062,34 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (void) setMovable: (BOOL) movable {
@@ -1505,7 +1545,7 @@ index d545120a..9b995b5a 100644
  }
  
  - (void) setBackingType: (NSBackingStoreType) value {
-@@ -1234,6 +1279,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1234,6 +1298,7 @@ static BOOL _allowsAutomaticWindowTabbing;
  
  - (void) setIgnoresMouseEvents: (BOOL) value {
      _ignoresMouseEvents = value;
@@ -1513,7 +1553,7 @@ index d545120a..9b995b5a 100644
  }
  
  - (void) setAspectRatio: (NSSize) value {
-@@ -1413,8 +1459,14 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1413,8 +1478,14 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (NSButton *) standardWindowButton: (NSWindowButton) value {
@@ -1530,7 +1570,7 @@ index d545120a..9b995b5a 100644
  }
  
  - (NSButtonCell *) defaultButtonCell {
-@@ -1425,6 +1477,17 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1425,6 +1496,17 @@ static BOOL _allowsAutomaticWindowTabbing;
      return [_sheetContext sheet];
  }
  
@@ -1548,7 +1588,7 @@ index d545120a..9b995b5a 100644
  - (id) windowController {
      return _windowController;
  }
-@@ -1511,10 +1574,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1511,10 +1593,7 @@ static BOOL _allowsAutomaticWindowTabbing;
      return [_platformWindow isMiniaturized];
  }
  
@@ -1560,7 +1600,7 @@ index d545120a..9b995b5a 100644
  
  - (BOOL) inLiveResize {
      return _isInLiveResize;
-@@ -1561,6 +1621,108 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1561,6 +1640,108 @@ static BOOL _allowsAutomaticWindowTabbing;
      return point;
  }
  
@@ -1669,7 +1709,7 @@ index d545120a..9b995b5a 100644
  - (NSRect) frameRectForContentRect: (NSRect) contentRect {
      // hasMainMenu is an instance method so we can't just use the class method
      //  frameRectForContentRect:styleMask:
-@@ -1580,6 +1742,10 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1580,6 +1761,10 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (NSRect) contentRectForFrameRect: (NSRect) frameRect {
@@ -1680,7 +1720,7 @@ index d545120a..9b995b5a 100644
      NSRect result = [[NSDisplay currentDisplay] insetRect: frameRect
                             forNativeWindowBorderWithStyle: [self styleMask]];
  
-@@ -2155,6 +2321,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2155,6 +2340,7 @@ static BOOL _allowsAutomaticWindowTabbing;
  - (void) orderWindow: (NSWindowOrderingMode) place
            relativeTo: (NSInteger) relativeTo
  {
@@ -1688,7 +1728,7 @@ index d545120a..9b995b5a 100644
      // The move notifications are sent under unknown conditions around
      // orderFront: in the Apple AppKit, we do them all the time here until it's
      // figured out. I suspect it is a side effect of off-screen windows being at
-@@ -2208,6 +2375,8 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2208,6 +2394,8 @@ static BOOL _allowsAutomaticWindowTabbing;
          break;
      }
  
@@ -1697,7 +1737,7 @@ index d545120a..9b995b5a 100644
      [self postNotificationName: NSWindowDidMoveNotification];
  }
  
-@@ -2257,6 +2426,12 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2257,6 +2445,12 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (void) sendEvent: (NSEvent *) event {
@@ -1710,7 +1750,7 @@ index d545120a..9b995b5a 100644
      // Some events can cause our window to be destroyed
      // So make sure self lives at least through this current run loop...
      [[self retain] autorelease];
-@@ -2300,6 +2475,10 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2300,6 +2494,10 @@ static BOOL _allowsAutomaticWindowTabbing;
  
      case NSLeftMouseDown: {
          NSView *view = [_backgroundView hitTest: [event locationInWindow]];
@@ -1721,7 +1761,7 @@ index d545120a..9b995b5a 100644
  
          if ([view acceptsFirstResponder]) {
              if ([view needsPanelToBecomeKey]) {
-@@ -2307,6 +2486,14 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2307,6 +2505,27 @@ static BOOL _allowsAutomaticWindowTabbing;
              }
          }
  
@@ -1729,14 +1769,27 @@ index d545120a..9b995b5a 100644
 +        // drag. Only windows opting into background dragging intercept it;
 +        // CEF otherwise handles clicks and invokes performWindowDragWithEvent:
 +        // itself for its native titlebar regions.
-+        if (_isMovable && _isMovableByWindowBackground && [view mouseDownCanMoveWindow]) {
-+            [self performWindowDragWithEvent:event];
-+            break;
++        if (_isMovable && _isMovableByWindowBackground) {
++            NSView *dragView = DarlingFrontmostViewAtPoint(_backgroundView,
++                [_backgroundView convertPoint: [event locationInWindow] fromView: nil]);
++            if (dragView == nil)
++                dragView = view;
++            if (inputTrace) {
++                static int dragTrace = -1;
++                if (dragTrace < 0) dragTrace = getenv("RCLOL_INPUT_TRACE") != NULL;
++                if (dragTrace)
++                    NSLog(@"LOLDRAG hit=%s dragView=%s canMove=%d", class_getName([view class]),
++                          class_getName([dragView class]), (int)[dragView mouseDownCanMoveWindow]);
++            }
++            if ([dragView mouseDownCanMoveWindow]) {
++                [self performWindowDragWithEvent:event];
++                break;
++            }
 +        }
          // Event goes to view, not first responder.
          [view mouseDown: event];
          _mouseDownLocationInWindow = [event locationInWindow];
-@@ -2330,6 +2517,31 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2330,6 +2549,31 @@ static BOOL _allowsAutomaticWindowTabbing;
          _mouseDownLocationInWindow = NSMakePoint(NAN, NAN);
          break;
  
@@ -1768,7 +1821,7 @@ index d545120a..9b995b5a 100644
      case NSMouseMoved: {
          NSView *hit = [_backgroundView hitTest: [event locationInWindow]];
  
-@@ -2536,6 +2748,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2536,6 +2780,7 @@ static BOOL _allowsAutomaticWindowTabbing;
      } else {
          [[self platformWindow] hideWindow];
      }
@@ -1776,7 +1829,7 @@ index d545120a..9b995b5a 100644
  }
  
  - (void) orderFront: (id) sender {
-@@ -3260,8 +3473,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -3260,8 +3505,7 @@ static BOOL _allowsAutomaticWindowTabbing;
                  mouseWasInside && !mouseIsInside) {
                  [exited addObject: area];
              }
@@ -1786,7 +1839,7 @@ index d545120a..9b995b5a 100644
                  [moved addObject: area];
              }
              if (options & NSTrackingCursorUpdate && !mouseWasInside &&
-@@ -3459,7 +3671,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -3459,7 +3703,7 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (CGSubWindow *) _createSubWindowWithFrame: (CGRect) frame {
@@ -7682,3 +7735,141 @@ new file mode 100644
 +- (instancetype) init;
 +
 +@end
+diff --git a/AppKit/NSWorkspace.m b/AppKit/NSWorkspace.m
+index ad5e4f9d..304cd8b5 100644
+--- a/AppKit/NSWorkspace.m
++++ b/AppKit/NSWorkspace.m
+@@ -20,9 +20,90 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ #import <AppKit/NSRaise.h>
+ #import <AppKit/NSWorkspace.h>
+ #import <Foundation/Foundation.h>
++#import <CoreFoundation/CoreFoundation.h>
++#include <dispatch/dispatch.h>
++#include <stdio.h>
++#include <unistd.h>
+ 
+ NSString *const NSWorkspaceApplicationKey = @"NSWorkspaceApplicationKey";
+ 
++/* darling-lol: opening a URL from the guest.
++ *
++ * LaunchServices cannot start a Linux browser from inside the prefix, and Electron's
++ * shell.openExternal() uses -openURL:configuration:completionHandler: (macOS 10.15) with an
++ * NSWorkspaceOpenConfiguration, neither of which existed: the unrecognized selector crashed the
++ * client ("Can't sign in?", links, ...). Hand the URL to the host through a spool directory in
++ * the shared /private/tmp. The legacy tools/riot-open-url-bridge.py can drain it, but is excluded
++ * from normal launches because it also installs a client inspector hook.
++ * Only http, https and mailto URLs are queued. */
++@interface NSWorkspaceOpenConfiguration () {
++    BOOL _activates, _hides, _hidesOthers, _addsToRecentItems, _createsNewApplicationInstance;
++    BOOL _allowsRunningApplicationSubstitution, _forPrinting, _promptsUserIfNeeded, _requiresUniversalLinks;
++    NSAppleEventDescriptor *_appleEvent;
++    NSArray *_arguments;
++    NSDictionary *_environment;
++    cpu_type_t _architecture;
++}
++@end
++
++@implementation NSWorkspaceOpenConfiguration
++@synthesize activates = _activates, hides = _hides, hidesOthers = _hidesOthers;
++@synthesize addsToRecentItems = _addsToRecentItems, createsNewApplicationInstance = _createsNewApplicationInstance;
++@synthesize allowsRunningApplicationSubstitution = _allowsRunningApplicationSubstitution;
++@synthesize forPrinting = _forPrinting, promptsUserIfNeeded = _promptsUserIfNeeded;
++@synthesize requiresUniversalLinks = _requiresUniversalLinks;
++@synthesize appleEvent = _appleEvent, arguments = _arguments, environment = _environment;
++@synthesize architecture = _architecture;
+++ (instancetype) configuration {
++    NSWorkspaceOpenConfiguration *c = [[[self alloc] init] autorelease];
++    c->_activates = YES;
++    c->_addsToRecentItems = YES;
++    c->_allowsRunningApplicationSubstitution = YES;
++    return c;
++}
++- (id) copyWithZone: (NSZone *) zone {
++    NSWorkspaceOpenConfiguration *c = [[[self class] allocWithZone: zone] init];
++    c->_activates = _activates; c->_hides = _hides; c->_hidesOthers = _hidesOthers;
++    c->_addsToRecentItems = _addsToRecentItems;
++    c->_createsNewApplicationInstance = _createsNewApplicationInstance;
++    c->_allowsRunningApplicationSubstitution = _allowsRunningApplicationSubstitution;
++    c->_forPrinting = _forPrinting; c->_promptsUserIfNeeded = _promptsUserIfNeeded;
++    c->_requiresUniversalLinks = _requiresUniversalLinks; c->_architecture = _architecture;
++    c->_appleEvent = [_appleEvent retain];
++    c->_arguments = [_arguments copy]; c->_environment = [_environment copy];
++    return c;
++}
++- (void) dealloc {
++    [_appleEvent release];
++    [_arguments release];
++    [_environment release];
++    [super dealloc];
++}
++@end
++
++BOOL RCLOLOpenURLViaHost(NSURL *url) {
++    NSString *scheme = [[url scheme] lowercaseString];
++    if (![scheme isEqualToString: @"http"] && ![scheme isEqualToString: @"https"] &&
++        ![scheme isEqualToString: @"mailto"])
++        return NO;
++    NSString *absolute = [url absoluteString];
++    if ([absolute length] == 0 || [absolute length] > 4096)
++        return NO;
++    NSString *directory = @"/private/tmp/rclol-open";
++    [[NSFileManager defaultManager] createDirectoryAtPath: directory
++                              withIntermediateDirectories: YES
++                                               attributes: nil
++                                                    error: NULL];
++    static unsigned sequence = 0;
++    NSString *path = [NSString stringWithFormat: @"%@/%d-%u-%llu.url", directory, (int) getpid(),
++                      ++sequence, (unsigned long long) (CFAbsoluteTimeGetCurrent() * 1000)];
++    NSString *temporary = [path stringByAppendingString: @".part"];
++    if (![absolute writeToFile: temporary atomically: NO encoding: NSUTF8StringEncoding error: NULL])
++        return NO;
++    return rename([temporary fileSystemRepresentation], [path fileSystemRepresentation]) == 0;
++}
++
++
+ NSString *const NSWorkspaceWillPowerOffNotification =
+         @"NSWorkspaceWillPowerOffNotification";
+ 
+@@ -157,8 +238,22 @@ NSNotificationName NSWorkspaceWillUnmountNotification = @"NSWorkspaceWillUnmount
+ }
+ 
+ - (BOOL) openURL: (NSURL *) url {
+-    NSInvalidAbstractInvocation();
+-    return 0;
++    return RCLOLOpenURLViaHost(url);
++}
++
++- (void) openURL: (NSURL *) url
++        configuration: (NSWorkspaceOpenConfiguration *) configuration
++        completionHandler: (void (^)(id application, NSError *error)) completionHandler
++{
++    BOOL opened = [self openURL: url];
++    if (completionHandler != NULL) {
++        NSError *error = nil;
++        if (!opened)
++            error = [NSError errorWithDomain: NSCocoaErrorDomain code: 256 userInfo: nil];
++        dispatch_async(dispatch_get_main_queue(), ^{
++            completionHandler(nil, error);
++        });
++    }
+ }
+ 
+ - (BOOL) selectFile: (NSString *) path
+@@ -317,16 +412,3 @@ NSNotificationName NSWorkspaceWillUnmountNotification = @"NSWorkspaceWillUnmount
+ }
+ 
+ @end
+-
+-static dispatch_once_t _initOnceNsWorkspaceOpenConfig;
+-static NSWorkspaceOpenConfiguration* _singletonNsWorkspaceOpenConfig;
+-
+-@implementation NSWorkspaceOpenConfiguration
+-+ (instancetype)configuration {
+-    dispatch_once(&_initOnceNsWorkspaceOpenConfig, ^{
+-        _singletonNsWorkspaceOpenConfig = [[NSWorkspaceOpenConfiguration alloc] init];
+-    });
+-    return _singletonNsWorkspaceOpenConfig;
+-}
+-
+-@end
+\ No newline at end of file

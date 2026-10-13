@@ -8,8 +8,9 @@
       "revision": "60ba801decee7a00782f74f6be4c8ffb013f79ff",
       "repository": "https://github.com/darlinghq/darling.git",
       "patch": "patches/darling.patch",
-      "modified_files": 84,
+      "modified_files": 86,
       "new_files": [
+        "src/CoreAudio/CoreAudio/AudioConverterShim.c",
         "src/CoreAudio/AudioTrace.h",
         "src/CoreAudio/CoreAudioComponent/MatrixMixerAU.cpp",
         "src/frameworks/Carbon/HIToolbox/src/SecureInput.c",
@@ -51,7 +52,7 @@
       "revision": "c8d38d16a9f613d300157bebbab2b9501bc0c274",
       "repository": "https://github.com/darlinghq/darling-cocotron.git",
       "patch": "patches/cocotron.patch",
-      "modified_files": 102,
+      "modified_files": 103,
       "new_files": [
         "QuartzCore/include/QuartzCore/CATransformLayer.h"
       ]
@@ -101,8 +102,10 @@
       "revision": "89751e64bc6c2082f7725061824ee0e33395b0de",
       "repository": "https://github.com/darlinghq/darlingserver.git",
       "patch": "patches/darlingserver.patch",
-      "modified_files": 35,
-      "new_files": []
+      "modified_files": 34,
+      "new_files": [
+        "duct-tape/src/fileport.c"
+      ]
     },
     {
       "path": "src/external/foundation",
@@ -117,8 +120,9 @@
       "revision": "5549ac4cd2db923c256f016a1381b3bfb716730a",
       "repository": "https://github.com/darlinghq/darling-iokitd.git",
       "patch": "patches/iokitd.patch",
-      "modified_files": 8,
+      "modified_files": 7,
       "new_files": [
+        "src/PowerSources.mm",
         "src/IOPlatformExpertDevice.h",
         "src/IOPlatformExpertDevice.mm"
       ]
@@ -252,8 +256,11 @@
       "revision": "fa29287aa2f0115271e091f1031f53c9e024005d",
       "repository": "https://github.com/darlinghq/darling-xnu.git",
       "patch": "patches/xnu.patch",
-      "modified_files": 65,
+      "modified_files": 63,
       "new_files": [
+        "darling/src/libsystem_kernel/emulation/include/conversion/xattr/name.h",
+        "darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/mac_syscall.h",
+        "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/mac_syscall.c",
         "darling/src/libsystem_kernel/emulation/include/common/private_mutex.h",
         "darling/src/libsystem_kernel/emulation/include/common/slowwait.h",
         "darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/guarded/change_fdguard_np.h",

@@ -2,21 +2,22 @@
 
 Experimental source patches and tools for running the **macOS League of Legends client on x86-64 Linux through Darling**.
 
-This is a cleaned snapshot of a working development setup, not a finished launcher. Riot and League clients can launch, practice/ARAM games have run, and graphics, audio, input and post-game freezes have received compatibility fixes. Fight FPS still varies: **90 FPS at the 99th percentile has not been achieved**. A clean build on another PC has not yet been validated.
+This is a development snapshot, not a finished launcher. Riot and League clients can launch and manually played ARAM games have run. Graphics, audio, input, startup crashes and memory reclamation have received compatibility fixes. On the Ryzen 5 5500 / RX 6600 PC, reported fight FPS was 70–80 versus 170–190 on Windows. The latest server and memory changes have native regression coverage, but their effect on game FPS and client RAM remains unmeasured. A fresh checkout has not been validated end to end on another machine.
 
 ## Included
 
 - Pinned upstream revisions and patches for 29 Darling components, including Metal/Indium, AppKit, QuartzCore, CoreAudio, the kernel shim and darlingserver.
-- The latest event-poll presentation fix and compositor-thread semaphore import fix. The latter stopped one leaked GPU synchronization handle per frame in native tests.
-- Build/install/launch wrappers with configurable machine paths, native regression probes and performance tools.
-- Older experiments under `research/tools/`; these are retained for reference and are outside the normal launch path.
+- Event-poll presentation and GPU synchronization fixes, floating-point-safe GL resolvers, multi-window presentation and nullable LaunchServices error handling.
+- Reusable server receive buffers and Darwin allocator hints translated to Linux lazy reclamation.
+- Build/install/launch wrappers, atomic incremental installers and standalone regression probes.
+- Historical experiments in `tools/` and `research/tools/`, explicitly excluded from the normal workflow where they automate or inspect the client/game.
 
-Game files, Riot installers, account databases, tokens, local prefixes, captures and compiled binaries are not included. Install the game through Riot on the second PC.
+Game files, Riot installers, account databases, tokens, local prefixes, captures and compiled binaries are not included. Install the game manually through Riot. The normal launcher does not enable an Electron inspector or start UI automation helpers. Existing runtime compatibility shims remain part of this experimental setup; this is not a claim of approval by Riot.
 
 ## Requirements
 
-- x86-64 Linux, an X11 session or Xwayland, and a working hardware Vulkan/OpenGL driver. The development PC used AMD RADV; other drivers are not validated.
-- Git + Git LFS, CMake, Make, Clang/LLD, LLVM development files, a C/C++ compiler, Python 3.12+ and the Darling build dependencies. LLVM 22 was used for the tested shader translator.
+- x86-64 Linux **5.14 or newer**, an X11 session or Xwayland, and a working hardware Vulkan/OpenGL driver. AMD RADV has been exercised; other drivers are not validated.
+- Git + Git LFS, Bash, curl, unzip, CMake, Make, Clang/LLD, LLVM development files, a C/C++ compiler, Python 3.12+ and the Darling build dependencies. The patch includes LLVM 22/23 branch-opcode compatibility; the new PC used LLVM/Clang 23. Node.js is needed only for the offline JavaScript checks.
 - libvpx development files and X11/XCB/SHM development files for the current runtime helpers.
 - Enough free disk for Darling sources/build, Git LFS assets and the game: budget at least 50 GB. Building is substantially larger than this source-only repository.
 
@@ -47,23 +48,23 @@ After the runtime is installed:
 ./scripts/installer.sh euw
 ```
 
-Sign in through Riot's own UI and install League. Then stop the client, apply the guarded visibility correction for the installed Electron build, and launch normally:
+Sign in and install League through Riot's own UI. For subsequent launches:
 
 ```sh
-python3 build/runtime/tools/stop-darling-runtime.py
-python3 build/runtime/tools/patch-riot-electron-visibility.py
 ./scripts/run.sh
 ```
 
-The visibility correction verifies the exact original instruction bytes and refuses an unknown version. A future Riot update can require adapting this and other compatibility hooks.
+First installation and future Riot updates can still encounter compatibility gaps. An accepted Install action can fail native LaunchAgent registration and leave the download idle. The archived inspector-based workaround and Electron visibility binary patch are excluded from the manual workflow. See [troubleshooting](docs/TROUBLESHOOTING.md) for the known limitation and fixes that are in the runtime.
 
 For another region, set `RCLOL_REGION` and `RCLOL_LOCALE` before launch. For example `RCLOL_REGION=NA RCLOL_LOCALE=en_US ./scripts/run.sh`. Linux display selection follows `$DISPLAY`; the legacy launcher fallback is `:1`.
 
 ## Testing
 
-Start with native regression checks, then a practice game. See [testing](docs/TESTING.md). The practice helpers recognize two verified UI panel sizes, preserve dynamic camera settings and stop on lost focus/unknown geometry. They still drive real input: avoid controlling the game at the same time.
+Start with standalone regression checks, then play a match manually. See [testing](docs/TESTING.md). Do not attach a debugger, query client APIs, inject diagnostic hooks or automate client/game input. Legacy practice, profiling and inspector helpers are retained as historical source, not recommended launch or testing steps.
 
 FPS counters, game presentation requests and physical display refresh are different measurements. Record average and p99 frame times, the active scene, graphics settings, charger/power state and whether the game stayed focused. See [current status](docs/STATUS.md).
+
+For existing installations, [incremental update instructions](docs/SETUP.md#updating-an-existing-runtime) explain the server and memory installers, user-owned backups and the full Darling restart needed to activate replacements. Perform activation only after manually exiting the game and both clients.
 
 ## Layout
 
@@ -71,7 +72,7 @@ FPS counters, game presentation requests and physical display refresh are differ
 scripts/             portable entry points
 upstream/manifest.json  exact base revisions and patch ownership
 patches/             current source changes, one patch per repository
-tools/               active source templates and regression probes
+tools/               runtime templates, regression probes and legacy helpers
 research/tools/      historical experiments, not a supported workflow
 docs/                setup, testing, status and licensing notes
 build/               local sources, outputs and rendered tools (ignored)

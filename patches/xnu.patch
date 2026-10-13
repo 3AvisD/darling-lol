@@ -4706,10 +4706,29 @@ index b998456..3e643c1 100644
  	__linux_nanosleep(&tv, &tv);
  
 diff --git a/libsyscall/CMakeLists.txt b/libsyscall/CMakeLists.txt
-index 57cebad..145ce0d 100755
+index 57cebad..3014255 100755
 --- a/libsyscall/CMakeLists.txt
 +++ b/libsyscall/CMakeLists.txt
-@@ -179,6 +179,7 @@ set(syscall_sources
+@@ -104,6 +104,18 @@ foreach(MIG_FILENAME IN LISTS LIBSYSCALL_MIGS)
+ 	)
+ endforeach()
+ 
++# emulation/src/xnu_syscall/mach/impl/mach_traps.c wraps semaphore_create/semaphore_destroy
++# (process-local semaphores) and mach_vm_region_recurse (own task). The MIG stubs get private
++# names, which the wrappers call.
++foreach(MIG_ARCH i386 x86_64)
++	set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/mach/task-${MIG_ARCH}-User.c" PROPERTIES
++		COMPILE_DEFINITIONS "semaphore_create=__darling_rpc_semaphore_create;semaphore_destroy=__darling_rpc_semaphore_destroy"
++	)
++	set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/mach/mach_vm-${MIG_ARCH}-User.c" PROPERTIES
++		COMPILE_DEFINITIONS "mach_vm_region_recurse=__darling_rpc_mach_vm_region_recurse"
++	)
++endforeach()
++
+ # mach/exc also needs the server component
+ list(APPEND syscall_mig_sources_32 "${CMAKE_CURRENT_BINARY_DIR}/mach/exc-i386-Server.c")
+ list(APPEND syscall_mig_sources_64 "${CMAKE_CURRENT_BINARY_DIR}/mach/exc-x86_64-Server.c")
+@@ -179,6 +191,7 @@ set(syscall_sources
  	wrappers/csr.c
  	wrappers/fs_snapshot.c
  	wrappers/__get_cpu_capabilities.S
@@ -4911,3 +4930,40 @@ new file mode 100644
 +__sysctlbyname:
 +    /* Just jump to the syscall stub */
 +    jmp ___sysctlbyname
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/madvise.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/madvise.c
+index 10c412b..8c49bd9 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/madvise.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/madvise.c
+@@ -9,18 +9,26 @@
+ #define MADV_FREE 5
+ #define MADV_FREE_REUSABLE 7
+ #define MADV_FREE_REUSE 8
++#define LINUX_MADV_FREE 8
++#define LINUX_MADV_POPULATE_WRITE 23
+ 
+ long sys_madvise(void* addr, unsigned long len, int advice)
+ {
+ 	int ret;
+ 
+-	if (advice == MADV_FREE_REUSABLE || advice == MADV_FREE_REUSE)
+-		advice = MADV_FREE;
+-
+-	// advice < 0 are identical between OS X and Linux
+-	// advice >= 5 are specific to OS X/BSD
+-	if (advice >= 5)
++	if (advice == MADV_FREE || advice == MADV_FREE_REUSABLE) {
++		// The allocator no longer needs these private anonymous pages. Linux
++		// may reclaim them without swapping; subsequent writes cancel reclaim.
++		advice = LINUX_MADV_FREE;
++	} else if (advice == MADV_FREE_REUSE) {
++		// Reused pages must stop being lazily discardable. A write-prefault
++		// cancels MADV_FREE without changing the surviving page contents.
++		// This operation is available on Linux 5.14 and later.
++		advice = LINUX_MADV_POPULATE_WRITE;
++	} else if (advice >= 5) {
++		// Other OS X/BSD-specific hints do not share Linux's numeric values.
+ 		return 0;
++	}
+ 
+ 	ret = LINUX_SYSCALL(__NR_madvise, addr, len, advice);
+ 

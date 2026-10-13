@@ -5588,7 +5588,7 @@ index deca16b87..d75d5e22d 100644
  
  set_property(TARGET OpenGL APPEND_STRING PROPERTY LINK_FLAGS
 diff --git a/src/frameworks/OpenGL/OpenGL.c b/src/frameworks/OpenGL/OpenGL.c
-index ffd7fe054..4801e5521 100644
+index ffd7fe054..a74ffc63f 100644
 --- a/src/frameworks/OpenGL/OpenGL.c
 +++ b/src/frameworks/OpenGL/OpenGL.c
 @@ -2,11 +2,22 @@
@@ -6065,7 +6065,7 @@ index ffd7fe054..4801e5521 100644
  
      free(context);
  }
-@@ -383,9 +608,323 @@ CGLError CGLUnlockContext(CGLContextObj context) {
+@@ -383,9 +608,329 @@ CGLError CGLUnlockContext(CGLContextObj context) {
      return kCGLNoError;
  }
  
@@ -6235,8 +6235,14 @@ index ffd7fe054..4801e5521 100644
 +        }
 +    }
 +    DarlingNativePresentTarget *target=ctx->native_present_target;
++    /* A Chromium context renders several windows. An unrelated surface must
++     * use readback without stopping the active window's async presenter. */
++    if(target && __atomic_load_n(&target->magic,__ATOMIC_ACQUIRE)==DARLING_NATIVE_PRESENT_MAGIC &&
++       target->target && (target->width!=width || target->height!=height)) {
++        CGLReleaseContext(ctx);return 0;
++    }
 +    if(!target || __atomic_load_n(&target->magic,__ATOMIC_ACQUIRE)!=DARLING_NATIVE_PRESENT_MAGIC ||
-+       target->width!=width || target->height!=height || !target->target){
++       !target->target){
 +        stopAsyncPresent(ctx);
 +        if(target){__lolsys_syscall((long)target,sizeof(DarlingNativePresentTarget),0,0,0,0,11);ctx->native_present_target=NULL;ctx->native_present_window=0;}
 +        CGLReleaseContext(ctx);return 0;
@@ -6391,7 +6397,7 @@ index ffd7fe054..4801e5521 100644
  }
  
  CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, const GLint *value) {
-@@ -394,8 +933,9 @@ CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, c
+@@ -394,8 +939,9 @@ CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, c
  
      if (parameter == kCGLCPSwapInterval)
      {
@@ -6402,7 +6408,7 @@ index ffd7fe054..4801e5521 100644
          if (success)
              context->swap_interval = v;
          return success ? kCGLNoError : kCGLBadValue;
-@@ -417,14 +957,19 @@ CGLError CGLGetParameter(CGLContextObj context, CGLContextParameter parameter, G
+@@ -417,14 +963,19 @@ CGLError CGLGetParameter(CGLContextObj context, CGLContextParameter parameter, G
      return kCGLNoError;
  }
  
@@ -7984,3 +7990,95 @@ new file mode 100644
 +    return caps;
 +}
 +#endif
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 5c924b34d..54f134873 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -119,6 +119,13 @@ SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mmacosx-version-min=${CMAKE_OSX_DEPLOYMENT_
+ SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mmacosx-version-min=${CMAKE_OSX_DEPLOYMENT_TARGET}")
+ set(CMAKE_OBJC_FLAGS "${CMAKE_OBJC_FLAGS} -mmacosx-version-min=${CMAKE_OSX_DEPLOYMENT_TARGET}")
+ 
++# Recent clang compiles an empty @[] / @{} for a macOS 11+ runtime into a reference to
++# __NSArray0__struct / __NSDictionary0__struct, which Darling's CoreFoundation does not define
++# (it provides __NSArray0__ / __NSDictionary0__). Keep the earlier code generation.
++SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fobjc-runtime=macosx-10.15")
++SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fobjc-runtime=macosx-10.15")
++set(CMAKE_OBJC_FLAGS "${CMAKE_OBJC_FLAGS} -fobjc-runtime=macosx-10.15")
++
+ add_definitions(-target ${APPLE_TARGET_TRIPLET_PRIMARY})
+ include(darling_lib)
+ include(darling_static_lib)
+diff --git a/src/libelfloader/wrapgen/wrapgen.cpp b/src/libelfloader/wrapgen/wrapgen.cpp
+index 7079e613e..397ec6de0 100644
+--- a/src/libelfloader/wrapgen/wrapgen.cpp
++++ b/src/libelfloader/wrapgen/wrapgen.cpp
+@@ -268,7 +268,10 @@ void generate_wrapper(std::ofstream& output, const char* soname, const std::set<
+ 	
+ 	for (const std::string& sym : symbols)
+ 	{
+-		output << "void* " << sym << "() {\n"
++        // ld64's x86-64 resolver stub saves integer argument registers only.
++        // ELF lookup can clobber XMM arguments before the stub jumps to its
++        // resolved function. Preserve them in the resolver itself.
++		output << "__attribute__((preserve_all)) void* " << sym << "() {\n"
+ 			"\t__asm__(\".symbol_resolver _" << sym << "\");\n"
+ 			"\treturn _elfcalls->dlsym_fatal(lib_handle, \"" << sym << "\");\n"
+ 			"}\n\n";
+diff --git a/src/frameworks/CoreServices/src/LaunchServices/LSInfo.m b/src/frameworks/CoreServices/src/LaunchServices/LSInfo.m
+index 4cb2a4941..f08d05a2b 100644
+--- a/src/frameworks/CoreServices/src/LaunchServices/LSInfo.m
++++ b/src/frameworks/CoreServices/src/LaunchServices/LSInfo.m
+@@ -106,7 +106,7 @@ CFArrayRef LSCopyApplicationURLsForBundleIdentifier(CFStringRef inBundleIdentifi
+ {
+ 	if (!inBundleIdentifier)
+ 	{
+-		if (*outError)
++		if (outError)
+ 			*outError = CFErrorCreate(NULL, kCFErrorDomainOSStatus, paramErr, NULL);
+ 		return NULL;
+ 	}
+@@ -116,7 +116,7 @@ CFArrayRef LSCopyApplicationURLsForBundleIdentifier(CFStringRef inBundleIdentifi
+ 
+ 	if (dq == nil)
+ 	{
+-		if (*outError)
++		if (outError)
+ 			*outError = CFErrorCreate(NULL, kCFErrorDomainOSStatus, fnfErr, NULL);
+ 		return NULL;
+ 	}
+@@ -138,7 +138,7 @@ CFArrayRef LSCopyApplicationURLsForBundleIdentifier(CFStringRef inBundleIdentifi
+ 		}
+ 		else
+ 		{
+-			if (*outError)
++			if (outError)
+ 				*outError = CFErrorCreate(NULL, kCFErrorDomainOSStatus, kLSApplicationNotFoundErr, NULL);
+ 			retval = NULL;
+ 		}
+@@ -247,7 +247,7 @@ CFURLRef LSCopyDefaultApplicationURLForContentType(CFStringRef inContentType, LS
+ 
+ 	if (dq == nil)
+ 	{
+-		if (*outError)
++		if (outError)
+ 			*outError = CFErrorCreate(NULL, kCFErrorDomainOSStatus, fnfErr, NULL);
+ 		return NULL;
+ 	}
+@@ -275,7 +275,7 @@ CFURLRef LSCopyDefaultApplicationURLForContentType(CFStringRef inContentType, LS
+ 		}
+ 		else
+ 		{
+-			if (*outError)
++			if (outError)
+ 				*outError = CFErrorCreate(NULL, kCFErrorDomainOSStatus, kLSApplicationNotFoundErr, NULL);
+ 			retval = NULL;
+ 		}
+@@ -292,7 +292,7 @@ CFURLRef LSCopyDefaultApplicationURLForURL(CFURLRef inURL, LSRolesMask inRoleMas
+ 
+ 	if (status != noErr)
+ 	{
+-		if (*outError)
++		if (outError)
+ 			*outError = CFErrorCreate(NULL, kCFErrorDomainOSStatus, status, NULL);
+ 		return NULL;
+ 	}

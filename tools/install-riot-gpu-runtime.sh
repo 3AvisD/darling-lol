@@ -5,6 +5,9 @@ project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 guest_home=${RIOT_GUEST_HOME:-$HOME/.darling@GUEST_HOME@}
 cd "$project_dir"
 python3 tools/build-m58f333-iosurface.py
+# Rebuild the native wrapper with floating-point-safe symbol resolvers.
+make -C build/darling-src/build/src/native GL -j4
+make -C build/darling-src/build/src/frameworks/CoreServices/src/LaunchServices LaunchServices -j4
 python3 tools/build-m58f327-opengl.py
 python3 tools/build-m58f336-quartzcore.py
 python3 tools/build-m58f341-corevideo.py
@@ -58,6 +61,38 @@ for name in IOSurface OpenGL QuartzCore CoreVideo CoreAudio AudioToolbox CoreGra
  # Dyld resolves Versions/A. Preserve the standard outer symlink as well.
  if [ ! -L "$framework/$name" ]; then rm -f "$framework/$name"; ln -s "Versions/Current/$name" "$framework/$name"; fi
 done
+# Re-exported GL symbols use the native library's absolute install name.
+# DYLD_LIBRARY_PATH must see this rebuilt wrapper as well as the framework copy.
+mkdir -p "$guest_home/RuntimeLibraries"
+gl_wrapper="$guest_home/RuntimeLibraries/libGL.dylib"
+if [ ! -f "$gl_wrapper.before-float-resolver" ]; then
+ if [ -f "$gl_wrapper" ]; then cp -p "$gl_wrapper" "$gl_wrapper.before-float-resolver"
+ else cp -p @DARLING_SDK@/System/Library/Frameworks/OpenGL.framework/Versions/A/Libraries/libGL.dylib "$gl_wrapper.before-float-resolver"; fi
+fi
+install -m755 build/darling-src/build/src/native/libGL.dylib "$gl_wrapper.next"
+mv "$gl_wrapper.next" "$gl_wrapper"
+install -m755 build/darling-src/build/src/native/libGL.dylib "$guest_home/RuntimeFrameworks/OpenGL.framework/Versions/A/Libraries/libGL.dylib.next"
+mv "$guest_home/RuntimeFrameworks/OpenGL.framework/Versions/A/Libraries/libGL.dylib.next" "$guest_home/RuntimeFrameworks/OpenGL.framework/Versions/A/Libraries/libGL.dylib"
+launchservices="$guest_home/RuntimeFrameworks/LaunchServices.framework"
+if [ ! -d "$launchservices" ]; then
+ cp -a @DARLING_SDK@/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework "$launchservices"
+fi
+launchservices_binary="$launchservices/Versions/A/LaunchServices"
+if [ ! -f "$launchservices_binary.before-null-error" ]; then cp -p "$launchservices_binary" "$launchservices_binary.before-null-error"; fi
+install -m755 build/darling-src/build/src/frameworks/CoreServices/src/LaunchServices/LaunchServices "$launchservices_binary.next"
+mv "$launchservices_binary.next" "$launchservices_binary"
+# Electron opens this subframework by its absolute path, bypassing the
+# framework search override. Replace the same binary in the stopped prefix.
+prefix_dir="${DPREFIX:-$HOME/.darling}"
+launchservices_prefix="$prefix_dir/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/LaunchServices"
+mkdir -p "$(dirname "$launchservices_prefix")"
+if [ ! -f "$launchservices_prefix.before-null-error" ]; then
+ if [ -f "$launchservices_prefix" ]; then cp -p "$launchservices_prefix" "$launchservices_prefix.before-null-error"
+ else cp -p @DARLING_SDK@/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/LaunchServices "$launchservices_prefix.before-null-error"; fi
+fi
+install -m755 build/darling-src/build/src/frameworks/CoreServices/src/LaunchServices/LaunchServices "$launchservices_prefix.next"
+mv "$launchservices_prefix.next" "$launchservices_prefix"
+
 component="$guest_home/Library/Audio/Plug-Ins/Components/DarlingRiotAudio.component"
 if [ ! -d "$component" ]; then
  mkdir -p "$(dirname "$component")"
