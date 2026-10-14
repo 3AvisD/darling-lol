@@ -75,6 +75,7 @@ A separate multi-window path stopped the active async presenter when another dif
 - **Build process killed:** lower parallelism, for example `JOBS=2 ./scripts/build.sh` or `--parallel 1` for an incremental component build.
 - **Incremental helper cannot find `flags.make` or `link.txt`:** use Unix Makefiles, not Ninja.
 - **Prebuilt Swift file contains Git LFS pointer text:** install Git LFS and fetch the original upstream assets; pointer text is not a usable library.
+- **Submodule fetch stops with no output right after `src/external/sqlite`:** the next submodule is `src/external/swift`, whose pinned `.lfsconfig` points at the retired `git-lfs.darlinghq.org`. The checkout is blocked on that host, not on sqlite. `prepare.py` redirects that submodule's LFS requests to GitHub. To finish a fetch that was interrupted before any patches were applied, run `git -C build/darling-src -c lfs.url=https://github.com/darlinghq/darling-swift.git/info/lfs submodule update --init --recursive --progress`, then re-run `./scripts/build.sh`. Do not run that submodule update once `prepare.py` has applied patches: it resets every submodule working tree to the pinned revision and discards the patches.
 
 ## Lower fight FPS than Windows
 
