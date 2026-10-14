@@ -2,7 +2,7 @@
 
 Experimental source patches and tools for running the **macOS League of Legends client on x86-64 Linux through Darling**.
 
-This is a development snapshot, not a finished launcher. Riot and League clients can launch and manually played ARAM games have run. Graphics, audio, input, startup crashes and memory reclamation have received compatibility fixes. On the Ryzen 5 5500 / RX 6600 PC, reported fight FPS was 70–80 versus 170–190 on Windows. The latest server and memory changes have native regression coverage, but their effect on game FPS and client RAM remains unmeasured. A fresh checkout has not been validated end to end on another machine.
+This is a development snapshot, not a finished launcher. Riot and League clients can launch and manually played ARAM games have run. Graphics, audio, input, startup crashes and memory reclamation have received compatibility fixes. On the Ryzen 5 5500 / RX 6600 PC, ARAM now averages about 120–127 FPS, with the slowest 10-second stretches around 103–110 (fights were 70–80 FPS before the 2026-10-13/14 work, versus 170–190 on Windows). The effect of the memory changes on client RAM remains unmeasured. A fresh checkout has not been validated end to end on another machine.
 
 ## Included
 
