@@ -2,7 +2,7 @@
 
 Experimental source patches and tools for running the **macOS League of Legends client on x86-64 Linux through Darling**.
 
-This is a development snapshot, not a finished launcher. Riot and League clients can launch and manually played ARAM games have run. Graphics, audio, input, startup crashes and memory reclamation have received compatibility fixes. On the Ryzen 5 5500 / RX 6600 PC, ARAM now averages about 120–127 FPS, with the slowest 10-second stretches around 103–110 (fights were 70–80 FPS before the 2026-10-13/14 work, versus 170–190 on Windows). The effect of the memory changes on client RAM remains unmeasured. A fresh checkout has not been validated end to end on another machine.
+This is a development snapshot, not a finished launcher. Riot and League clients can launch and manually played ARAM games have run. Graphics, audio, input, startup crashes and memory reclamation have received compatibility fixes. On the Ryzen 5 5500 / RX 6600 PC, ARAM now averages about 118–135 FPS, with the slowest 10-second stretches around 106–119 (the higher figures with Hyprland's direct scanout off; fights were 70–80 FPS before the 2026-10-13/14 work, versus 170–190 on Windows). The effect of the memory changes on client RAM remains unmeasured. A fresh checkout has not been validated end to end on another machine.
 
 ## Included
 
@@ -64,7 +64,7 @@ Start with standalone regression checks, then play a match manually. See [testin
 
 FPS counters, game presentation requests and physical display refresh are different measurements. Record average and p99 frame times, the active scene, graphics settings, charger/power state and whether the game stayed focused. See [current status](docs/STATUS.md).
 
-On the Ryzen 5 5500 / RX 6600 test PC, ARAM on Hexgate went from 84 to 127 FPS average over 2026-10-13/14, with the slowest 10-second stretches around 110 ([status](docs/STATUS.md#game-fps-2026-10-1314)). The game-process speed switches and their opt-out files are listed in [setup](docs/SETUP.md#game-process-switches), and passive match capture is described in [testing](docs/TESTING.md#passive-match-capture).
+On the Ryzen 5 5500 / RX 6600 test PC, ARAM on Hexgate went from 84 to 135 FPS average over 2026-10-13/14, with the slowest 10-second stretches around 119 in the best match (one match so far with Hyprland's direct scanout off; [status](docs/STATUS.md#game-fps-2026-10-1314)). The game-process speed switches and their opt-out files are listed in [setup](docs/SETUP.md#game-process-switches), and passive match capture is described in [testing](docs/TESTING.md#passive-match-capture).
 
 For existing installations, [incremental update instructions](docs/SETUP.md#updating-an-existing-runtime) explain the server and memory installers, user-owned backups and the full Darling restart needed to activate replacements. Perform activation only after manually exiting the game and both clients.
 

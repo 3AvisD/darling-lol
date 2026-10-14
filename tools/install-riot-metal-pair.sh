@@ -1,7 +1,7 @@
 #!/bin/sh
 # Install the Metal wrapper and Indium overlays built by build-riot-metal-runtime.py / build-riot-indium-runtime.py
 # as a pair (the Indium blit interface they share changed), with a backup of the files they replace.
-# --rollback puts the backed-up pair back. Neither stops a process: exit the game and both clients, then
+# RIOT_METAL_ARTIFACT / RIOT_INDIUM_ARTIFACT select other builds. --rollback puts the backed-up pair back. Neither stops a process: exit the game and both clients, then
 # `darling shutdown` and `sh scripts/run.sh` to activate.
 set -eu
 project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -13,8 +13,8 @@ if [ "${1:-}" = "--rollback" ]; then
 	source_metal="$backups/Metal"
 	source_indium="$backups/libindium.dylib"
 else
-	source_metal="$project_dir/build/riot-Metal"
-	source_indium="$project_dir/build/riot-libindium.dylib"
+	source_metal=${RIOT_METAL_ARTIFACT:-$project_dir/build/riot-Metal}
+	source_indium=${RIOT_INDIUM_ARTIFACT:-$project_dir/build/riot-libindium.dylib}
 	mkdir -p "$backups"
 	# a repeated install must not replace the backup with the pair it installed last time
 	cmp -s "$metal" "$source_metal" || cp -p "$metal" "$backups/Metal"

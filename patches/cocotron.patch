@@ -6822,12 +6822,17 @@ index d6f86b31..81a4ac10 100644
  
  static void glDebugCallback(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar* message, const void* context) {
 diff --git a/QuartzCore/CAMetalLayer.mm b/QuartzCore/CAMetalLayer.mm
-index b81e2e14..7b9891fb 100644
+index b81e2e14..63533444 100644
 --- a/QuartzCore/CAMetalLayer.mm
 +++ b/QuartzCore/CAMetalLayer.mm
-@@ -26,6 +26,74 @@
+@@ -25,7 +25,79 @@
+ #import <QuartzCore/CALayerContext.h>
  #import <Metal/stubs.h>
  
++// Wait-site counters (flag file /tmp/metal-debug-waits, checked once at process start): the same summary the Indium
++// hand-off waits write, so the drawable hand-out and the command-buffer hand-offs appear in one histogram.
++#include <indium/waits.private.hpp>
++
  #include <algorithm>
 +#include <cstdio>
 +#include <unistd.h>
@@ -6900,7 +6905,7 @@ index b81e2e14..7b9891fb 100644
  
  #import "CALayerInternal.h"
  
-@@ -205,6 +273,65 @@ static void reportGLErrors(void) {
+@@ -205,6 +277,65 @@ static void reportGLErrors(void) {
  
  @end
  
@@ -6966,7 +6971,7 @@ index b81e2e14..7b9891fb 100644
  @implementation CAMetalLayerInternal
  
  #if DARLING_METAL_ENABLED
-@@ -363,6 +490,7 @@ static void reportGLErrors(void) {
+@@ -363,12 +494,15 @@ static void reportGLErrors(void) {
  - (id<CAMetalDrawable>)nextDrawable
  {
  	std::shared_ptr<CAMetalDrawableActual> drawable = nullptr;
@@ -6974,7 +6979,15 @@ index b81e2e14..7b9891fb 100644
  
  	[_drawableCondition lock];
  
-@@ -380,6 +508,8 @@ static void reportGLErrors(void) {
+ 	NSDate* endTime = [NSDate dateWithTimeIntervalSinceNow: 1];
+ 
+ 	while (_usableDrawablesBitmap == 0) {
++		// No drawable is free: this thread really blocks here (the wait is what the pool starvation costs the game).
++		Indium::Waits::Block block("nextDrawable");
+ 		if (_allowsNextDrawableTimeout) {
+ 			if (![_drawableCondition waitUntilDate: endTime]) {
+ 				break;
+@@ -380,6 +514,8 @@ static void reportGLErrors(void) {
  
  	if (_usableDrawablesBitmap == 0) {
  		// timeout reached
@@ -6983,7 +6996,7 @@ index b81e2e14..7b9891fb 100644
  		[_drawableCondition unlock];
  		return nil;
  	}
-@@ -400,6 +530,8 @@ static void reportGLErrors(void) {
+@@ -400,6 +536,8 @@ static void reportGLErrors(void) {
  	}
  
  	_usableDrawablesBitmap &= ~(1u << drawableID);
@@ -6992,7 +7005,7 @@ index b81e2e14..7b9891fb 100644
  
  	drawable = _drawables[drawableID];
  
-@@ -410,20 +542,36 @@ static void reportGLErrors(void) {
+@@ -410,20 +548,36 @@ static void reportGLErrors(void) {
  
  - (void)queuePresent: (NSUInteger)drawableID
  {
@@ -7030,7 +7043,7 @@ index b81e2e14..7b9891fb 100644
  	[_drawableCondition lock];
  	_usableDrawablesBitmap |= 1u << drawableID;
  	[_drawableCondition signal];
-@@ -455,7 +603,7 @@ static void reportGLErrors(void) {
+@@ -455,7 +609,7 @@ static void reportGLErrors(void) {
  	}
  	_usableDrawablesBitmap = 0;
  
@@ -7039,7 +7052,7 @@ index b81e2e14..7b9891fb 100644
  		// can't create new drawables
  		[_drawableCondition unlock];
  		return;
-@@ -506,6 +654,10 @@ static void reportGLErrors(void) {
+@@ -506,6 +660,10 @@ static void reportGLErrors(void) {
  			glTextureParameteri(_tex, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
  			glTextureParameteri(_tex, GL_TEXTURE_WRAP_S, GL_REPEAT);
  			glTextureParameteri(_tex, GL_TEXTURE_WRAP_T, GL_REPEAT);
@@ -7050,7 +7063,7 @@ index b81e2e14..7b9891fb 100644
  			reportGLErrors();
  		}
  	}
-@@ -516,6 +668,10 @@ static void reportGLErrors(void) {
+@@ -516,6 +674,10 @@ static void reportGLErrors(void) {
  - (void)prepareRender
  {
  	std::shared_ptr<CAMetalDrawableActual> drawable = nullptr;
@@ -7061,7 +7074,7 @@ index b81e2e14..7b9891fb 100644
  
  	[_drawableCondition lock];
  	if (_queuedDrawableCount > 0) {
-@@ -528,11 +684,62 @@ static void reportGLErrors(void) {
+@@ -528,11 +690,62 @@ static void reportGLErrors(void) {
  	if (drawable) {
  		// wait for the drawable to be fully rendered before copying it to the render texture
  		// (this is a GPU-side wait)
@@ -7124,7 +7137,7 @@ index b81e2e14..7b9891fb 100644
  	}
  
  	@synchronized(self) {
-@@ -575,6 +782,11 @@ static void reportGLErrors(void) {
+@@ -575,6 +788,11 @@ static void reportGLErrors(void) {
  {
  	[super _setContext: context];
  
@@ -7136,7 +7149,7 @@ index b81e2e14..7b9891fb 100644
  	if (_tex == 0) {
  		// create our textures now using the context's CGLContext
  		CGLContextObj prev = CGLGetCurrentContext();
-@@ -589,10 +801,15 @@ static void reportGLErrors(void) {
+@@ -589,10 +807,15 @@ static void reportGLErrors(void) {
  		glTextureParameteri(_tex, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
  		glTextureParameteri(_tex, GL_TEXTURE_WRAP_S, GL_REPEAT);
  		glTextureParameteri(_tex, GL_TEXTURE_WRAP_T, GL_REPEAT);

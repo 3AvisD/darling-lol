@@ -226,6 +226,14 @@ sh tools/riot-metal-bind-model/run.sh
 
 The bind-tracking helpers are extracted verbatim from `MTLRenderCommandEncoder.mm`. The model drives two encoder states, one receiving every call and one only the forwarded calls, and requires them to be equal after every call. That covers directed scenarios, among them a freed wrapper whose address is reused by a different resource and depth-stencil retention, plus 119,401 random calls. Expected: `randomized calls=119401 forwarded=110294 dropped=9107 (7.6%)`, `BIND_DEDUP_MODEL failures=0` and `BLIT_CAST_MODEL failures=0`.
 
+## Indium hand-off tests
+
+```sh
+sh tools/run-deferred-handoff-tests.sh
+```
+
+Both tests compile the real Indium private headers with the host compiler. `test-deferred-handoff` checks four things. The submit thread runs tasks in post order. The present-dispatch token returns while a later task is still queued, and `drain()` waits for that task. The wait counters write nothing without `/tmp/metal-debug-waits` (checked in a forked child). With the flag, they write one `waits enabled` line and then count only waits that actually blocked. `test-deferred-encoder-model` checks the deferred blit and render hand-off: order, resource lifetime and the drop after commit. The test creates the host `/tmp/metal-debug-waits` for its run and removes it afterwards. In the runtime these mechanisms are opt-in (see [setup](SETUP.md#metal-and-indium-overlays)). Expected: `all host deferred-hand-off tests passed`.
+
 ## Passive match capture
 
 These tools observe a manually played match from the host. They wait for the game process, stop when it exits, and never attach to it, write to it, or read its memory.

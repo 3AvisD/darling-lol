@@ -89,6 +89,18 @@ sh build/runtime/tools/install-riot-metal-pair.sh
 
 The installer copies `build/riot-Metal` and `build/riot-libindium.dylib` into the guest `RuntimeFrameworks/Metal.framework` and `RuntimeLibraries`. It backs up the pair it replaces in `build/metal-pair-backups`; a repeated install keeps the older backup. `sh build/runtime/tools/install-riot-metal-pair.sh --rollback` restores that backup. `tools/install-riot-gpu-runtime.sh` still builds and installs the whole GPU set, including these two. Activation needs the namespace restart below.
 
+Indium also contains experimental hand-off changes. They are **off by default**: without the files below, libindium behaves like the build measured before them, and two matches with them on had lower FPS. Each one is a guest file, read once per game process when the game starts.
+
+| Guest file | Effect when present |
+|---|---|
+| `/tmp/metal-present-dispatch-wait` | a presenting commit waits only for its own present dispatch on the submit thread, instead of the whole submit queue |
+| `/tmp/metal-deferred-blit` | blit encoders are recorded on the game thread and replayed on the submit thread (only while deferred render encoding is on) |
+| `/tmp/metal-worker-lease` | the Vulkan command buffer is set up by the first thread that records into it (the submit thread) instead of when `MTLCommandBuffer` is created |
+| `/tmp/metal-skip-cpu-devices` | software Vulkan devices (lavapipe) are skipped while a hardware device exists |
+| `/tmp/metal-debug-waits` | diagnostic: counts how often and how long threads block at the hand-off waits and in `nextDrawable`, every 5 s in `/tmp/metal-trace.log`; the first check writes a `waits enabled` line |
+
+Create these files from inside the guest, for example `darling shell touch /tmp/metal-debug-waits`, or while Darling is shut down. The guest `/tmp` is `~/.darling/private/tmp` seen through Darling's overlay mount. A file created on the host in that directory while Darling runs may stay invisible to guest processes that already looked for it. The same applies to removing a file. The older `/tmp/metal-no-present-dispatch-wait`, `/tmp/metal-no-deferred-blit` and `/tmp/metal-no-skip-cpu-devices` files are ignored.
+
 ### Game-process switches
 
 The kernel library decides these once when a process starts, and only for the League game process (`.../LeagueofLegends.app/Contents/MacOS/LeagueofLegends`). The Riot and League clients keep the server path. Each switch is a host file, so it takes effect at the next game start without reinstalling:

@@ -16,8 +16,16 @@ All matches were ARAM, played manually with unchanged game settings; FPS is the 
 | 10-14 14:18 | Hexgate | + core isolation (since made opt-in) | 102.9 | 92.0 |
 | 10-14 14:42 | Bilgewater | local mutexes, condition variables and semaphores | 119.5 | 103.4 |
 | 10-14 16:26 | Hexgate | + Metal bind deduplication and cheaper blits | 126.7 | 109.6 |
+| 10-14 20:07 | Hexgate | + Indium hand-off changes (since made opt-in) | 114.8 | 102.9 |
+| 10-14 20:27 | Bilgewater | same | 107.2 | 97.2 |
+| 10-14 23:19 | Hexgate | hand-off removed; + vertex-descriptor dirty masks | 118.5 | 106.0 |
+| 10-14 23:48 | Hexgate | same, Hyprland `render:direct_scanout = 0` | 135.4 | 118.7 |
 
 The 13:04 and 16:26 Hexgate matches were captured with the passive sampler (`tools/riot-match-capture`). Per frame, the game's main thread waited 1.36 ms on darlingserver in the first and 0.10 ms in the second. It blocked 39 times per frame in the first and 14 in the second. darlingserver CPU fell from 82% to 61% of a core. GPU utilization stayed at 70–74%: the main thread is the limit and is now about 90% busy running code. Frame times within each 10-second window vary by about 1–1.4 ms (standard deviation) and never more than 2.7 ms, versus hitch windows of 77–168 ms in the matches of 10-13 morning.
+
+The Indium hand-off round moved command-buffer setup, blits and the frame-end synchronisation onto Indium's submit thread. In both of its matches the main thread waited on futexes 0.77–0.79 ms per frame instead of about 0.5 ms, and FPS fell below every earlier match on the same map, so those changes are now opt-in (see [setup](SETUP.md#metal-and-indium-overlays)).
+
+The 23:48 match ran the same Darling build as 23:19, with Hyprland's direct scanout turned off to fix a cursor that stopped changing shape in fullscreen (see [troubleshooting](TROUBLESHOOTING.md#cursor-stops-changing-shape-in-fullscreen)). Over the first ten minutes of each match, average FPS rose from 120.6 to 136.3 and the slowest quarter from 107.3 to 118.8; main-thread CPU per frame fell from 7.1–7.7 ms to 6.5 ms. That match lasted 11 minutes, so one more match is needed before crediting the whole gain to the compositor setting.
 
 What changed in the runtime (all in the patches):
 

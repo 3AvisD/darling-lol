@@ -37,10 +37,78 @@ index 70f2b28..2c2e579 100644
  
  	class Library {
 diff --git a/include/indium/render-command-encoder.hpp b/include/indium/render-command-encoder.hpp
-index d17993c..c0b163b 100644
+index d17993c..0458265 100644
 --- a/include/indium/render-command-encoder.hpp
 +++ b/include/indium/render-command-encoder.hpp
-@@ -71,5 +71,7 @@ namespace Indium {
+@@ -19,7 +19,16 @@ namespace Indium {
+ 	public:
+ 		virtual ~RenderCommandEncoder() = 0;
+ 
+-		virtual void setRenderPipelineState(std::shared_ptr<RenderPipelineState> renderPipelineState) = 0;
++		// (darling-lol:) The resource parameters are passed by const reference rather than by
++		// value: a by-value std::shared_ptr parameter makes the *caller* copy the pointer (an
++		// atomic increment plus the temporary's increment/decrement pair) and hands the callee a
++		// private address to copy out of. Every implementation here copies the pointer once into
++		// the table or op record that has to keep the resource alive anyway, so the reference
++		// removes one atomic round trip and one store-to-load chain per forwarded bind. These
++		// signatures are part of the Metal<->Indium pair (both are built together and installed
++		// together, see patches/metal.patch and patches/metal--deps--indium.patch), and no other
++		// runtime module calls a render encoder.
++		virtual void setRenderPipelineState(const std::shared_ptr<RenderPipelineState>& renderPipelineState) = 0;
+ 		virtual void setFrontFacingWinding(Winding frontFaceWinding) = 0;
+ 		virtual void setCullMode(CullMode cullMode) = 0;
+ 		virtual void setDepthBias(float depthBias, float slopeScale, float clamp) = 0;
+@@ -31,7 +40,7 @@ namespace Indium {
+ 		virtual void setScissorRects(const ScissorRect* scissorRects, size_t count) = 0;
+ 		virtual void setScissorRects(const std::vector<ScissorRect>& scissorRects) = 0;
+ 		virtual void setBlendColor(float red, float green, float blue, float alpha) = 0;
+-		virtual void setDepthStencilState(std::shared_ptr<DepthStencilState> state) = 0;
++		virtual void setDepthStencilState(const std::shared_ptr<DepthStencilState>& state) = 0;
+ 		virtual void setTriangleFillMode(TriangleFillMode triangleFillMode) = 0;
+ 		virtual void setStencilReferenceValue(uint32_t value) = 0;
+ 		virtual void setStencilReferenceValue(uint32_t front, uint32_t back) = 0;
+@@ -41,35 +50,37 @@ namespace Indium {
+ 		virtual void drawPrimitives(PrimitiveType primitiveType, size_t vertexStart, size_t vertexCount, size_t instanceCount) = 0;
+ 		virtual void drawPrimitives(PrimitiveType primitiveType, size_t vertexStart, size_t vertexCount) = 0;
+ 
+-		virtual void drawIndexedPrimitives(PrimitiveType primitiveType, size_t indexCount, IndexType indexType, std::shared_ptr<Buffer> indexBuffer, size_t indexBufferOffset, size_t instanceCount, int64_t baseVertex, size_t baseInstance) = 0;
+-		virtual void drawIndexedPrimitives(PrimitiveType primitiveType, size_t indexCount, IndexType indexType, std::shared_ptr<Buffer> indexBuffer, size_t indexBufferOffset, size_t instanceCount) = 0;
+-		virtual void drawIndexedPrimitives(PrimitiveType primitiveType, size_t indexCount, IndexType indexType, std::shared_ptr<Buffer> indexBuffer, size_t indexBufferOffset) = 0;
++		virtual void drawIndexedPrimitives(PrimitiveType primitiveType, size_t indexCount, IndexType indexType, const std::shared_ptr<Buffer>& indexBuffer, size_t indexBufferOffset, size_t instanceCount, int64_t baseVertex, size_t baseInstance) = 0;
++		virtual void drawIndexedPrimitives(PrimitiveType primitiveType, size_t indexCount, IndexType indexType, const std::shared_ptr<Buffer>& indexBuffer, size_t indexBufferOffset, size_t instanceCount) = 0;
++		virtual void drawIndexedPrimitives(PrimitiveType primitiveType, size_t indexCount, IndexType indexType, const std::shared_ptr<Buffer>& indexBuffer, size_t indexBufferOffset) = 0;
+ 
+ 		virtual void setVertexBytes(const void* bytes, size_t length, size_t index) = 0;
+-		virtual void setVertexBuffer(std::shared_ptr<Buffer> buffer, size_t offset, size_t index) = 0;
++		virtual void setVertexBuffer(const std::shared_ptr<Buffer>& buffer, size_t offset, size_t index) = 0;
+ 		virtual void setVertexBuffers(const std::vector<std::shared_ptr<Buffer>>& buffers, const std::vector<size_t>& offsets, Range<size_t> range) = 0;
+ 		virtual void setVertexBufferOffset(size_t offset, size_t index) = 0;
+-		virtual void setVertexSamplerState(std::shared_ptr<SamplerState> state, size_t index) = 0;
+-		virtual void setVertexSamplerState(std::shared_ptr<SamplerState> state, float lodMinClamp, float lodMaxClamp, size_t index) = 0;
++		virtual void setVertexSamplerState(const std::shared_ptr<SamplerState>& state, size_t index) = 0;
++		virtual void setVertexSamplerState(const std::shared_ptr<SamplerState>& state, float lodMinClamp, float lodMaxClamp, size_t index) = 0;
+ 		virtual void setVertexSamplerStates(const std::vector<std::shared_ptr<SamplerState>>& states, Range<size_t> range) = 0;
+ 		virtual void setVertexSamplerStates(const std::vector<std::shared_ptr<SamplerState>>& states, const std::vector<float>& lodMinClamps, const std::vector<float>& lodMaxClamps, Range<size_t> range) = 0;
+-		virtual void setVertexTexture(std::shared_ptr<Texture> texture, size_t index) = 0;
++		virtual void setVertexTexture(const std::shared_ptr<Texture>& texture, size_t index) = 0;
+ 		virtual void setVertexTextures(const std::vector<std::shared_ptr<Texture>>& textures, Range<size_t> range) = 0;
+ 
+ 		virtual void setFragmentBytes(const void* bytes, size_t length, size_t index) = 0;
+-		virtual void setFragmentBuffer(std::shared_ptr<Buffer> buffer, size_t offset, size_t index) = 0;
++		virtual void setFragmentBuffer(const std::shared_ptr<Buffer>& buffer, size_t offset, size_t index) = 0;
+ 		virtual void setFragmentBuffers(const std::vector<std::shared_ptr<Buffer>>& buffers, const std::vector<size_t>& offsets, Range<size_t> range) = 0;
+ 		virtual void setFragmentBufferOffset(size_t offset, size_t index) = 0;
+-		virtual void setFragmentSamplerState(std::shared_ptr<SamplerState> state, size_t index) = 0;
+-		virtual void setFragmentSamplerState(std::shared_ptr<SamplerState> state, float lodMinClamp, float lodMaxClamp, size_t index) = 0;
++		virtual void setFragmentSamplerState(const std::shared_ptr<SamplerState>& state, size_t index) = 0;
++		virtual void setFragmentSamplerState(const std::shared_ptr<SamplerState>& state, float lodMinClamp, float lodMaxClamp, size_t index) = 0;
+ 		virtual void setFragmentSamplerStates(const std::vector<std::shared_ptr<SamplerState>>& states, Range<size_t> range) = 0;
+ 		virtual void setFragmentSamplerStates(const std::vector<std::shared_ptr<SamplerState>>& states, const std::vector<float>& lodMinClamps, const std::vector<float>& lodMaxClamps, Range<size_t> range) = 0;
+-		virtual void setFragmentTexture(std::shared_ptr<Texture> texture, size_t index) = 0;
++		virtual void setFragmentTexture(const std::shared_ptr<Texture>& texture, size_t index) = 0;
+ 		virtual void setFragmentTextures(std::vector<std::shared_ptr<Texture>>& textures, Range<size_t> range) = 0;
+ 
+ 		virtual void useResource(std::shared_ptr<Resource> resource, ResourceUsage usage, RenderStages stages) = 0;
  		virtual void useResources(const std::vector<std::shared_ptr<Resource>>& resources, ResourceUsage usage, RenderStages stages) = 0;
  		virtual void useResource(std::shared_ptr<Resource> resource, ResourceUsage usage) = 0;
  		virtual void useResources(const std::vector<std::shared_ptr<Resource>>& resources, ResourceUsage usage) = 0;
@@ -144,18 +212,33 @@ index a348b2b..9ad8975 100644
  	};
  };
 diff --git a/private-include/indium/command-buffer.private.hpp b/private-include/indium/command-buffer.private.hpp
-index b7ffcce..4645377 100644
+index b7ffcce..5b1e84c 100644
 --- a/private-include/indium/command-buffer.private.hpp
 +++ b/private-include/indium/command-buffer.private.hpp
-@@ -12,6 +12,7 @@
+@@ -2,16 +2,22 @@
+ 
+ #include <vulkan/vulkan.h>
+ 
++#include <indium/blit-command-encoder.hpp>
+ #include <indium/command-buffer.hpp>
+ #include <indium/command-encoder.hpp>
++#include <indium/compute-command-encoder.hpp>
+ 
+ #include <vector>
+ #include <mutex>
+ #include <condition_variable>
++#include <atomic>
+ 
  namespace Indium {
  	class PrivateCommandQueue;
  	class PrivateDevice;
 +	class PrivateRenderCommandEncoder;
++	class PrivateBlitCommandEncoder;
++	class PrivateComputeCommandEncoder;
  
  	class PrivateCommandBuffer: public CommandBuffer, public std::enable_shared_from_this<PrivateCommandBuffer> {
  	private:
-@@ -25,7 +26,6 @@ namespace Indium {
+@@ -25,7 +31,6 @@ namespace Indium {
  		bool _committed = false;
  		std::condition_variable _completedCondvar;
  		bool _completed = false;
@@ -163,21 +246,33 @@ index b7ffcce..4645377 100644
  	public:
  		PrivateCommandBuffer(std::shared_ptr<PrivateCommandQueue> commandQueue);
  		~PrivateCommandBuffer();
-@@ -46,6 +46,13 @@ namespace Indium {
+@@ -46,6 +51,25 @@ namespace Indium {
  		virtual std::shared_ptr<CommandQueue> commandQueue() override;
  		virtual std::shared_ptr<Device> device() override;
  
 +		// creates the real render encoder immediately (what renderCommandEncoder() did before deferred encoding existed)
 +		std::shared_ptr<PrivateRenderCommandEncoder> renderCommandEncoderNow(const RenderPassDescriptor& descriptor);
++		// same for blit/compute: the real encoder is created on the worker that replays the deferred op list
++		std::shared_ptr<PrivateBlitCommandEncoder> blitCommandEncoderNow();
++		std::shared_ptr<PrivateBlitCommandEncoder> blitCommandEncoderNow(const BlitPassDescriptor& descriptor);
++		std::shared_ptr<PrivateComputeCommandEncoder> computeCommandEncoderNow(const ComputePassDescriptor& descriptor);
++		// leases the Vulkan command buffer (pool, allocation, begin) on the calling thread if that has not happened yet;
++		// only used with /tmp/metal-worker-lease (by default the constructor leases it, as in round 3)
++		void ensureRecordingStarted();
++		void leaseRecording();
 +		void deferredBegin();
 +		void deferredEnd();
 +		// blocks until every deferred encoder of this command buffer has been replayed
 +		void waitDeferred();
++		// false while the commit has not started. A deferred replay may only be posted while the Vulkan command buffer
++		// is still open; a facade dropped after the commit (a Metal contract violation) then logs instead of recording
++		// into a closed command buffer.
++		bool replayAllowed() const { return !_committedAtomic.load(std::memory_order_acquire); }
 +
  		void addScheduledHandlerLocked(std::function<void(std::shared_ptr<CommandBuffer>)> handler);
  		void addCompletedHandlerLocked(std::function<void(std::shared_ptr<CommandBuffer>)> handler);
  
-@@ -53,5 +60,13 @@ namespace Indium {
+@@ -53,5 +77,15 @@ namespace Indium {
  		INDIUM_PROPERTY_READONLY_OBJECT(PrivateDevice, p, P,rivateDevice);
  
  		INDIUM_PROPERTY(VkCommandBuffer, c, C,ommandBuffer) = VK_NULL_HANDLE;
@@ -189,6 +284,8 @@ index b7ffcce..4645377 100644
 +		unsigned _deferredPending = 0;
 +		std::mutex _deferredMutex;
 +		std::condition_variable _deferredCondvar;
++		// set at the start of the commit body (see replayAllowed()); appended last, like the members above
++		std::atomic<bool> _committedAtomic {false};
  	};
  };
 diff --git a/private-include/indium/command-encoder.private.hpp b/private-include/indium/command-encoder.private.hpp
@@ -904,7 +1001,7 @@ index a43f532..6f2d7dd 100644
  				binding.stageFlags = functionTypeToVkShaderStageFlags(function->functionInfo().functionType);
  			}
 diff --git a/private-include/indium/render-command-encoder.private.hpp b/private-include/indium/render-command-encoder.private.hpp
-index a41b951..6cbea43 100644
+index a41b951..2f670e9 100644
 --- a/private-include/indium/render-command-encoder.private.hpp
 +++ b/private-include/indium/render-command-encoder.private.hpp
 @@ -5,12 +5,15 @@
@@ -923,7 +1020,7 @@ index a41b951..6cbea43 100644
  
  namespace Indium {
  	class PrivateCommandBuffer;
-@@ -29,18 +32,40 @@ namespace Indium {
+@@ -29,19 +32,41 @@ namespace Indium {
  		VkFramebuffer _framebuffer = VK_NULL_HANDLE;
  		VkRenderPass _renderPass = VK_NULL_HANDLE;
  		VkDescriptorPool _pool = VK_NULL_HANDLE;
@@ -956,16 +1053,70 @@ index a41b951..6cbea43 100644
  	public:
  		PrivateRenderCommandEncoder(std::shared_ptr<PrivateCommandBuffer> commandBuffer, const RenderPassDescriptor& descriptor);
  		~PrivateRenderCommandEncoder();
+-
+-		virtual void setRenderPipelineState(std::shared_ptr<RenderPipelineState> renderPipelineState) override;
 +        bool hasHeavyRetirement() const {
 +            return _resolvedBufferOwners.size() + _resolvedTextureOwners.size() +
 +                _pipelineOwners.size() + _retainedResourceOwners.size() >= 64 ||
 +                !_retiredPools.empty();
 +        }
- 
++
 +		virtual void memoryBarrier(size_t scope, RenderStages after, RenderStages before) override;
- 		virtual void setRenderPipelineState(std::shared_ptr<RenderPipelineState> renderPipelineState) override;
++		virtual void setRenderPipelineState(const std::shared_ptr<RenderPipelineState>& renderPipelineState) override;
  		virtual void setFrontFacingWinding(Winding frontFaceWinding) override;
  		virtual void setCullMode(CullMode cullMode) override;
+ 		virtual void setDepthBias(float depthBias, float slopeScale, float clamp) override;
+@@ -53,7 +78,7 @@ namespace Indium {
+ 		virtual void setScissorRects(const ScissorRect* scissorRects, size_t count) override;
+ 		virtual void setScissorRects(const std::vector<ScissorRect>& scissorRects) override;
+ 		virtual void setBlendColor(float red, float green, float blue, float alpha) override;
+-		virtual void setDepthStencilState(std::shared_ptr<DepthStencilState> state) override;
++		virtual void setDepthStencilState(const std::shared_ptr<DepthStencilState>& state) override;
+ 		virtual void setTriangleFillMode(TriangleFillMode triangleFillMode) override;
+ 		virtual void setStencilReferenceValue(uint32_t value) override;
+ 		virtual void setStencilReferenceValue(uint32_t front, uint32_t back) override;
+@@ -63,30 +88,30 @@ namespace Indium {
+ 		virtual void drawPrimitives(PrimitiveType primitiveType, size_t vertexStart, size_t vertexCount, size_t instanceCount) override;
+ 		virtual void drawPrimitives(PrimitiveType primitiveType, size_t vertexStart, size_t vertexCount) override;
+ 
+-		virtual void drawIndexedPrimitives(PrimitiveType primitiveType, size_t indexCount, IndexType indexType, std::shared_ptr<Buffer> indexBuffer, size_t indexBufferOffset, size_t instanceCount, int64_t baseVertex, size_t baseInstance) override;
+-		virtual void drawIndexedPrimitives(PrimitiveType primitiveType, size_t indexCount, IndexType indexType, std::shared_ptr<Buffer> indexBuffer, size_t indexBufferOffset, size_t instanceCount) override;
+-		virtual void drawIndexedPrimitives(PrimitiveType primitiveType, size_t indexCount, IndexType indexType, std::shared_ptr<Buffer> indexBuffer, size_t indexBufferOffset) override;
++		virtual void drawIndexedPrimitives(PrimitiveType primitiveType, size_t indexCount, IndexType indexType, const std::shared_ptr<Buffer>& indexBuffer, size_t indexBufferOffset, size_t instanceCount, int64_t baseVertex, size_t baseInstance) override;
++		virtual void drawIndexedPrimitives(PrimitiveType primitiveType, size_t indexCount, IndexType indexType, const std::shared_ptr<Buffer>& indexBuffer, size_t indexBufferOffset, size_t instanceCount) override;
++		virtual void drawIndexedPrimitives(PrimitiveType primitiveType, size_t indexCount, IndexType indexType, const std::shared_ptr<Buffer>& indexBuffer, size_t indexBufferOffset) override;
+ 
+ 		virtual void setVertexBytes(const void* bytes, size_t length, size_t index) override;
+-		virtual void setVertexBuffer(std::shared_ptr<Buffer> buffer, size_t offset, size_t index) override;
++		virtual void setVertexBuffer(const std::shared_ptr<Buffer>& buffer, size_t offset, size_t index) override;
+ 		virtual void setVertexBuffers(const std::vector<std::shared_ptr<Buffer>>& buffers, const std::vector<size_t>& offsets, Range<size_t> range) override;
+ 		virtual void setVertexBufferOffset(size_t offset, size_t index) override;
+-		virtual void setVertexSamplerState(std::shared_ptr<SamplerState> state, size_t index) override;
+-		virtual void setVertexSamplerState(std::shared_ptr<SamplerState> state, float lodMinClamp, float lodMaxClamp, size_t index) override;
++		virtual void setVertexSamplerState(const std::shared_ptr<SamplerState>& state, size_t index) override;
++		virtual void setVertexSamplerState(const std::shared_ptr<SamplerState>& state, float lodMinClamp, float lodMaxClamp, size_t index) override;
+ 		virtual void setVertexSamplerStates(const std::vector<std::shared_ptr<SamplerState>>& states, Range<size_t> range) override;
+ 		virtual void setVertexSamplerStates(const std::vector<std::shared_ptr<SamplerState>>& states, const std::vector<float>& lodMinClamps, const std::vector<float>& lodMaxClamps, Range<size_t> range) override;
+-		virtual void setVertexTexture(std::shared_ptr<Texture> texture, size_t index) override;
++		virtual void setVertexTexture(const std::shared_ptr<Texture>& texture, size_t index) override;
+ 		virtual void setVertexTextures(const std::vector<std::shared_ptr<Texture>>& textures, Range<size_t> range) override;
+ 
+ 		virtual void setFragmentBytes(const void* bytes, size_t length, size_t index) override;
+-		virtual void setFragmentBuffer(std::shared_ptr<Buffer> buffer, size_t offset, size_t index) override;
++		virtual void setFragmentBuffer(const std::shared_ptr<Buffer>& buffer, size_t offset, size_t index) override;
+ 		virtual void setFragmentBuffers(const std::vector<std::shared_ptr<Buffer>>& buffers, const std::vector<size_t>& offsets, Range<size_t> range) override;
+ 		virtual void setFragmentBufferOffset(size_t offset, size_t index) override;
+-		virtual void setFragmentSamplerState(std::shared_ptr<SamplerState> state, size_t index) override;
+-		virtual void setFragmentSamplerState(std::shared_ptr<SamplerState> state, float lodMinClamp, float lodMaxClamp, size_t index) override;
++		virtual void setFragmentSamplerState(const std::shared_ptr<SamplerState>& state, size_t index) override;
++		virtual void setFragmentSamplerState(const std::shared_ptr<SamplerState>& state, float lodMinClamp, float lodMaxClamp, size_t index) override;
+ 		virtual void setFragmentSamplerStates(const std::vector<std::shared_ptr<SamplerState>>& states, Range<size_t> range) override;
+ 		virtual void setFragmentSamplerStates(const std::vector<std::shared_ptr<SamplerState>>& states, const std::vector<float>& lodMinClamps, const std::vector<float>& lodMaxClamps, Range<size_t> range) override;
+-		virtual void setFragmentTexture(std::shared_ptr<Texture> texture, size_t index) override;
++		virtual void setFragmentTexture(const std::shared_ptr<Texture>& texture, size_t index) override;
+ 		virtual void setFragmentTextures(std::vector<std::shared_ptr<Texture>>& textures, Range<size_t> range) override;
+ 
+ 		virtual void useResource(std::shared_ptr<Resource> resource, ResourceUsage usage, RenderStages stages) override;
 @@ -95,8 +120,89 @@ namespace Indium {
  		virtual void useResources(const std::vector<std::shared_ptr<Resource>>& resources, ResourceUsage usage) override;
  
@@ -1749,18 +1900,19 @@ index 23fd2d3..e73df2a 100644
 +	return _gpuAddress;
  };
 diff --git a/src/indium/command-buffer.cpp b/src/indium/command-buffer.cpp
-index 43f4a84..0283316 100644
+index 43f4a84..46a4f72 100644
 --- a/src/indium/command-buffer.cpp
 +++ b/src/indium/command-buffer.cpp
-@@ -1,3 +1,7 @@
+@@ -1,3 +1,8 @@
 +#include <indium/submit-thread.private.hpp>
 +#include <indium/gpu-timing.private.hpp>
 +#include <indium/submit-batch.private.hpp>
 +#include <indium/deferred-render-encoder.private.hpp>
++#include <indium/deferred-blit-encoder.private.hpp>
  #include <indium/command-buffer.private.hpp>
  #include <indium/command-queue.private.hpp>
  #include <indium/device.private.hpp>
-@@ -8,7 +12,116 @@
+@@ -8,7 +13,116 @@
  #include <indium/compute-command-encoder.private.hpp>
  #include <indium/dynamic-vk.hpp>
  
@@ -1877,10 +2029,40 @@ index 43f4a84..0283316 100644
  
  Indium::CommandBuffer::~CommandBuffer() {};
  
-@@ -23,14 +136,17 @@ Indium::PrivateCommandBuffer::PrivateCommandBuffer(std::shared_ptr<PrivateComman
+@@ -19,18 +133,47 @@ std::shared_ptr<Indium::Device> Indium::PrivateCommandBuffer::device() {
+ 	return _privateDevice;
+ };
+ 
++namespace {
++// OFF by default (round-3 behaviour: the creating thread leases the Vulkan command buffer in the constructor). Guest
++// flag file /tmp/metal-worker-lease (checked once per process, so the constructor and every later recorder agree)
++// makes the lease lazy: the thread that first records leases it, which with deferred encoding is the submit worker.
++// Round 4 had this on unconditionally; that round regressed in matches, so it is an opt-in experiment now.
++bool workerLeaseEnabled() {
++	static const bool value = access("/tmp/metal-worker-lease", F_OK) == 0;
++	return value;
++}
++}
++
+ Indium::PrivateCommandBuffer::PrivateCommandBuffer(std::shared_ptr<PrivateCommandQueue> commandQueue):
  	_privateCommandQueue(commandQueue)
  {
  	_privateDevice = _privateCommandQueue->privateDevice();
++	// Default: lease now, on the creating thread. With /tmp/metal-worker-lease the Vulkan command buffer (pool reset,
++	// allocation, begin) is leased lazily by the thread that first records into it (see ensureRecordingStarted()).
++	if (!workerLeaseEnabled()) leaseRecording();
++};
++
++// Only called with /tmp/metal-worker-lease (callers test workerLeaseEnabled() first; without the flag the
++// constructor has already leased).
++void Indium::PrivateCommandBuffer::ensureRecordingStarted() {
++	std::scoped_lock lock(_mutex);
++	if (_commandBuffer) return;
++	leaseRecording();
++};
++
++// The lease itself; runs in the constructor or under _mutex in ensureRecordingStarted().
++void Indium::PrivateCommandBuffer::leaseRecording() {
 +	// A pool is exclusively leased through recording and GPU completion.
 +	// Freeing another buffer from the same pool can otherwise race recording.
 +	_recordingPool = _privateCommandQueue->acquireCommandPool(_commandBuffer);
@@ -1897,7 +2079,7 @@ index 43f4a84..0283316 100644
  		// TODO: handle this in a more C++-friendly way
  		abort();
  	}
-@@ -41,13 +157,46 @@ Indium::PrivateCommandBuffer::PrivateCommandBuffer(std::shared_ptr<PrivateComman
+@@ -41,13 +184,64 @@ Indium::PrivateCommandBuffer::PrivateCommandBuffer(std::shared_ptr<PrivateComman
  		// TODO: same
  		abort();
  	}
@@ -1912,7 +2094,8 @@ index 43f4a84..0283316 100644
 +    VkCommandBuffer buffer;
 +    void operator()() {
 +        encoders.clear();
-+        queue->releaseCommandPool(pool, buffer);
++        // a command buffer that never recorded (created and dropped without an encoder) leased no pool
++        if (pool) queue->releaseCommandPool(pool, buffer);
 +        queue.reset();
 +    }
 +};
@@ -1924,13 +2107,29 @@ index 43f4a84..0283316 100644
 +namespace Indium {
 +void finishCommandRetirement() { encoderRetirementQueue().shutdown(); }
 +}
++namespace {
++// Live experiment (guest flag, re-read every 256 command buffers like the async-encode flag):
++// /tmp/metal-retire-tiny makes the tiny buffers take the worker path too, i.e. the encoder
++// destructors and the command-pool release run on the retirement thread instead of the glyph
++// thread that released the MTLCommandBuffer. Only the *cost* is in question here - the handoff is
++// the same one heavy buffers already use, the queue's contract is completed GPU work (and an
++// unsubmitted buffer holds no GPU work), and a full queue still falls back to the inline release -
++// so the flag is the measurement, and the default stays the measured-cheaper inline release.
++bool retireTinyBuffers() {
++    static std::atomic<unsigned> calls { 0 };
++    static std::atomic<bool> value { false };
++    if ((calls.fetch_add(1, std::memory_order_relaxed) & 255) == 0)
++        value.store(access("/tmp/metal-retire-tiny", F_OK) == 0, std::memory_order_relaxed);
++    return value.load(std::memory_order_relaxed);
++}
++}
  Indium::PrivateCommandBuffer::~PrivateCommandBuffer() {
 -	DynamicVK::vkFreeCommandBuffers(_privateDevice->device(), _privateCommandQueue->commandPool(), 1, &_commandBuffer);
 +    // Submitted buffers are held by the completion callback until GPU work and
 +    // user completion handlers finish. Unsubmitted buffers have no GPU users.
 +    // Tiny buffers cost less to release directly than to signal a Darwin
 +    // condition variable and wake another worker through Darling's server.
-+    bool heavy = _commandEncoders.size() >= 4;
++    bool heavy = _commandEncoders.size() >= 4 || retireTinyBuffers();
 +    if (!heavy) {
 +        for (const auto& encoder : _commandEncoders) {
 +            auto* render = dynamic_cast<PrivateRenderCommandEncoder*>(encoder.get());
@@ -1943,13 +2142,39 @@ index 43f4a84..0283316 100644
  
 -std::shared_ptr<Indium::RenderCommandEncoder> Indium::PrivateCommandBuffer::renderCommandEncoder(const RenderPassDescriptor& descriptor) {
 +std::shared_ptr<Indium::PrivateRenderCommandEncoder> Indium::PrivateCommandBuffer::renderCommandEncoderNow(const RenderPassDescriptor& descriptor) {
++	if (workerLeaseEnabled()) ensureRecordingStarted();
  	auto encoder = std::make_shared<Indium::PrivateRenderCommandEncoder>(shared_from_this(), descriptor);
  	{
  		std::scoped_lock lock(_mutex);
-@@ -56,7 +205,37 @@ std::shared_ptr<Indium::RenderCommandEncoder> Indium::PrivateCommandBuffer::rend
+@@ -56,7 +250,65 @@ std::shared_ptr<Indium::RenderCommandEncoder> Indium::PrivateCommandBuffer::rend
  	return encoder;
  };
  
++std::shared_ptr<Indium::PrivateBlitCommandEncoder> Indium::PrivateCommandBuffer::blitCommandEncoderNow() {
++	return blitCommandEncoderNow(BlitPassDescriptor {});
++};
++
++// Creates the real blit encoder on whichever thread replays the deferred op list (see deferred-blit-encoder.private.hpp).
++std::shared_ptr<Indium::PrivateBlitCommandEncoder> Indium::PrivateCommandBuffer::blitCommandEncoderNow(const BlitPassDescriptor& descriptor) {
++	if (workerLeaseEnabled()) ensureRecordingStarted();
++	auto encoder = std::make_shared<Indium::PrivateBlitCommandEncoder>(shared_from_this(), descriptor);
++	{
++		std::scoped_lock lock(_mutex);
++		_commandEncoders.push_back(encoder);
++	}
++	return encoder;
++};
++
++std::shared_ptr<Indium::PrivateComputeCommandEncoder> Indium::PrivateCommandBuffer::computeCommandEncoderNow(const ComputePassDescriptor& descriptor) {
++	if (workerLeaseEnabled()) ensureRecordingStarted();
++	auto encoder = std::make_shared<Indium::PrivateComputeCommandEncoder>(shared_from_this(), descriptor);
++	{
++		std::scoped_lock lock(_mutex);
++		_commandEncoders.push_back(encoder);
++	}
++	return encoder;
++};
++
 +void Indium::PrivateCommandBuffer::deferredBegin() {
 +	std::lock_guard<std::mutex> lock(_deferredMutex);
 +	++_deferredPending;
@@ -1965,7 +2190,7 @@ index 43f4a84..0283316 100644
 +
 +void Indium::PrivateCommandBuffer::waitDeferred() {
 +	std::unique_lock<std::mutex> lock(_deferredMutex);
-+	_deferredCondvar.wait(lock, [this] { return _deferredPending == 0; });
++	Waits::blockOn("waitDeferred", _deferredCondvar, lock, [this] { return _deferredPending == 0; });
 +}
 +
 +std::shared_ptr<Indium::RenderCommandEncoder> Indium::PrivateCommandBuffer::renderCommandEncoder(const RenderPassDescriptor& descriptor) {
@@ -1980,19 +2205,31 @@ index 43f4a84..0283316 100644
 +};
 +
  std::shared_ptr<Indium::BlitCommandEncoder> Indium::PrivateCommandBuffer::blitCommandEncoder() {
++	// the opt-in flag is tested first: AsyncEncode::enabled() bumps a shared call counter (and re-reads its flag files
++	// every 256 calls), which the default path must not pay or perturb
++	if (AsyncEncode::deferBlitEnabled() && AsyncEncode::enabled()) return blitCommandEncoder(BlitPassDescriptor {});
 +	waitDeferred(); // never record into the Vulkan command buffer while deferred render encoders are being replayed
  	auto encoder = std::make_shared<Indium::PrivateBlitCommandEncoder>(shared_from_this());
  	{
  		std::scoped_lock lock(_mutex);
-@@ -66,6 +245,7 @@ std::shared_ptr<Indium::BlitCommandEncoder> Indium::PrivateCommandBuffer::blitCo
+@@ -66,6 +318,16 @@ std::shared_ptr<Indium::BlitCommandEncoder> Indium::PrivateCommandBuffer::blitCo
  };
  
  std::shared_ptr<Indium::BlitCommandEncoder> Indium::PrivateCommandBuffer::blitCommandEncoder(const BlitPassDescriptor& descriptor) {
++	if (AsyncEncode::deferBlitEnabled() && AsyncEncode::enabled()) {
++		// records on the caller, replays on the ordered worker: no wait, no vkCmd* on the game's thread
++		auto encoder = std::make_shared<AsyncEncode::DeferredBlitCommandEncoder>(shared_from_this(), descriptor);
++		{
++			std::scoped_lock lock(_mutex);
++			_commandEncoders.push_back(encoder);
++		}
++		return encoder;
++	}
 +	waitDeferred(); // never record into the Vulkan command buffer while deferred render encoders are being replayed
  	auto encoder = std::make_shared<Indium::PrivateBlitCommandEncoder>(shared_from_this(), descriptor);
  	{
  		std::scoped_lock lock(_mutex);
-@@ -79,6 +259,7 @@ std::shared_ptr<Indium::ComputeCommandEncoder> Indium::PrivateCommandBuffer::com
+@@ -79,6 +341,7 @@ std::shared_ptr<Indium::ComputeCommandEncoder> Indium::PrivateCommandBuffer::com
  };
  
  std::shared_ptr<Indium::ComputeCommandEncoder> Indium::PrivateCommandBuffer::computeCommandEncoder(const ComputePassDescriptor& descriptor) {
@@ -2000,7 +2237,7 @@ index 43f4a84..0283316 100644
  	auto encoder = std::make_shared<Indium::PrivateComputeCommandEncoder>(shared_from_this(), descriptor);
  	{
  		std::scoped_lock lock(_mutex);
-@@ -91,7 +272,198 @@ std::shared_ptr<Indium::ComputeCommandEncoder> Indium::PrivateCommandBuffer::com
+@@ -91,10 +354,237 @@ std::shared_ptr<Indium::ComputeCommandEncoder> Indium::PrivateCommandBuffer::com
  	return computeCommandEncoder(ComputePassDescriptor { {}, dispatchType });
  };
  
@@ -2157,6 +2394,13 @@ index 43f4a84..0283316 100644
 +	auto& state = submitBatchState();
 +	std::shared_ptr<Indium::PrivateDevice> device = state.device;   // set under the queue mutex by the first batched commit
 +	if (!device) return;
++	// runs on the game thread (waitUntilCompleted) and on the upload worker; the counter attributes blocks to their caller.
++	if (Waits::enabled() && !SubmitThread::onWorker()) {
++		Waits::blockOnLock("queueMutex", device->graphicsQueueMutex());
++		std::unique_lock<std::mutex> queueLock(device->graphicsQueueMutex(), std::adopt_lock);
++		flushSubmitBatchLocked();
++		return;
++	}
 +	std::unique_lock<std::mutex> queueLock(device->graphicsQueueMutex());
 +	flushSubmitBatchLocked();
 +}
@@ -2170,6 +2414,14 @@ index 43f4a84..0283316 100644
 +    if ((calls.fetch_add(1,std::memory_order_relaxed) & 63)==0)
 +        bindingReuse.store(access("/tmp/metal-no-binding-reuse",F_OK)!=0,std::memory_order_relaxed);
 +}
++// OFF by default (round-3 behaviour: a presenting commit waits for the whole worker queue with drain()). Guest flag file
++// /tmp/metal-present-dispatch-wait (checked once per process) makes the frame-end sync narrower: the caller waits only
++// until this commit's own task has run (its present dispatch, and by FIFO order every replay queued before it), not for
++// tasks queued after it. Round 4 had this on by default; that round regressed in matches, so it is opt-in now.
++bool presentDispatchWaitEnabled() {
++	static const bool value = access("/tmp/metal-present-dispatch-wait", F_OK) == 0;
++	return value;
++}
 +}
 +bool Indium::bindingReuseEnabled() {return bindingReuse.load(std::memory_order_relaxed);}
 +
@@ -2182,24 +2434,48 @@ index 43f4a84..0283316 100644
 +		auto self = shared_from_this();
 +		// read on the calling thread: the worker's commit consumes the list
 +		const bool presents = !_drawablesToPresent.empty();
-+		SubmitThread::post([self]() {
-+			AsyncEncode::PoolScope pool;
-+			self->commit();
-+		});
 +		// Frame-end sync: the present is queued to the main queue by the worker's commit. The game pumps its run loop
 +		// right after this call, so let the worker catch up first (it ran in parallel during the frame, the wait is its
 +		// remaining lag); otherwise the present misses this pump and is shown one frame late, sometimes two per pump.
 +		// Guest flag file /tmp/metal-async-no-frame-sync disables it for A/B runs.
++		if (presents && presentDispatchWaitEnabled() && access("/tmp/metal-async-no-frame-sync", F_OK) != 0) {
++			// Opt-in narrow wait (/tmp/metal-present-dispatch-wait): this commit's task signals the token when it is
++			// done, i.e. when the present dispatch (and, because the worker is FIFO, every replay queued before it) has
++			// happened. Waiting for the token instead of the queue's idle state does not block on later tasks.
++			SubmitThread::Token token;
++			SubmitThread::post([self, &token]() {
++				struct Signal {
++					SubmitThread::Token* token;
++					~Signal() { token->signal(); }
++				} signal { &token };
++				AsyncEncode::PoolScope pool;
++				self->commit();
++			});
++			token.wait("presentDispatchWait");
++			return;
++		}
++		// Default (round 3): post first, then check the flag file and wait for the whole worker queue.
++		SubmitThread::post([self]() {
++			AsyncEncode::PoolScope pool;
++			self->commit();
++		});
 +		if (presents && access("/tmp/metal-async-no-frame-sync", F_OK) != 0) {
-+			SubmitThread::drain();
++			SubmitThread::drain("drain@commit");
 +		}
 +		return;
 +	}
 +	auto* frameSample = beginFrameIntervalSample(!_drawablesToPresent.empty());
++	// with /tmp/metal-worker-lease the commit is the last recorder of this command buffer, so it leases it when nothing
++	// did before (empty buffer); by default the constructor has leased it
++	if (workerLeaseEnabled()) ensureRecordingStarted();
  	std::unique_lock lock(_mutex);
  
  	_committed = true;
-@@ -110,16 +482,28 @@ void Indium::PrivateCommandBuffer::commit() {
++	_committedAtomic.store(true, std::memory_order_release);
+ 
+ 	for (const auto& encoder: _commandEncoders) {
+ 		if (auto renderEncoder = std::dynamic_pointer_cast<PrivateRenderCommandEncoder>(encoder)) {
+@@ -110,16 +600,28 @@ void Indium::PrivateCommandBuffer::commit() {
  			}
  		}
  
@@ -2229,7 +2505,7 @@ index 43f4a84..0283316 100644
  
  	// for the event loop
  	auto timelineSemaphore = _privateDevice->getWrappedTimelineSemaphore();
-@@ -138,14 +522,49 @@ void Indium::PrivateCommandBuffer::commit() {
+@@ -138,14 +640,49 @@ void Indium::PrivateCommandBuffer::commit() {
  			readWriteTextures.insert(readWriteTextures.end(), readWrite.begin(), readWrite.end());
  		}
  
@@ -2282,7 +2558,7 @@ index 43f4a84..0283316 100644
  	}
  
  	std::vector<VkSemaphoreSubmitInfo> signalInfos;
-@@ -202,11 +621,13 @@ void Indium::PrivateCommandBuffer::commit() {
+@@ -202,11 +739,13 @@ void Indium::PrivateCommandBuffer::commit() {
  		auto privateTexture = std::dynamic_pointer_cast<PrivateTexture>(texture);
  		const auto& presentSema = presentationSemaphores[i];
  
@@ -2301,7 +2577,7 @@ index 43f4a84..0283316 100644
  
  		handleTextureSemaphores(privateTexture);
  	}
-@@ -215,7 +636,15 @@ void Indium::PrivateCommandBuffer::commit() {
+@@ -215,7 +754,15 @@ void Indium::PrivateCommandBuffer::commit() {
  	//        but it also leaves the resources for this command buffer tied up, essentially becoming a memory leak.
  	//        i've observed this in the cube example, and it happens more than once (because the example display semaphore is exhausted and never signaled).
  	// UPDATE: upon further testing, it seems that this only occurs when the view is off-screen/hidden. weird.
@@ -2318,7 +2594,7 @@ index 43f4a84..0283316 100644
  		{
  			std::unique_lock lock(self->_mutex);
  			self->_completed = true;
-@@ -234,8 +663,47 @@ void Indium::PrivateCommandBuffer::commit() {
+@@ -234,8 +781,47 @@ void Indium::PrivateCommandBuffer::commit() {
  		// the handlers may have captured a reference to us (from their surrounding scope), so clear out handlers so those references go away
  		self->_scheduledHandlers.clear();
  		self->_completedHandlers.clear();
@@ -2366,7 +2642,7 @@ index 43f4a84..0283316 100644
  	commandBufferInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
  	commandBufferInfo.commandBuffer = _commandBuffer;
  
-@@ -252,23 +720,41 @@ void Indium::PrivateCommandBuffer::commit() {
+@@ -252,23 +838,41 @@ void Indium::PrivateCommandBuffer::commit() {
  	//        the Device constructor tries to choose command queues that support as many operations as possible, but it's possible
  	//        that a particular device only supports certain operations on certain queues (e.g. maybe it only supports transfer operations
  	//        on an exclusive queue that doesn't support graphics or compute).
@@ -2413,19 +2689,20 @@ index 43f4a84..0283316 100644
  };
  
  void Indium::PrivateCommandBuffer::presentDrawable(std::shared_ptr<Drawable> drawable) {
-@@ -307,9 +793,14 @@ void Indium::PrivateCommandBuffer::addCompletedHandler(std::function<void(std::s
+@@ -307,9 +911,12 @@ void Indium::PrivateCommandBuffer::addCompletedHandler(std::function<void(std::s
  };
  
  void Indium::PrivateCommandBuffer::waitUntilCompleted() {
-+	SubmitThread::drain(); // a commit posted to the worker has not necessarily been submitted yet
++	SubmitThread::drain("drain@waitUntilCompleted"); // a commit posted to the worker has not necessarily been submitted yet
 +	Indium::flushPendingSubmits();
 +	// diagnostic counter (guest /tmp/metal-debug-timing flag): the calling thread blocks until the GPU has finished this buffer
 +	const auto waitStart = std::chrono::steady_clock::now();
  	std::unique_lock lock(_mutex);
  
- 	while (!_completed) {
- 		_completedCondvar.wait(lock);
- 	}
+-	while (!_completed) {
+-		_completedCondvar.wait(lock);
+-	}
++	Waits::blockOn("waitUntilCompleted", _completedCondvar, lock, [this] { return _completed; });
 +	Indium::count("waitUntilCompletedMicroseconds", std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - waitStart).count());
  };
 diff --git a/src/indium/command-queue.cpp b/src/indium/command-queue.cpp
@@ -2525,7 +2802,7 @@ index 5f62ad0..5957bec 100644
  	DynamicVK::vkCmdBindDescriptorSets(buf->commandBuffer(), VK_PIPELINE_BIND_POINT_COMPUTE, _pso->layout(), 0, descriptorSets.size(), descriptorSets.data(), 0, nullptr);
  };
 diff --git a/src/indium/device.cpp b/src/indium/device.cpp
-index 322e186..5bc9aad 100644
+index 322e186..70c4a15 100644
 --- a/src/indium/device.cpp
 +++ b/src/indium/device.cpp
 @@ -1,4 +1,6 @@
@@ -2535,7 +2812,56 @@ index 322e186..5bc9aad 100644
  #include <indium/instance.private.hpp>
  #include <indium/command-queue.private.hpp>
  #include <indium/render-pipeline.private.hpp>
-@@ -83,7 +85,8 @@ Indium::Device::~Device() {};
+@@ -12,10 +14,12 @@
+ 
+ #include <iridium/iridium.hpp>
+ 
++#include <algorithm>
+ #include <set>
+ #include <stdexcept>
+ #include <thread>
+ #include <unordered_set>
++#include <utility>
+ 
+ #include <cstring>
+ #include <vector>
+@@ -39,6 +43,15 @@ void Indium::initGlobalDeviceList() {
+ 		return;
+ 	}
+ 
++	// A VkDevice is created (and its driver initialized) for every supported physical device below, and
++	// createSystemDefaultDevice() takes the first entry. Software devices (lavapipe) can be skipped -- a VkDevice on
++	// one of them starts its rasterizer pool (nproc llvmpipe threads, idle for a whole match) and the loader may order
++	// it first. Only skip them while some other supported device exists. OFF by default (round-3 behaviour: a device is
++	// created for every supported device, in the loader's order); guest flag file /tmp/metal-skip-cpu-devices turns the
++	// skip on. It is read here, at load time, because this list is built once.
++	const bool skipCPUDevices = access("/tmp/metal-skip-cpu-devices", F_OK) == 0;
++	std::vector<std::pair<VkPhysicalDevice, VkPhysicalDeviceType>> candidates;
++
+ 	for (auto&& device: physicalDevices) {
+ 		VkPhysicalDeviceProperties props;
+ 		DynamicVK::vkGetPhysicalDeviceProperties(device, &props);
+@@ -71,7 +84,18 @@ void Indium::initGlobalDeviceList() {
+ 			continue;
+ 		}
+ 
+-		globalDeviceList.push_back(std::make_shared<PrivateDevice>(std::move(device)));
++		candidates.emplace_back(device, props.deviceType);
++	}
++
++	const bool haveHardwareDevice = skipCPUDevices && std::any_of(candidates.begin(), candidates.end(), [](const auto& candidate) {
++		return candidate.second != VK_PHYSICAL_DEVICE_TYPE_CPU;
++	});
++
++	for (auto&& candidate: candidates) {
++		if (haveHardwareDevice && candidate.second == VK_PHYSICAL_DEVICE_TYPE_CPU) {
++			continue;
++		}
++		globalDeviceList.push_back(std::make_shared<PrivateDevice>(std::move(candidate.first)));
+ 	}
+ };
+ 
+@@ -83,7 +107,8 @@ Indium::Device::~Device() {};
  
  Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
  	_physicalDevice(physicalDevice)
@@ -2545,7 +2871,7 @@ index 322e186..5bc9aad 100644
  	DynamicVK::vkGetPhysicalDeviceProperties(_physicalDevice, &_properties);
  
  	std::vector<VkQueueFamilyProperties> queueFamilies;
-@@ -233,6 +236,36 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
+@@ -233,6 +258,36 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
  		}
  	}
  
@@ -2582,7 +2908,7 @@ index 322e186..5bc9aad 100644
  	VkDeviceCreateInfo deviceCreateInfo {};
  	deviceCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
  	deviceCreateInfo.pQueueCreateInfos = queueCreateInfos.data();
-@@ -246,6 +279,7 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
+@@ -246,6 +301,7 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
  	}
  
  	_features = indiumFeatures;
@@ -2590,7 +2916,7 @@ index 322e186..5bc9aad 100644
  
  	for (const auto& index: queueFamilyIndices) {
  		VkQueue queue;
-@@ -297,6 +331,9 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
+@@ -297,6 +353,9 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
  };
  
  Indium::PrivateDevice::~PrivateDevice() {
@@ -2600,7 +2926,7 @@ index 322e186..5bc9aad 100644
  	if (_oneshotCommandPool) {
  		DynamicVK::vkDestroyCommandPool(_device, _oneshotCommandPool, nullptr);
  	}
-@@ -308,6 +345,23 @@ std::string Indium::PrivateDevice::name() const {
+@@ -308,6 +367,23 @@ std::string Indium::PrivateDevice::name() const {
  	return _properties.deviceName;
  };
  
@@ -2624,7 +2950,7 @@ index 322e186..5bc9aad 100644
  std::shared_ptr<Indium::CommandQueue> Indium::PrivateDevice::newCommandQueue() {
  	return std::make_shared<PrivateCommandQueue>(shared_from_this());
  };
-@@ -317,9 +371,9 @@ std::shared_ptr<Indium::RenderPipelineState> Indium::PrivateDevice::newRenderPip
+@@ -317,9 +393,9 @@ std::shared_ptr<Indium::RenderPipelineState> Indium::PrivateDevice::newRenderPip
  };
  
  std::shared_ptr<Indium::ComputePipelineState> Indium::PrivateDevice::newComputePipelineState(const ComputePipelineDescriptor& descriptor, PipelineOption options, std::shared_ptr<ComputePipelineReflection> reflection) {
@@ -2637,7 +2963,7 @@ index 322e186..5bc9aad 100644
  	return std::make_shared<PrivateComputePipelineState>(shared_from_this(), descriptor);
  };
  
-@@ -357,6 +411,7 @@ std::shared_ptr<Indium::Library> Indium::PrivateDevice::newLibrary(const void* d
+@@ -357,6 +433,7 @@ std::shared_ptr<Indium::Library> Indium::PrivateDevice::newLibrary(const void* d
  				break;
  		}
  
@@ -2645,7 +2971,7 @@ index 322e186..5bc9aad 100644
  		funcInfo.bindings.insert(funcInfo.bindings.end(), info.bindings.begin(), info.bindings.end());
  		funcInfo.embeddedSamplers.insert(funcInfo.embeddedSamplers.end(), info.embeddedSamplers.begin(), info.embeddedSamplers.end());
  	}
-@@ -480,9 +535,18 @@ void Indium::PrivateDevice::waitForSemaphore(VkSemaphore semaphore, uint64_t tar
+@@ -480,9 +557,18 @@ void Indium::PrivateDevice::waitForSemaphore(VkSemaphore semaphore, uint64_t tar
  	wakeupEventLoop();
  };
  
@@ -2665,7 +2991,7 @@ index 322e186..5bc9aad 100644
  	VkSemaphoreTypeCreateInfo typeInfo {};
  	typeInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
  	typeInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
-@@ -505,7 +569,14 @@ Indium::TimelineSemaphore Indium::PrivateDevice::getTimelineSemaphore() {
+@@ -505,7 +591,14 @@ Indium::TimelineSemaphore Indium::PrivateDevice::getTimelineSemaphore() {
  };
  
  void Indium::PrivateDevice::putTimelineSemaphore(const TimelineSemaphore& semaphore) {
@@ -2681,7 +3007,7 @@ index 322e186..5bc9aad 100644
  };
  
  std::shared_ptr<Indium::TimelineSemaphore> Indium::PrivateDevice::getWrappedTimelineSemaphore() {
-@@ -551,3 +622,91 @@ std::shared_ptr<Indium::BinarySemaphore> Indium::PrivateDevice::getWrappedBinary
+@@ -551,3 +644,91 @@ std::shared_ptr<Indium::BinarySemaphore> Indium::PrivateDevice::getWrappedBinary
  		delete ptr;
  	});
  };
@@ -2943,7 +3269,7 @@ index d56a213..66a6019 100644
 +
 +const std::vector<Iridium::ArgumentInfo>& Indium::PrivateFunction::argumentInfo() const { return _functionInfo.arguments; }
 diff --git a/src/indium/render-command-encoder.cpp b/src/indium/render-command-encoder.cpp
-index b27ffe5..105dbc8 100644
+index b27ffe5..dd7434d 100644
 --- a/src/indium/render-command-encoder.cpp
 +++ b/src/indium/render-command-encoder.cpp
 @@ -1,3 +1,8 @@
@@ -3280,10 +3606,11 @@ index b27ffe5..105dbc8 100644
 +    for (auto pool : _retiredPools) _privateDevice->releaseDescriptorPool(pool);
  };
  
- void Indium::PrivateRenderCommandEncoder::setRenderPipelineState(std::shared_ptr<RenderPipelineState> renderPipelineState) {
+-void Indium::PrivateRenderCommandEncoder::setRenderPipelineState(std::shared_ptr<RenderPipelineState> renderPipelineState) {
 -	auto buf = _privateCommandBuffer.lock();
 -	_privatePSO = std::dynamic_pointer_cast<PrivateRenderPipelineState>(renderPipelineState);
 -	_privatePSO->recreatePipeline(_renderPass, false);
++void Indium::PrivateRenderCommandEncoder::setRenderPipelineState(const std::shared_ptr<RenderPipelineState>& renderPipelineState) {
 +    if (_privatePSO == renderPipelineState) return;
 +    // Keep each pipeline once, including all layouts and immutable samplers
 +    // referenced by earlier draws, until this encoder retires.
@@ -3628,7 +3955,8 @@ index b27ffe5..105dbc8 100644
 +	if (reuses) Indium::count("descriptorStageReuse", reuses);
  };
  
- void Indium::PrivateRenderCommandEncoder::setVertexBuffer(std::shared_ptr<Buffer> buffer, size_t offset, size_t index) {
+-void Indium::PrivateRenderCommandEncoder::setVertexBuffer(std::shared_ptr<Buffer> buffer, size_t offset, size_t index) {
++void Indium::PrivateRenderCommandEncoder::setVertexBuffer(const std::shared_ptr<Buffer>& buffer, size_t offset, size_t index) {
  	_functionResources[0].setBuffer(buffer, offset, index);
 +    resolveBuffer(0, index);
  };
@@ -3641,22 +3969,29 @@ index b27ffe5..105dbc8 100644
  	}
  };
  
-@@ -393,10 +760,12 @@ void Indium::PrivateRenderCommandEncoder::setVertexBufferOffset(size_t offset, s
+@@ -391,12 +758,14 @@ void Indium::PrivateRenderCommandEncoder::setVertexBufferOffset(size_t offset, s
+ 	_functionResources[0].setBufferOffset(offset, index);
+ };
  
- void Indium::PrivateRenderCommandEncoder::setVertexSamplerState(std::shared_ptr<SamplerState> state, size_t index) {
+-void Indium::PrivateRenderCommandEncoder::setVertexSamplerState(std::shared_ptr<SamplerState> state, size_t index) {
++void Indium::PrivateRenderCommandEncoder::setVertexSamplerState(const std::shared_ptr<SamplerState>& state, size_t index) {
  	_functionResources[0].setSamplerState(state, std::nullopt, index);
 +    resolveSampler(0, index);
  };
  
- void Indium::PrivateRenderCommandEncoder::setVertexSamplerState(std::shared_ptr<SamplerState> state, float lodMinClamp, float lodMaxClamp, size_t index) {
+-void Indium::PrivateRenderCommandEncoder::setVertexSamplerState(std::shared_ptr<SamplerState> state, float lodMinClamp, float lodMaxClamp, size_t index) {
++void Indium::PrivateRenderCommandEncoder::setVertexSamplerState(const std::shared_ptr<SamplerState>& state, float lodMinClamp, float lodMaxClamp, size_t index) {
  	_functionResources[0].setSamplerState(state, std::make_pair(lodMinClamp, lodMaxClamp), index);
 +    resolveSampler(0, index);
  };
  
  void Indium::PrivateRenderCommandEncoder::setVertexSamplerStates(const std::vector<std::shared_ptr<SamplerState>>& states, Range<size_t> range) {
-@@ -413,26 +782,32 @@ void Indium::PrivateRenderCommandEncoder::setVertexSamplerStates(const std::vect
+@@ -411,28 +780,34 @@ void Indium::PrivateRenderCommandEncoder::setVertexSamplerStates(const std::vect
+ 	}
+ };
  
- void Indium::PrivateRenderCommandEncoder::setVertexTexture(std::shared_ptr<Texture> texture, size_t index) {
+-void Indium::PrivateRenderCommandEncoder::setVertexTexture(std::shared_ptr<Texture> texture, size_t index) {
++void Indium::PrivateRenderCommandEncoder::setVertexTexture(const std::shared_ptr<Texture>& texture, size_t index) {
  	_functionResources[0].setTexture(texture, index);
 +    resolveTexture(0, index);
  };
@@ -3676,7 +4011,8 @@ index b27ffe5..105dbc8 100644
 +    resolveBuffer(1, index);
  };
  
- void Indium::PrivateRenderCommandEncoder::setFragmentBuffer(std::shared_ptr<Buffer> buffer, size_t offset, size_t index) {
+-void Indium::PrivateRenderCommandEncoder::setFragmentBuffer(std::shared_ptr<Buffer> buffer, size_t offset, size_t index) {
++void Indium::PrivateRenderCommandEncoder::setFragmentBuffer(const std::shared_ptr<Buffer>& buffer, size_t offset, size_t index) {
  	_functionResources[1].setBuffer(buffer, offset, index);
 +    resolveBuffer(1, index);
  };
@@ -3689,22 +4025,29 @@ index b27ffe5..105dbc8 100644
  	}
  };
  
-@@ -442,10 +817,12 @@ void Indium::PrivateRenderCommandEncoder::setFragmentBufferOffset(size_t offset,
+@@ -440,12 +815,14 @@ void Indium::PrivateRenderCommandEncoder::setFragmentBufferOffset(size_t offset,
+ 	_functionResources[1].setBufferOffset(offset, index);
+ };
  
- void Indium::PrivateRenderCommandEncoder::setFragmentSamplerState(std::shared_ptr<SamplerState> state, size_t index) {
+-void Indium::PrivateRenderCommandEncoder::setFragmentSamplerState(std::shared_ptr<SamplerState> state, size_t index) {
++void Indium::PrivateRenderCommandEncoder::setFragmentSamplerState(const std::shared_ptr<SamplerState>& state, size_t index) {
  	_functionResources[1].setSamplerState(state, std::nullopt, index);
 +    resolveSampler(1, index);
  };
  
- void Indium::PrivateRenderCommandEncoder::setFragmentSamplerState(std::shared_ptr<SamplerState> state, float lodMinClamp, float lodMaxClamp, size_t index) {
+-void Indium::PrivateRenderCommandEncoder::setFragmentSamplerState(std::shared_ptr<SamplerState> state, float lodMinClamp, float lodMaxClamp, size_t index) {
++void Indium::PrivateRenderCommandEncoder::setFragmentSamplerState(const std::shared_ptr<SamplerState>& state, float lodMinClamp, float lodMaxClamp, size_t index) {
  	_functionResources[1].setSamplerState(state, std::make_pair(lodMinClamp, lodMaxClamp), index);
 +    resolveSampler(1, index);
  };
  
  void Indium::PrivateRenderCommandEncoder::setFragmentSamplerStates(const std::vector<std::shared_ptr<SamplerState>>& states, Range<size_t> range) {
-@@ -462,15 +839,20 @@ void Indium::PrivateRenderCommandEncoder::setFragmentSamplerStates(const std::ve
+@@ -460,17 +837,22 @@ void Indium::PrivateRenderCommandEncoder::setFragmentSamplerStates(const std::ve
+ 	}
+ };
  
- void Indium::PrivateRenderCommandEncoder::setFragmentTexture(std::shared_ptr<Texture> texture, size_t index) {
+-void Indium::PrivateRenderCommandEncoder::setFragmentTexture(std::shared_ptr<Texture> texture, size_t index) {
++void Indium::PrivateRenderCommandEncoder::setFragmentTexture(const std::shared_ptr<Texture>& texture, size_t index) {
  	_functionResources[1].setTexture(texture, index);
 +    resolveTexture(1, index);
  };
@@ -3717,14 +4060,15 @@ index b27ffe5..105dbc8 100644
  	}
  };
  
- void Indium::PrivateRenderCommandEncoder::drawIndexedPrimitives(PrimitiveType primitiveType, size_t indexCount, IndexType indexType, std::shared_ptr<Buffer> indexBuffer, size_t indexBufferOffset, size_t instanceCount, int64_t baseVertex, size_t baseInstance) {
+-void Indium::PrivateRenderCommandEncoder::drawIndexedPrimitives(PrimitiveType primitiveType, size_t indexCount, IndexType indexType, std::shared_ptr<Buffer> indexBuffer, size_t indexBufferOffset, size_t instanceCount, int64_t baseVertex, size_t baseInstance) {
++void Indium::PrivateRenderCommandEncoder::drawIndexedPrimitives(PrimitiveType primitiveType, size_t indexCount, IndexType indexType, const std::shared_ptr<Buffer>& indexBuffer, size_t indexBufferOffset, size_t instanceCount, int64_t baseVertex, size_t baseInstance) {
 +	if (drawSkip.encoder == this && drawSkip.skip) return;
 +	beginPassIfNeeded();
 +	GpuTiming::countDraw();
  	auto buf = _privateCommandBuffer.lock();
  
  	// bind the pipeline with the right topology class for this primitive
-@@ -490,24 +872,39 @@ void Indium::PrivateRenderCommandEncoder::drawIndexedPrimitives(PrimitiveType pr
+@@ -490,39 +872,62 @@ void Indium::PrivateRenderCommandEncoder::drawIndexedPrimitives(PrimitiveType pr
  		default:
  			throw BadEnumValue();
  	}
@@ -3776,9 +4120,18 @@ index b27ffe5..105dbc8 100644
 -	_savedFunctionResources.push_back(_functionResources[1]);
  };
  
- void Indium::PrivateRenderCommandEncoder::drawIndexedPrimitives(PrimitiveType primitiveType, size_t indexCount, IndexType indexType, std::shared_ptr<Buffer> indexBuffer, size_t indexBufferOffset, size_t instanceCount) {
-@@ -521,8 +918,16 @@ void Indium::PrivateRenderCommandEncoder::drawIndexedPrimitives(PrimitiveType pr
- void Indium::PrivateRenderCommandEncoder::setDepthStencilState(std::shared_ptr<DepthStencilState> state) {
+-void Indium::PrivateRenderCommandEncoder::drawIndexedPrimitives(PrimitiveType primitiveType, size_t indexCount, IndexType indexType, std::shared_ptr<Buffer> indexBuffer, size_t indexBufferOffset, size_t instanceCount) {
++void Indium::PrivateRenderCommandEncoder::drawIndexedPrimitives(PrimitiveType primitiveType, size_t indexCount, IndexType indexType, const std::shared_ptr<Buffer>& indexBuffer, size_t indexBufferOffset, size_t instanceCount) {
+ 	drawIndexedPrimitives(primitiveType, indexCount, indexType, indexBuffer, indexBufferOffset, instanceCount, 0, 0);
+ };
+ 
+-void Indium::PrivateRenderCommandEncoder::drawIndexedPrimitives(PrimitiveType primitiveType, size_t indexCount, IndexType indexType, std::shared_ptr<Buffer> indexBuffer, size_t indexBufferOffset) {
++void Indium::PrivateRenderCommandEncoder::drawIndexedPrimitives(PrimitiveType primitiveType, size_t indexCount, IndexType indexType, const std::shared_ptr<Buffer>& indexBuffer, size_t indexBufferOffset) {
+ 	drawIndexedPrimitives(primitiveType, indexCount, indexType, indexBuffer, indexBufferOffset, 1);
+ };
+ 
+-void Indium::PrivateRenderCommandEncoder::setDepthStencilState(std::shared_ptr<DepthStencilState> state) {
++void Indium::PrivateRenderCommandEncoder::setDepthStencilState(const std::shared_ptr<DepthStencilState>& state) {
  	auto buf = _privateCommandBuffer.lock();
  	auto privateState = std::dynamic_pointer_cast<PrivateDepthStencilState>(state);
 -	auto& desc = privateState->descriptor();
@@ -3916,10 +4269,10 @@ index 71392df..d82e5f0 100644
  	info.unnormalizedCoordinates = descriptor.normalizedCoordinates ? VK_FALSE : VK_TRUE;
  
 diff --git a/src/indium/texture.cpp b/src/indium/texture.cpp
-index 1e3e971..0870d92 100644
+index 1e3e971..4db87d4 100644
 --- a/src/indium/texture.cpp
 +++ b/src/indium/texture.cpp
-@@ -1,8 +1,87 @@
+@@ -1,8 +1,90 @@
 +#include <indium/submit-batch.private.hpp>
 +#include <indium/submit-thread.private.hpp>
 +#include <indium/deferred-render-encoder.private.hpp>
@@ -3983,6 +4336,7 @@ index 1e3e971..0870d92 100644
 +		while (!list.empty()) {
 +			auto& front = list.front();
 +			if (mustWait > 0) {
++				Indium::Waits::Block block("oneshotFence");
 +				if (Indium::DynamicVK::vkWaitForFences(device->device(), 1, &front.fence, VK_TRUE, 1ull * 1000 * 1000 * 1000) != VK_SUCCESS) abort();
 +				--mustWait;
 +			} else if (Indium::DynamicVK::vkWaitForFences(device->device(), 1, &front.fence, VK_TRUE, 0) != VK_SUCCESS) { // zero timeout: a status poll
@@ -3997,6 +4351,8 @@ index 1e3e971..0870d92 100644
 +	void finishOneshot(const std::shared_ptr<Indium::PrivateDevice>& device, VkFence fence, VkCommandBuffer commandBuffer, VkImage image, std::shared_ptr<void> keepAlive) {
 +		PendingOneshot entry {fence, commandBuffer, image, std::move(keepAlive)};
 +		if (syncUploads()) {
++			// this is a GPU wait on the uploading thread; counted under /tmp/metal-debug-waits like the hand-off waits
++			Indium::Waits::Block block("oneshotFence");
 +			if (Indium::DynamicVK::vkWaitForFences(device->device(), 1, &fence, VK_TRUE, 1ull * 1000 * 1000 * 1000) != VK_SUCCESS) abort();
 +			releaseOneshot(device, entry);
 +			return;
@@ -4007,7 +4363,7 @@ index 1e3e971..0870d92 100644
  
  #include <cstring>
  
-@@ -37,8 +116,8 @@ std::shared_ptr<Indium::Texture> Indium::PrivateTexture::newTextureView(PixelFor
+@@ -37,8 +119,8 @@ std::shared_ptr<Indium::Texture> Indium::PrivateTexture::newTextureView(PixelFor
  	return newTextureView(
  		pixelFormat,
  		textureType(),
@@ -4018,7 +4374,7 @@ index 1e3e971..0870d92 100644
  	);
  };
  
-@@ -78,12 +157,16 @@ Indium::TextureView::TextureView(std::shared_ptr<PrivateTexture> original, Pixel
+@@ -78,12 +160,16 @@ Indium::TextureView::TextureView(std::shared_ptr<PrivateTexture> original, Pixel
  	_layers(layers),
  	_swizzle(swizzle)
  {
@@ -4037,7 +4393,7 @@ index 1e3e971..0870d92 100644
  	auto parentLayerEnd = parentLayerStart + _original->arrayLength() - 1;
  	auto layerStart = std::min(parentLayerStart + _layers.start, parentLayerEnd);
  	auto layerEnd = std::min(layerStart + _layers.length - 1, parentLayerEnd);
-@@ -109,9 +192,16 @@ Indium::TextureView::TextureView(std::shared_ptr<PrivateTexture> original, Pixel
+@@ -109,9 +195,16 @@ Indium::TextureView::TextureView(std::shared_ptr<PrivateTexture> original, Pixel
  		// TODO
  		abort();
  	}
@@ -4054,7 +4410,7 @@ index 1e3e971..0870d92 100644
  	DynamicVK::vkDestroyImageView(std::dynamic_pointer_cast<PrivateDevice>(_original->device())->device(), _imageView, nullptr);
  };
  
-@@ -124,15 +214,15 @@ Indium::TextureType Indium::TextureView::textureType() const {
+@@ -124,15 +217,15 @@ Indium::TextureType Indium::TextureView::textureType() const {
  };
  
  size_t Indium::TextureView::width() const {
@@ -4073,7 +4429,7 @@ index 1e3e971..0870d92 100644
  };
  
  size_t Indium::TextureView::mipmapLevelCount() const {
-@@ -326,13 +416,42 @@ Indium::ConcreteTexture::ConcreteTexture(std::shared_ptr<PrivateDevice> device,
+@@ -326,13 +419,42 @@ Indium::ConcreteTexture::ConcreteTexture(std::shared_ptr<PrivateDevice> device,
  
  	info.tiling = (descriptor.allowGPUOptimizedContents || !canBeLinear) ? VK_IMAGE_TILING_OPTIMAL : VK_IMAGE_TILING_LINEAR;
  
@@ -4120,7 +4476,7 @@ index 1e3e971..0870d92 100644
  	info.sharingMode = VK_SHARING_MODE_EXCLUSIVE; // TODO: check if this should be "concurrent" instead. i think we're good, though.
  	info.queueFamilyIndexCount = 0;
  	info.pQueueFamilyIndices = nullptr;
-@@ -373,19 +492,18 @@ Indium::ConcreteTexture::ConcreteTexture(std::shared_ptr<PrivateDevice> device,
+@@ -373,19 +495,18 @@ Indium::ConcreteTexture::ConcreteTexture(std::shared_ptr<PrivateDevice> device,
  		throw std::runtime_error("No suitable memory region found for image with requested storage mode");
  	}
  
@@ -4149,7 +4505,7 @@ index 1e3e971..0870d92 100644
  	VkCommandBufferAllocateInfo cmdBufAllocInfo {};
  	cmdBufAllocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
  	cmdBufAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-@@ -409,7 +527,7 @@ Indium::ConcreteTexture::ConcreteTexture(std::shared_ptr<PrivateDevice> device,
+@@ -409,7 +530,7 @@ Indium::ConcreteTexture::ConcreteTexture(std::shared_ptr<PrivateDevice> device,
  	barrier.srcAccessMask = VK_ACCESS_NONE;
  	barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
  	barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -4158,7 +4514,7 @@ index 1e3e971..0870d92 100644
  	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
  	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
  	barrier.image = _image;
-@@ -438,15 +556,13 @@ Indium::ConcreteTexture::ConcreteTexture(std::shared_ptr<PrivateDevice> device,
+@@ -438,15 +559,13 @@ Indium::ConcreteTexture::ConcreteTexture(std::shared_ptr<PrivateDevice> device,
  	submitInfo.commandBufferCount = 1;
  	submitInfo.pCommandBuffers = &cmdBuf;
  
@@ -4180,7 +4536,7 @@ index 1e3e971..0870d92 100644
  
  	VkImageViewCreateInfo info2 {};
  	info2.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-@@ -463,12 +579,24 @@ Indium::ConcreteTexture::ConcreteTexture(std::shared_ptr<PrivateDevice> device,
+@@ -463,12 +582,24 @@ Indium::ConcreteTexture::ConcreteTexture(std::shared_ptr<PrivateDevice> device,
  		// TODO
  		abort();
  	}
@@ -4206,7 +4562,7 @@ index 1e3e971..0870d92 100644
  };
  
  Indium::TextureType Indium::ConcreteTexture::textureType() const {
-@@ -537,7 +665,20 @@ VkImage Indium::ConcreteTexture::image() {
+@@ -537,7 +668,20 @@ VkImage Indium::ConcreteTexture::image() {
  	return _image;
  };
  
@@ -4227,7 +4583,7 @@ index 1e3e971..0870d92 100644
  	return VK_IMAGE_LAYOUT_GENERAL;
  };
  
-@@ -546,6 +687,16 @@ void Indium::ConcreteTexture::replaceRegion(Indium::Region region, size_t mipmap
+@@ -546,6 +690,16 @@ void Indium::ConcreteTexture::replaceRegion(Indium::Region region, size_t mipmap
  };
  
  void Indium::ConcreteTexture::replaceRegion(Indium::Region region, size_t mipmapLevel, size_t slice, const void* bytes, size_t bytesPerRow, size_t bytesPerImage) {
@@ -4244,7 +4600,7 @@ index 1e3e971..0870d92 100644
  	if (_storageMode != StorageMode::Managed && _storageMode != StorageMode::Shared) {
  		throw std::runtime_error("Invalid usage of replaceRegion on non-managed and non-shared texture");
  	}
-@@ -556,99 +707,109 @@ void Indium::ConcreteTexture::replaceRegion(Indium::Region region, size_t mipmap
+@@ -556,99 +710,109 @@ void Indium::ConcreteTexture::replaceRegion(Indium::Region region, size_t mipmap
  
  	auto aspect = pixelFormatToVkImageAspectFlags(_descriptor.pixelFormat);
  
@@ -5984,7 +6340,7 @@ diff --git a/private-include/indium/deferred-render-encoder.private.hpp b/privat
 new file mode 100644
 --- /dev/null
 +++ b/private-include/indium/deferred-render-encoder.private.hpp
-@@ -0,0 +1,355 @@
+@@ -0,0 +1,372 @@
 +#pragma once
 +
 +// Deferred render-command encoding.
@@ -6194,6 +6550,18 @@ new file mode 100644
 +				auto cb = st->commandBuffer;
 +				if (!_begun) { _begun = true; cb->deferredBegin(); }
 +				Buffers* chunk = _rec.release();
++				if (!cb->replayAllowed()) {
++					// an encoder dropped after the commit (a Metal contract violation): the Vulkan command buffer is
++					// closed, so drop the chunk instead of recording into it, and balance the deferred count
++					releaseBuffers(std::unique_ptr<Buffers>(chunk));
++					if (last) {
++						cb->deferredEnd();
++						st.reset();
++					}
++					if (!last) { _rec = acquireBuffers(); _r = _rec.get(); }
++					else _r = nullptr;
++					return;
++				}
 +				SubmitThread::post([st, cb, chunk, last]() mutable {
 +					std::unique_ptr<Buffers> owned(chunk);
 +					replay(*st, *owned, last);
@@ -6213,7 +6581,12 @@ new file mode 100644
 +				_r->ops.emplace_back(k);
 +				return _r->ops.back();
 +			}
-+			void addRef(Kind k, std::shared_ptr<void> ref, size_t a, size_t b) { Op& o = add(k); o.p = std::move(ref); o.n[0] = a; o.n[1] = b; }
++			// The op keeps the resource alive until the worker replays it; taking the reference
++			// straight from the caller's shared_ptr (the setters now take it by const reference)
++			// costs exactly one increment and no temporary, where the by-value form left an
++			// increment/decrement pair plus a store-to-load chain per forwarded bind.
++			template<class T>
++			void addRef(Kind k, const std::shared_ptr<T>& ref, size_t a, size_t b) { Op& o = add(k); o.p = ref; o.n[0] = a; o.n[1] = b; }
 +
 +		public:
 +			DeferredRenderCommandEncoder(std::shared_ptr<PrivateCommandBuffer> cb, const RenderPassDescriptor& d):
@@ -6228,7 +6601,7 @@ new file mode 100644
 +				_state.reset();
 +			}
 +
-+			void setRenderPipelineState(std::shared_ptr<RenderPipelineState> s) override { addRef(Kind::SetPipeline, std::move(s), 0, 0); }
++			void setRenderPipelineState(const std::shared_ptr<RenderPipelineState>& s) override { addRef(Kind::SetPipeline, s, 0, 0); }
 +			void setFrontFacingWinding(Winding w) override { add(Kind::FrontFacing).e1 = static_cast<uint32_t>(w); }
 +			void setCullMode(CullMode m) override { add(Kind::CullMode).e1 = static_cast<uint32_t>(m); }
 +			void setDepthBias(float bias, float slope, float clamp) override { Op& o = add(Kind::DepthBias); o.f[0] = bias; o.f[1] = slope; o.f[2] = clamp; }
@@ -6246,7 +6619,7 @@ new file mode 100644
 +			}
 +			void setScissorRects(const std::vector<ScissorRect>& s) override { setScissorRects(s.data(), s.size()); }
 +			void setBlendColor(float r, float g, float b, float a) override { Op& o = add(Kind::BlendColor); o.f[0] = r; o.f[1] = g; o.f[2] = b; o.f[3] = a; }
-+			void setDepthStencilState(std::shared_ptr<DepthStencilState> s) override { addRef(Kind::DepthStencil, std::move(s), 0, 0); }
++			void setDepthStencilState(const std::shared_ptr<DepthStencilState>& s) override { addRef(Kind::DepthStencil, s, 0, 0); }
 +			void setTriangleFillMode(TriangleFillMode m) override { add(Kind::FillMode).e1 = static_cast<uint32_t>(m); }
 +			void setStencilReferenceValue(uint32_t v) override { add(Kind::StencilRef).e1 = v; }
 +			void setStencilReferenceValue(uint32_t front, uint32_t back) override { Op& o = add(Kind::StencilRefFB); o.e1 = front; o.e2 = back; }
@@ -6258,17 +6631,17 @@ new file mode 100644
 +			void drawPrimitives(PrimitiveType t, size_t start, size_t count, size_t instances) override { drawPrimitives(t, start, count, instances, 0); }
 +			void drawPrimitives(PrimitiveType t, size_t start, size_t count) override { drawPrimitives(t, start, count, 1, 0); }
 +
-+			void drawIndexedPrimitives(PrimitiveType t, size_t indexCount, IndexType it, std::shared_ptr<Buffer> indexBuffer, size_t indexBufferOffset,
++			void drawIndexedPrimitives(PrimitiveType t, size_t indexCount, IndexType it, const std::shared_ptr<Buffer>& indexBuffer, size_t indexBufferOffset,
 +					size_t instanceCount, int64_t baseVertex, size_t baseInstance) override {
 +				Op& o = add(Kind::DrawIdx);
-+				o.e1 = static_cast<uint32_t>(t); o.e2 = static_cast<uint32_t>(it); o.p = std::move(indexBuffer);
++				o.e1 = static_cast<uint32_t>(t); o.e2 = static_cast<uint32_t>(it); o.p = indexBuffer;
 +				o.n[0] = indexCount; o.n[1] = indexBufferOffset; o.n[2] = instanceCount; o.n[3] = static_cast<size_t>(baseVertex); o.n[4] = baseInstance;
 +			}
-+			void drawIndexedPrimitives(PrimitiveType t, size_t indexCount, IndexType it, std::shared_ptr<Buffer> b, size_t off, size_t instances) override {
-+				drawIndexedPrimitives(t, indexCount, it, std::move(b), off, instances, 0, 0);
++			void drawIndexedPrimitives(PrimitiveType t, size_t indexCount, IndexType it, const std::shared_ptr<Buffer>& b, size_t off, size_t instances) override {
++				drawIndexedPrimitives(t, indexCount, it, b, off, instances, 0, 0);
 +			}
-+			void drawIndexedPrimitives(PrimitiveType t, size_t indexCount, IndexType it, std::shared_ptr<Buffer> b, size_t off) override {
-+				drawIndexedPrimitives(t, indexCount, it, std::move(b), off, 1, 0, 0);
++			void drawIndexedPrimitives(PrimitiveType t, size_t indexCount, IndexType it, const std::shared_ptr<Buffer>& b, size_t off) override {
++				drawIndexedPrimitives(t, indexCount, it, b, off, 1, 0, 0);
 +			}
 +
 +			void setVertexBytes(const void* bytes, size_t length, size_t index) override {
@@ -6276,14 +6649,14 @@ new file mode 100644
 +				const auto* p = static_cast<const uint8_t*>(bytes);
 +				_r->bytes.insert(_r->bytes.end(), p, p + length);
 +			}
-+			void setVertexBuffer(std::shared_ptr<Buffer> b, size_t offset, size_t index) override { addRef(Kind::VBuffer, std::move(b), offset, index); }
++			void setVertexBuffer(const std::shared_ptr<Buffer>& b, size_t offset, size_t index) override { addRef(Kind::VBuffer, b, offset, index); }
 +			void setVertexBuffers(const std::vector<std::shared_ptr<Buffer>>& b, const std::vector<size_t>& o, Range<size_t> r) override {
 +				for (size_t i = 0; i < r.length; ++i) addRef(Kind::VBuffer, b[i], o[i], r.start + i);
 +			}
 +			void setVertexBufferOffset(size_t offset, size_t index) override { Op& o = add(Kind::VBufferOffset); o.n[0] = offset; o.n[1] = index; }
-+			void setVertexSamplerState(std::shared_ptr<SamplerState> s, size_t index) override { addRef(Kind::VSampler, std::move(s), index, 0); }
-+			void setVertexSamplerState(std::shared_ptr<SamplerState> s, float lo, float hi, size_t index) override {
-+				Op& o = add(Kind::VSamplerClamp); o.p = std::move(s); o.f[0] = lo; o.f[1] = hi; o.n[0] = index;
++			void setVertexSamplerState(const std::shared_ptr<SamplerState>& s, size_t index) override { addRef(Kind::VSampler, s, index, 0); }
++			void setVertexSamplerState(const std::shared_ptr<SamplerState>& s, float lo, float hi, size_t index) override {
++				Op& o = add(Kind::VSamplerClamp); o.p = s; o.f[0] = lo; o.f[1] = hi; o.n[0] = index;
 +			}
 +			void setVertexSamplerStates(const std::vector<std::shared_ptr<SamplerState>>& s, Range<size_t> r) override {
 +				for (size_t i = 0; i < r.length; ++i) setVertexSamplerState(s[i], r.start + i);
@@ -6291,7 +6664,7 @@ new file mode 100644
 +			void setVertexSamplerStates(const std::vector<std::shared_ptr<SamplerState>>& s, const std::vector<float>& lo, const std::vector<float>& hi, Range<size_t> r) override {
 +				for (size_t i = 0; i < r.length; ++i) setVertexSamplerState(s[i], lo[i], hi[i], r.start + i);
 +			}
-+			void setVertexTexture(std::shared_ptr<Texture> t, size_t index) override { addRef(Kind::VTexture, std::move(t), index, 0); }
++			void setVertexTexture(const std::shared_ptr<Texture>& t, size_t index) override { addRef(Kind::VTexture, t, index, 0); }
 +			void setVertexTextures(const std::vector<std::shared_ptr<Texture>>& t, Range<size_t> r) override {
 +				for (size_t i = 0; i < r.length; ++i) addRef(Kind::VTexture, t[i], r.start + i, 0);
 +			}
@@ -6301,14 +6674,14 @@ new file mode 100644
 +				const auto* p = static_cast<const uint8_t*>(bytes);
 +				_r->bytes.insert(_r->bytes.end(), p, p + length);
 +			}
-+			void setFragmentBuffer(std::shared_ptr<Buffer> b, size_t offset, size_t index) override { addRef(Kind::FBuffer, std::move(b), offset, index); }
++			void setFragmentBuffer(const std::shared_ptr<Buffer>& b, size_t offset, size_t index) override { addRef(Kind::FBuffer, b, offset, index); }
 +			void setFragmentBuffers(const std::vector<std::shared_ptr<Buffer>>& b, const std::vector<size_t>& o, Range<size_t> r) override {
 +				for (size_t i = 0; i < r.length; ++i) addRef(Kind::FBuffer, b[i], o[i], r.start + i);
 +			}
 +			void setFragmentBufferOffset(size_t offset, size_t index) override { Op& o = add(Kind::FBufferOffset); o.n[0] = offset; o.n[1] = index; }
-+			void setFragmentSamplerState(std::shared_ptr<SamplerState> s, size_t index) override { addRef(Kind::FSampler, std::move(s), index, 0); }
-+			void setFragmentSamplerState(std::shared_ptr<SamplerState> s, float lo, float hi, size_t index) override {
-+				Op& o = add(Kind::FSamplerClamp); o.p = std::move(s); o.f[0] = lo; o.f[1] = hi; o.n[0] = index;
++			void setFragmentSamplerState(const std::shared_ptr<SamplerState>& s, size_t index) override { addRef(Kind::FSampler, s, index, 0); }
++			void setFragmentSamplerState(const std::shared_ptr<SamplerState>& s, float lo, float hi, size_t index) override {
++				Op& o = add(Kind::FSamplerClamp); o.p = s; o.f[0] = lo; o.f[1] = hi; o.n[0] = index;
 +			}
 +			void setFragmentSamplerStates(const std::vector<std::shared_ptr<SamplerState>>& s, Range<size_t> r) override {
 +				for (size_t i = 0; i < r.length; ++i) setFragmentSamplerState(s[i], r.start + i);
@@ -6316,7 +6689,7 @@ new file mode 100644
 +			void setFragmentSamplerStates(const std::vector<std::shared_ptr<SamplerState>>& s, const std::vector<float>& lo, const std::vector<float>& hi, Range<size_t> r) override {
 +				for (size_t i = 0; i < r.length; ++i) setFragmentSamplerState(s[i], lo[i], hi[i], r.start + i);
 +			}
-+			void setFragmentTexture(std::shared_ptr<Texture> t, size_t index) override { addRef(Kind::FTexture, std::move(t), index, 0); }
++			void setFragmentTexture(const std::shared_ptr<Texture>& t, size_t index) override { addRef(Kind::FTexture, t, index, 0); }
 +			void setFragmentTextures(std::vector<std::shared_ptr<Texture>>& t, Range<size_t> r) override {
 +				for (size_t i = 0; i < r.length; ++i) addRef(Kind::FTexture, t[i], r.start + i, 0);
 +			}
@@ -7247,7 +7620,7 @@ diff --git a/private-include/indium/submit-thread.private.hpp b/private-include/
 new file mode 100644
 --- /dev/null
 +++ b/private-include/indium/submit-thread.private.hpp
-@@ -0,0 +1,136 @@
+@@ -0,0 +1,159 @@
 +#pragma once
 +
 +// Ordered queue-submission worker.
@@ -7259,6 +7632,8 @@ new file mode 100644
 +// Every other path that touches the graphics queue (texture uploads) calls drain() first so it cannot overtake a
 +// pending commit. Opt-in: guest flag file /tmp/metal-submit-thread (checked once) enables it; the A/B showed no gain, so submission stays synchronous.
 +// Header-only with function-local statics: no class gains a member.
++
++#include <indium/waits.private.hpp>
 +
 +#include <condition_variable>
 +#include <deque>
@@ -7277,6 +7652,27 @@ new file mode 100644
 +			size_t active = 0;
 +			bool started = false;
 +			const bool enabled = access("/tmp/metal-submit-thread", F_OK) == 0;
++		};
++
++		// One-shot completion token for a queued task: the worker signals it at the end of the task, so a caller that
++		// only has to wait for *its own* commit (the present dispatch it just queued) does not wait for the tasks that
++		// were queued after it. The token must outlive the task, which the waiting caller guarantees.
++		struct Token {
++			std::mutex mutex;
++			std::condition_variable condvar;
++			bool done = false;
++			void signal() {
++				{
++					std::lock_guard<std::mutex> lock(mutex);
++					done = true;
++				}
++				condvar.notify_all();
++			}
++			// blocks until the task carrying this token has finished (counting the block under `site`)
++			void wait(const char* site) {
++				std::unique_lock<std::mutex> lock(mutex);
++				Waits::blockOn(site, condvar, lock, [this] { return done; });
++			}
 +		};
 +
 +		inline State& state() {
@@ -7376,11 +7772,11 @@ new file mode 100644
 +		}
 +
 +		// block until every task queued so far has finished (no-op on the worker itself)
-+		inline void drain() {
++		inline void drain(const char* site = "drain") {
 +			auto& s = state();
 +			if (onWorker()) return;
 +			std::unique_lock<std::mutex> lock(s.mutex);
-+			s.idle.wait(lock, [&] { return s.queue.empty() && s.active == 0; });
++			Waits::blockOn(site, s.idle, lock, [&] { return s.queue.empty() && s.active == 0; });
 +		}
 +	}
 +}
@@ -7410,3 +7806,397 @@ index b000d25..98baa9b 100644
 +		virtual void generateMipmapsForTexture(const std::shared_ptr<Texture>& texture) = 0;
  	};
  };
+diff --git a/private-include/indium/deferred-blit-encoder.private.hpp b/private-include/indium/deferred-blit-encoder.private.hpp
+new file mode 100644
+--- /dev/null
++++ b/private-include/indium/deferred-blit-encoder.private.hpp
+@@ -0,0 +1,239 @@
++#pragma once
++
++// Deferred blit-command encoding.
++//
++// A blit encoder used to record its vkCmd* calls (and their barriers) directly into the command buffer, on the game's
++// thread, after waiting for every pending render replay of that command buffer (PrivateCommandBuffer::waitDeferred()).
++// Both the wait and the driver calls are on the frame's critical path, and nothing about them has to happen there:
++// Metal only requires that the calls are applied in order before the command buffer is committed.
++//
++// This facade implements the same public BlitCommandEncoder interface by recording the calls into a compact op list
++// (holding a reference to every buffer and texture they mention) and, at endEncoding(), posting the list to the ordered
++// worker of submit-thread.private.hpp -- the same FIFO the deferred render chunks and the commit itself run on. The
++// real PrivateBlitCommandEncoder is created, fed and ended there, in command-buffer order, before the commit that
++// closes the Vulkan command buffer. The deferred count keeps waitDeferred() correct for anything that still records
++// directly (compute encoders, and every encoder while deferred render encoding is off).
++//
++// Only used while deferred render encoding is on: with it off, render encoders record into the Vulkan command buffer
++// on the calling thread, so a blit replay has to stay on that thread too (the direct path keeps its waitDeferred()).
++// OFF by default (round-3 behaviour: blit encoders record directly on the calling thread after waitDeferred()). Guest
++// flag file /tmp/metal-deferred-blit (checked once per process) turns the facade on. Round 4 had it on by default; that
++// round regressed in matches, so it is an opt-in experiment now.
++
++#include <indium/blit-command-encoder.private.hpp>
++#include <indium/buffer.hpp>
++#include <indium/command-buffer.private.hpp>
++#include <indium/submit-thread.private.hpp>
++#include <indium/texture.hpp>
++
++#include <atomic>
++#include <cstdio>
++#include <memory>
++#include <stdexcept>
++#include <unistd.h>
++#include <vector>
++
++namespace Indium {
++	namespace AsyncEncode {
++		inline bool deferBlitEnabled() {
++			static const bool value = access("/tmp/metal-deferred-blit", F_OK) == 0;
++			return value;
++		}
++
++		// Blits are short lists of large operations; one chunk per encoder (posted at endEncoding) is enough, and it
++		// keeps the whole pass on one worker task, i.e. in one command-buffer order.
++		enum class BlitKind: uint8_t {
++			BufferToBuffer, BufferToTexture, TextureToBuffer, TextureToTexture, TextureToTextureLevels, TextureToTextureRegion, Mipmaps, FillBuffer,
++		};
++
++		struct BlitOp {
++			BlitKind kind = BlitKind::BufferToBuffer;
++			uint8_t value = 0;
++			// per-kind arguments, in the order of the call (offsets, slices, levels, row/image strides)
++			size_t n[8] = {0, 0, 0, 0, 0, 0, 0, 0};
++			Origin origin {};
++			Origin destinationOrigin {};
++			Size size {};
++			Range<size_t> range {0, 0};
++			std::shared_ptr<void> source;
++			std::shared_ptr<void> destination;
++		};
++
++		// One blit pass being recorded. `real` and `failed` are only touched by the worker.
++		struct BlitState {
++			std::shared_ptr<PrivateCommandBuffer> commandBuffer;
++			BlitPassDescriptor descriptor;
++			std::shared_ptr<PrivateBlitCommandEncoder> real;
++			bool failed = false;
++			BlitState(std::shared_ptr<PrivateCommandBuffer> cb, const BlitPassDescriptor& d): commandBuffer(std::move(cb)), descriptor(d) {}
++		};
++
++		inline void blitLog(const char* message) {
++			if (FILE* f = fopen("/tmp/metal-trace.log", "a")) {
++				fprintf(f, "async-blit: %s\n", message);
++				fclose(f);
++			}
++		}
++
++		// Apply the recorded calls and end the real encoder. Runs on the worker.
++		inline void replayBlit(BlitState& st, std::vector<BlitOp>& ops) {
++			PoolScope pool;
++			if (!st.real && !st.failed) {
++				try {
++					st.real = st.commandBuffer->blitCommandEncoderNow(st.descriptor);
++				} catch (const std::exception& e) {
++					st.failed = true;
++					if (FILE* f = fopen("/tmp/metal-trace.log", "a")) { fprintf(f, "async-blit: encoder creation failed: %s\n", e.what()); fclose(f); }
++				}
++			}
++			if (st.real) {
++				PrivateBlitCommandEncoder* real = st.real.get();
++				for (BlitOp& op: ops) {
++					try {
++						switch (op.kind) {
++							case BlitKind::BufferToBuffer:
++								real->copy(std::static_pointer_cast<Buffer>(op.source), op.n[0], std::static_pointer_cast<Buffer>(op.destination), op.n[1], op.n[2]);
++								break;
++							case BlitKind::BufferToTexture:
++								real->copy(std::static_pointer_cast<Buffer>(op.source), op.n[0], op.n[1], op.n[2], op.size,
++									std::static_pointer_cast<Texture>(op.destination), op.n[3], op.n[4], op.origin);
++								break;
++							case BlitKind::TextureToBuffer:
++								real->copy(std::static_pointer_cast<Texture>(op.source), op.n[0], op.n[1], op.origin, op.size,
++									std::static_pointer_cast<Buffer>(op.destination), op.n[2], op.n[3], op.n[4]);
++								break;
++							case BlitKind::TextureToTexture:
++								real->copy(std::static_pointer_cast<Texture>(op.source), std::static_pointer_cast<Texture>(op.destination));
++								break;
++							case BlitKind::TextureToTextureLevels:
++								real->copy(std::static_pointer_cast<Texture>(op.source), op.n[0], op.n[1],
++									std::static_pointer_cast<Texture>(op.destination), op.n[2], op.n[3], op.n[4], op.n[5]);
++								break;
++							case BlitKind::TextureToTextureRegion:
++								real->copy(std::static_pointer_cast<Texture>(op.source), op.n[0], op.n[1], op.origin, op.size,
++									std::static_pointer_cast<Texture>(op.destination), op.n[2], op.n[3], op.destinationOrigin);
++								break;
++							case BlitKind::Mipmaps:
++								real->generateMipmapsForTexture(std::static_pointer_cast<Texture>(op.source));
++								break;
++							case BlitKind::FillBuffer:
++								real->fillBuffer(std::static_pointer_cast<Buffer>(op.source), op.range, op.value);
++								break;
++						}
++					} catch (const std::exception& e) {
++						if (FILE* f = fopen("/tmp/metal-trace.log", "a")) { fprintf(f, "async-blit: op %d failed: %s\n", (int) op.kind, e.what()); fclose(f); }
++					}
++				}
++				try { real->endEncoding(); } catch (...) {}
++				st.real.reset();
++			}
++		}
++
++		class DeferredBlitCommandEncoder final: public BlitCommandEncoder {
++			std::shared_ptr<BlitState> _state;
++			std::vector<BlitOp> _ops;
++			bool _begun = false;
++			bool _ended = false;
++
++			// Hand everything recorded so far to the worker. The ops own the resources they reference, so the game may
++			// release them (and us) as soon as this returns.
++			void flush() {
++				auto st = _state;
++				auto cb = st->commandBuffer;
++				if (!_begun) { _begun = true; cb->deferredBegin(); }
++				auto ops = std::make_shared<std::vector<BlitOp>>(std::move(_ops));
++				_ops.clear();
++				if (!cb->replayAllowed()) {
++					// an encoder dropped after the commit: the Vulkan command buffer is closed, so balance the deferred
++					// count and drop the ops instead of recording into it
++					blitLog("encoder dropped after commit");
++					cb->deferredEnd();
++					return;
++				}
++				SubmitThread::post([st, cb, ops]() mutable {
++					replayBlit(*st, *ops);
++					st.reset();
++					cb->deferredEnd();
++				});
++			}
++
++			BlitOp& add(BlitKind kind) {
++				_ops.emplace_back();
++				BlitOp& op = _ops.back();
++				op.kind = kind;
++				return op;
++			}
++
++		public:
++			DeferredBlitCommandEncoder(std::shared_ptr<PrivateCommandBuffer> cb, const BlitPassDescriptor& d):
++				_state(std::make_shared<BlitState>(std::move(cb), d)) {}
++			explicit DeferredBlitCommandEncoder(std::shared_ptr<PrivateCommandBuffer> cb):
++				DeferredBlitCommandEncoder(std::move(cb), BlitPassDescriptor {}) {}
++
++			~DeferredBlitCommandEncoder() override { endEncoding(); }
++
++			void endEncoding() override {
++				if (_ended) return;
++				_ended = true;
++				flush();
++				_state.reset();
++			}
++
++			// The real encoder rejects blit options; doing it here keeps the exception on the calling thread.
++			static void rejectOptions(BlitOption options) {
++				if (options != BlitOption::None) throw std::runtime_error("TODO: support blit options");
++			}
++
++			void copy(const std::shared_ptr<Buffer>& source, size_t sourceOffset, const std::shared_ptr<Buffer>& destination, size_t destinationOffset, size_t size) override {
++				BlitOp& op = add(BlitKind::BufferToBuffer);
++				op.source = source; op.destination = destination;
++				op.n[0] = sourceOffset; op.n[1] = destinationOffset; op.n[2] = size;
++			}
++			void copy(const std::shared_ptr<Buffer>& source, size_t sourceOffset, size_t sourceBytesPerRow, size_t sourceBytesPerImage, Size sourceSize, const std::shared_ptr<Texture>& destination, size_t destinationSlice, size_t destinationLevel, Origin destinationOrigin, BlitOption options = BlitOption::None) override {
++				rejectOptions(options);
++				BlitOp& op = add(BlitKind::BufferToTexture);
++				op.source = source; op.destination = destination;
++				op.n[0] = sourceOffset; op.n[1] = sourceBytesPerRow; op.n[2] = sourceBytesPerImage;
++				op.n[3] = destinationSlice; op.n[4] = destinationLevel;
++				op.origin = destinationOrigin; op.size = sourceSize;
++			}
++			void copy(const std::shared_ptr<Texture>& source, size_t sourceSlice, size_t sourceLevel, Origin sourceOrigin, Size sourceSize, const std::shared_ptr<Buffer>& destination, size_t destinationOffset, size_t destinationBytesPerRow, size_t destinationBytesPerImage, BlitOption options = BlitOption::None) override {
++				rejectOptions(options);
++				BlitOp& op = add(BlitKind::TextureToBuffer);
++				op.source = source; op.destination = destination;
++				op.n[0] = sourceSlice; op.n[1] = sourceLevel;
++				op.n[2] = destinationOffset; op.n[3] = destinationBytesPerRow; op.n[4] = destinationBytesPerImage;
++				op.origin = sourceOrigin; op.size = sourceSize;
++			}
++			void copy(const std::shared_ptr<Texture>& source, const std::shared_ptr<Texture>& destination) override {
++				BlitOp& op = add(BlitKind::TextureToTexture);
++				op.source = source; op.destination = destination;
++			}
++			void copy(const std::shared_ptr<Texture>& source, size_t sourceSlice, size_t sourceLevel, const std::shared_ptr<Texture>& destination, size_t destinationSlice, size_t destinationLevel, size_t sliceCount, size_t levelCount) override {
++				BlitOp& op = add(BlitKind::TextureToTextureLevels);
++				op.source = source; op.destination = destination;
++				op.n[0] = sourceSlice; op.n[1] = sourceLevel; op.n[2] = destinationSlice; op.n[3] = destinationLevel;
++				op.n[4] = sliceCount; op.n[5] = levelCount;
++			}
++			void copy(const std::shared_ptr<Texture>& source, size_t sourceSlice, size_t sourceLevel, Origin sourceOrigin, Size sourceSize, const std::shared_ptr<Texture>& destination, size_t destinationSlice, size_t destinationLevel, Origin destinationOrigin) override {
++				BlitOp& op = add(BlitKind::TextureToTextureRegion);
++				op.source = source; op.destination = destination;
++				op.n[0] = sourceSlice; op.n[1] = sourceLevel; op.n[2] = destinationSlice; op.n[3] = destinationLevel;
++				op.origin = sourceOrigin; op.destinationOrigin = destinationOrigin; op.size = sourceSize;
++			}
++			void fillBuffer(const std::shared_ptr<Buffer>& buffer, Range<size_t> range, uint8_t value) override {
++				// the real encoder rejects misaligned ranges; keep the exception on the calling thread
++				if ((range.start & 3) != 0) throw std::runtime_error("Misaligned fillBuffer offset");
++				if ((range.length & 3) != 0) throw std::runtime_error("Misaligned fillBuffer length");
++				BlitOp& op = add(BlitKind::FillBuffer);
++				op.source = buffer;
++				op.range = range;
++				op.value = value;
++			}
++			void generateMipmapsForTexture(const std::shared_ptr<Texture>& texture) override {
++				BlitOp& op = add(BlitKind::Mipmaps);
++				op.source = texture;
++			}
++		};
++	}
++}
+diff --git a/private-include/indium/waits.private.hpp b/private-include/indium/waits.private.hpp
+new file mode 100644
+--- /dev/null
++++ b/private-include/indium/waits.private.hpp
+@@ -0,0 +1,145 @@
++#pragma once
++
++// Wait-site counters.
++//
++// The main thread's frame budget is spent partly on blocking in our own hand-offs (the submit worker's drain, the
++// deferred-encoder sync, texture uploads) and in the compositor's drawable hand-out. A sample profile cannot attribute
++// that time (the blocked PC is inside a futex helper), so every wait site counts how often the calling thread *actually
++// blocked* and how long, and appends a summary to the guest's /tmp/metal-trace.log every 5 s.
++//
++// Everything here is always compiled in; the counters are only active when /tmp/metal-debug-waits exists when the
++// process starts (checked once). Disabled, each site costs one predictable branch: a call site must establish that it
++// is about to block (a false predicate under the lock, a free-drawable check) before it constructs a Block, and that
++// check is the only work done when the flag is absent.
++//
++// Header-only: the counter state is per dylib (each library writes its own summary), so no class gains a member. The
++// functions are declared hidden: an inline function's static locals are otherwise exported as weak definitions (even
++// under -fvisibility-inlines-hidden), and dyld coalesces those across images, so libindium and QuartzCore would share
++// one copy -- harmless only while both images were built from the same version of this header. Hidden keeps the state
++// in each image, as documented.
++//
++// Flag file pitfall (why a match can show no waits lines although the file "exists"): the guest /tmp is
++// ~/.darling/private/tmp *inside Darling's overlay mount*, i.e. the host path is the overlay's upper directory. A file
++// created there from the host while the Darling namespace is running is not guaranteed to be visible to guest
++// processes: once a guest process has looked the name up and got ENOENT, the overlay caches the negative entry and
++// keeps answering ENOENT. Create flag files from inside the guest (`darling shell touch /tmp/metal-debug-waits`) or
++// while Darling is shut down. When the counters are on, the first check writes a "waits enabled" line, so its absence
++// from /tmp/metal-trace.log means the flag was not seen.
++
++#include <chrono>
++#include <condition_variable>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <ctime>
++#include <map>
++#include <mutex>
++#include <string>
++#include <dlfcn.h>
++#include <time.h>
++#include <unistd.h>
++
++#define INDIUM_WAITS_LOCAL __attribute__((visibility("hidden")))
++
++namespace Indium {
++	namespace Waits {
++		// The summaries append to the guest's /tmp/metal-trace.log like the other diagnostics; DARLING_WAITS_LOG
++		// overrides the path so the host-side test does not append to the runtime's log. Only read when the counters
++		// are on (i.e. from the dump path).
++		INDIUM_WAITS_LOCAL inline const char* logPath() {
++			static const char* path = []() -> const char* {
++				const char* override = getenv("DARLING_WAITS_LOG");
++				return override && *override ? override : "/tmp/metal-trace.log";
++			}();
++			return path;
++		}
++
++		// Guest flag file, read once per process (per image) at the first wait site that is reached. When it is on, that
++		// first check appends one "waits enabled" line naming the image, so a match log proves the path is live even if
++		// no site ever blocks.
++		INDIUM_WAITS_LOCAL inline bool readEnabled() {
++			if (access("/tmp/metal-debug-waits", F_OK) != 0) return false;
++			Dl_info info {};
++			const char* image = dladdr(reinterpret_cast<void*>(&readEnabled), &info) && info.dli_fname ? info.dli_fname : "?";
++			if (FILE* log = fopen(logPath(), "a")) {
++				fprintf(log, "waits enabled@%ld: pid=%d image=%s\n", (long) time(nullptr), (int) getpid(), image);
++				fclose(log);
++			}
++			return true;
++		}
++
++		INDIUM_WAITS_LOCAL inline bool enabled() {
++			static const bool value = readEnabled();
++			return value;
++		}
++
++		// Monotonic nanoseconds. steady_clock is what the rest of Indium uses (libc++ maps it to CLOCK_UPTIME_RAW, i.e.
++		// mach_absolute_time, on Darwin); clock_gettime(CLOCK_MONOTONIC) is wall-clock-derived in Darwin's libc
++		// (gettimeofday minus the boot time, with a kern.boottime sysctl fallback), so it is neither monotonic nor cheap
++		// under Darling.
++		INDIUM_WAITS_LOCAL inline uint64_t now() {
++			return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
++				std::chrono::steady_clock::now().time_since_epoch()).count());
++		}
++
++		INDIUM_WAITS_LOCAL inline void record(const char* site, uint64_t nanoseconds) {
++			struct Stat { uint64_t blocks = 0, sum = 0, max = 0; };
++			static std::mutex lock;
++			static std::map<std::string, Stat> stats;
++			static time_t last = 0;
++			std::lock_guard<std::mutex> guard(lock);
++			Stat& stat = stats[site];
++			++stat.blocks;
++			stat.sum += nanoseconds;
++			if (nanoseconds > stat.max) stat.max = nanoseconds;
++			time_t now = time(nullptr);
++			if (now - last >= 5) {
++				last = now;
++				if (FILE* log = fopen(logPath(), "a")) {
++					fprintf(log, "waits@%ld:", (long) now);
++					for (auto& entry: stats) {
++						fprintf(log, " %s[n=%llu sum=%.1fus max=%.1fus]", entry.first.c_str(),
++							(unsigned long long) entry.second.blocks, entry.second.sum / 1000.0, entry.second.max / 1000.0);
++					}
++					fprintf(log, "\n");
++					fclose(log);
++				}
++				stats.clear();
++			}
++		}
++
++		// One blocking episode of `site`. The constructor checks the flag and the destructor records (a no-op when the
++		// counter is off). Use it around a wait that is known to block; blockOn()/blockOnLock() do that check for the
++		// sites where the caller cannot know in advance.
++		struct INDIUM_WAITS_LOCAL Block {
++			const char* site;
++			uint64_t start = 0;
++			explicit Block(const char* site_): site(site_) { if (enabled()) start = now(); }
++			~Block() { if (start != 0) record(site, now() - start); }
++		};
++
++		// Wait for `predicate` on `condvar`, counting the block only when the predicate is already false at the call
++		// (i.e. the wait really has to sleep). The predicate is re-checked by the wait itself, so both paths are safe.
++		template<class Predicate>
++		INDIUM_WAITS_LOCAL inline void blockOn(const char* site, std::condition_variable& condvar, std::unique_lock<std::mutex>& lock, Predicate predicate) {
++			if (!enabled() || predicate()) {
++				condvar.wait(lock, predicate);
++				return;
++			}
++			Block block(site);
++			condvar.wait(lock, predicate);
++		}
++
++		// Lock `mutex`, counting the block only when it is contended at the time of the call. try_lock only runs when
++		// the flag is on, so the disabled cost is the same single branch.
++		INDIUM_WAITS_LOCAL inline void blockOnLock(const char* site, std::mutex& mutex) {
++			if (!enabled()) {
++				mutex.lock();
++				return;
++			}
++			if (mutex.try_lock()) return;
++			Block block(site);
++			mutex.lock();
++		}
++	}
++}

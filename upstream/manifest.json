@@ -279,6 +279,7 @@
       "modified_files": 36,
       "new_files": [
         "private-include/indium/counters.private.hpp",
+        "private-include/indium/deferred-blit-encoder.private.hpp",
         "private-include/indium/deferred-render-encoder.private.hpp",
         "private-include/indium/gpu-timing.private.hpp",
         "private-include/indium/memory-pool.private.hpp",
@@ -288,7 +289,8 @@
         "private-include/indium/retirement-queue.private.hpp",
         "private-include/indium/submission-batch.private.hpp",
         "private-include/indium/submit-batch.private.hpp",
-        "private-include/indium/submit-thread.private.hpp"
+        "private-include/indium/submit-thread.private.hpp",
+        "private-include/indium/waits.private.hpp"
       ]
     }
   ],

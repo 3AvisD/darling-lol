@@ -87,3 +87,24 @@ If FPS drops back towards the 10-13 morning numbers (75–85 on Hexgate):
 3. Capture a match with `tools/riot-match-capture/sample-match.py` and compare it with an earlier one using `compare-matches.py` ([testing](TESTING.md#passive-match-capture)). A server wait above about 0.5 ms per frame means one of the local paths is off. A runqueue wait above a few percent on the main thread means the CPU is oversubscribed, for example by `/tmp/rclol-core-isolation` or background load.
 
 Compare matches on the same map: Bilgewater runs a few percent below Hexgate.
+
+On Hyprland, also check that direct scanout is off (`hyprctl getoption render:direct_scanout` prints `int: 0`). The first match with it off ran about 16 FPS faster than the previous one on the same build; see the next section.
+
+## Cursor stops changing shape in fullscreen
+
+On Hyprland the game's cursor can keep its first shape (for example, it never switches to the attack cursor) until you leave and re-enter fullscreen. Darling sends every change: `tools/riot-cursor-watch/cursor-watch.c` logs the X server's displayed cursor and saw about 1,500 changes in a 12-minute match. What freezes the shape on screen is Hyprland's direct scanout of the fullscreen Xwayland window. Turn it off in `hyprland.conf`:
+
+```
+render {
+    direct_scanout = 0
+}
+```
+
+`hyprctl keyword render:direct_scanout 0` applies it until Hyprland restarts. To check the X side yourself, build and run the watcher while playing:
+
+```sh
+cc -O2 -o build/riot-cursor-watch tools/riot-cursor-watch/cursor-watch.c -lX11 -lXfixes
+build/riot-cursor-watch
+```
+
+It prints one line per cursor change. It only listens for X server notifications and does not touch the game.

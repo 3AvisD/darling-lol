@@ -2639,10 +2639,10 @@ index 37cccb3..79b2350 100644
 -
  @end
 diff --git a/src/Metal/MTLVertexDescriptor.mm b/src/Metal/MTLVertexDescriptor.mm
-index cde968d..a3819d0 100644
+index cde968d..aa7fe05 100644
 --- a/src/Metal/MTLVertexDescriptor.mm
 +++ b/src/Metal/MTLVertexDescriptor.mm
-@@ -1,24 +1,205 @@
+@@ -1,24 +1,435 @@
  // SPDX-FileCopyrightText: 2026 Darling Developers
  // SPDX-License-Identifier: MPL-2.0
  
@@ -2656,15 +2656,25 @@ index cde968d..a3819d0 100644
 -
 -- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
 +#import <Metal/MTLVertexDescriptorInternal.h>
++#import <Metal/MTLTrace.h>
 +#import <objc/runtime.h>
 +// The bridge owns these concrete descriptor implementations. Keep their
 +// scalar storage accessible within this translation unit so reset/conversion
 +// can batch it. Subclasses continue through their public property methods.
++// Every item is created by an array for one slot, and the descriptor resets a slot by writing
++// the defaults into the item that holds it (in place, so an item a caller kept reads them back).
++// The array therefore hands each item the word and bit of the descriptor mask that reset reads
++// (`_dirtyWord`/`_dirtyBit`, see MTLVertexDescriptor below): a setter marks its own slot, and
++// reset only has to visit the slots that may differ from the defaults instead of every item in
++// the table. An item that was not handed a slot (a copy, or an array nobody owns) marks nothing,
++// which is what the "always" mask in the descriptor is for.
 +@interface MTLVertexBufferLayoutDescriptor () {
 +@public
 +    NSUInteger _stride;
 +    MTLVertexStepFunction _stepFunction;
 +    NSUInteger _stepRate;
++    uint32_t* _dirtyWord;   // the descriptor's layout mask, or NULL when the item has no slot
++    uint32_t _dirtyBit;     // 1u << slot, meaningful while _dirtyWord is not NULL
 +}
 +@end
 +@interface MTLVertexAttributeDescriptor () {
@@ -2672,12 +2682,98 @@ index cde968d..a3819d0 100644
 +    MTLVertexFormat _format;
 +    NSUInteger _offset;
 +    NSUInteger _bufferIndex;
++    uint32_t* _dirtyWord;   // the descriptor's attribute mask, or NULL when the item has no slot
++    uint32_t _dirtyBit;     // 1u << slot, meaningful while _dirtyWord is not NULL
 +}
 +@end
++// The masks that make -reset cheap, declared here so the two arrays (same file) can set them.
++// (darling-lol:) A descriptor's reset used to write the defaults into every item the arrays had
++// ever handed out - 16-31 attributes plus 16-31 layouts for the game's descriptors, each item a
++// separate allocation last touched a frame ago, i.e. a cache miss per item even though only the
++// few slots the game refilled in the previous pass could differ from the defaults. The game
++// profile put 1.5% of the main thread there (build/perf-research/metal-vdesc/REPORT.md).
++// `_attrDirty`/`_layoutDirty` name the slots whose values may differ from the defaults and must be
++// written by the next reset; `_attrPinned`/`_layoutPinned` name the slots whose item is not
++// tracked (a subclass instance, an item installed with setObject:, or a copy), which are written
++// every time. Over-marking is always safe - the reset writes the defaults either way - so the
++// only invariant that has to hold is that a slot whose value can differ from the defaults is
++// marked. Mutations mark through the item (see MTLVertexDescriptorItemTouched), which is why
++// every fallback pins the slot instead of tracking it.
++@interface MTLVertexDescriptor () {
++@public
++    MTLVertexBufferLayoutDescriptorArray* _layouts;
++    MTLVertexAttributeDescriptorArray* _attributes;
++    uint32_t _attrDirty;      // attributes: slots to write at the next reset
++    uint32_t _attrPinned;     // attributes: slots whose item cannot be tracked
++    uint32_t _layoutDirty;    // layouts: slots to write at the next reset
++    uint32_t _layoutPinned;   // layouts: slots whose item cannot be tracked
++}
++@end
++// "Is this item exactly the bridge class?" - the class that declares the plain ivars both the
++// reset and the marking write. A hook rather than the inline expression it replaces, so the host
++// model (tools/riot-metal-bind-model) can compile the helpers that call it.
++static inline bool MTLVertexBufferLayoutItemIsExactClass(const MTLVertexBufferLayoutDescriptor* item)
+ {
+-    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++    return object_getClass((id) item) == [MTLVertexBufferLayoutDescriptor class];
+ }
+-
+-- (void)forwardInvocation:(NSInvocation *)anInvocation
++static inline bool MTLVertexAttributeItemIsExactClass(const MTLVertexAttributeDescriptor* item)
+ {
+-    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++    return object_getClass((id) item) == [MTLVertexAttributeDescriptor class];
++}
++// Marking an untouched item is harmless (reset would write the same default value), so the
++// marking is allowed to over-approximate; it must never miss a mutation. See the model in
++// tools/riot-metal-bind-model/ for the mutation paths this covers.
++static inline void MTLVertexDescriptorItemTouched(uint32_t* word, uint32_t bit)
++{
++    if (word) *word |= bit;
++}
++// The decision a -setObject:atIndexedSubscript: makes for one slot: 1 when the slot's item is one
++// this descriptor tracks at exactly this slot (the caller marks the dirty bit), 2 when the slot
++// has to be pinned because the item is not trackable (a copy with no slot, an item of another
++// descriptor, or the same item at another slot). Only the concrete classes declare the two fields,
++// so a subclass instance is never passed here (see the caller).
++static inline int MTLVertexSlotTrackingFor(uint32_t* itemWord, uint32_t itemBit, uint32_t* ownerWord, uint32_t bit)
++{
++    if (!ownerWord) return 2;
++    if (!itemWord) return 2;
++    if (itemWord != ownerWord) return 2;
++    return itemBit == bit ? 1 : 2;
++}
++static bool MTLVertexDescriptorResetCounters()
++{
++    static const bool enabled = MTLDebugEnabled() || access("/tmp/metal-debug-binds", F_OK) == 0;
++    return enabled;
++}
++static void MTLVertexDescriptorResetCount(unsigned long written, unsigned long skipped)
++{
++    static std::mutex lock;
++    static unsigned long calls = 0, writtenTotal = 0, skippedTotal = 0;
++    static time_t last = 0;
++    std::lock_guard<std::mutex> guard(lock);
++    ++calls; writtenTotal += written; skippedTotal += skipped;
++    time_t now = time(nullptr);
++    if (now - last >= 3) {
++        last = now;
++        if (FILE* log = fopen("/tmp/metal-trace.log", "a")) {
++            fprintf(log, "vdesc-reset@%ld: calls=%lu slotsWritten=%lu slotsAtDefaults=%lu\n",
++                    (long) now, calls, writtenTotal, skippedTotal);
++            fclose(log);
++        }
++    }
++}
 +@implementation MTLVertexBufferLayoutDescriptor
 +@synthesize stride = _stride;
 +@synthesize stepFunction = _stepFunction;
 +@synthesize stepRate = _stepRate;
++// The setters are hand-written so they can mark their slot (over-marking never changes what a
++// reset writes); the getters stay synthesized.
++- (void)setStride:(NSUInteger)stride { MTLVertexDescriptorItemTouched(_dirtyWord, _dirtyBit); _stride = stride; }
++- (void)setStepFunction:(MTLVertexStepFunction)stepFunction { MTLVertexDescriptorItemTouched(_dirtyWord, _dirtyBit); _stepFunction = stepFunction; }
++- (void)setStepRate:(NSUInteger)stepRate { MTLVertexDescriptorItemTouched(_dirtyWord, _dirtyBit); _stepRate = stepRate; }
 +- (instancetype)init { self = [super init]; if (self) { _stepFunction = MTLVertexStepFunctionPerVertex; _stepRate = 1; } return self; }
 +- (id)copyWithZone:(NSZone*)zone { MTLVertexBufferLayoutDescriptor* copy = [[[self class] allocWithZone:zone] init]; copy.stride = _stride; copy.stepFunction = _stepFunction; copy.stepRate = _stepRate; return copy; }
 +@end
@@ -2690,6 +2786,7 @@ index cde968d..a3819d0 100644
 +    MTLVertexBufferLayoutDescriptor* _items[31];
 +    uint32_t _present;   // bit i: _items[i] exists
 +    uint32_t _concrete;  // bit i: _items[i] is exactly MTLVertexBufferLayoutDescriptor (ivars can be written directly)
++    MTLVertexDescriptor* _owner;  // the descriptor whose mask the items mark (not retained; nil after it dies)
 +}
 +- (MTLVertexBufferLayoutDescriptor*)existingObjectAtIndex:(NSUInteger)index;
 +- (void)resetAll;
@@ -2699,6 +2796,7 @@ index cde968d..a3819d0 100644
 +    MTLVertexAttributeDescriptor* _items[31];
 +    uint32_t _present;   // bit i: _items[i] exists
 +    uint32_t _concrete;  // bit i: _items[i] is exactly MTLVertexAttributeDescriptor (ivars can be written directly)
++    MTLVertexDescriptor* _owner;  // the descriptor whose mask the items mark (not retained; nil after it dies)
 +}
 +- (MTLVertexAttributeDescriptor*)existingObjectAtIndex:(NSUInteger)index;
 +- (void)resetAll;
@@ -2708,27 +2806,24 @@ index cde968d..a3819d0 100644
 +// line so the common all-concrete loop does not carry the selector references and
 +// the message-send stub in its preheader.
 +__attribute__((noinline)) static void MTLVertexBufferLayoutSetDefaults(MTLVertexBufferLayoutDescriptor* item)
- {
--    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++{
 +    item.stride = 0; item.stepFunction = MTLVertexStepFunctionPerVertex; item.stepRate = 1;
- }
--
--- (void)forwardInvocation:(NSInvocation *)anInvocation
++}
 +__attribute__((noinline)) static void MTLVertexAttributeSetDefaults(MTLVertexAttributeDescriptor* item)
- {
--    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++{
 +    item.format = MTLVertexFormatInvalid; item.offset = 0; item.bufferIndex = 0;
 +}
-+// Reset every entry the array has handed out, in place: an object a caller still
-+// holds must read back the defaults. Exact-class entries are written through
-+// their ivars; the present-but-non-concrete mask is taken once so the loop does
-+// not reload it per entry.
-+static void MTLVertexBufferLayoutArrayResetItems(MTLVertexBufferLayoutDescriptorArray* array)
++// Reset the slots whose mask bit is set, in ascending order like the old full-table loop: an
++// object a caller still holds must read back the defaults, and absent (nil) slots stay absent.
++// Exact-class entries are written through their ivars; an entry that is not exactly the bridge
++// class (a subclass an array was handed, or a graft) keeps its own property setters.
++static void MTLVertexBufferLayoutArrayResetSlots(MTLVertexBufferLayoutDescriptorArray* array, uint32_t slots)
 +{
-+    const uint32_t exotic = array->_present & ~array->_concrete;
-+    for (uint32_t bits = array->_present; bits; bits &= bits - 1) {
++    const uint32_t exotic = slots & ~array->_concrete;
++    for (uint32_t bits = slots; bits; bits &= bits - 1) {
 +        const int i = __builtin_ctz(bits);
 +        MTLVertexBufferLayoutDescriptor* item = array->_items[i];
++        if (!item) continue;
 +        if (exotic & (1u << i)) {
 +            MTLVertexBufferLayoutSetDefaults(item);
 +        } else {
@@ -2736,16 +2831,66 @@ index cde968d..a3819d0 100644
 +        }
 +    }
 +}
-+static void MTLVertexAttributeArrayResetItems(MTLVertexAttributeDescriptorArray* array)
++static void MTLVertexAttributeArrayResetSlots(MTLVertexAttributeDescriptorArray* array, uint32_t slots)
 +{
-+    const uint32_t exotic = array->_present & ~array->_concrete;
-+    for (uint32_t bits = array->_present; bits; bits &= bits - 1) {
++    const uint32_t exotic = slots & ~array->_concrete;
++    for (uint32_t bits = slots; bits; bits &= bits - 1) {
 +        const int i = __builtin_ctz(bits);
 +        MTLVertexAttributeDescriptor* item = array->_items[i];
++        if (!item) continue;
 +        if (exotic & (1u << i)) {
 +            MTLVertexAttributeSetDefaults(item);
 +        } else {
 +            item->_format = MTLVertexFormatInvalid; item->_offset = 0; item->_bufferIndex = 0;
++        }
++    }
++}
++// An item that leaves its slot (a -setObject: replaces it, or installs nil) may still be held by
++// the caller. If no slot of this array holds it any more, its mask pointer must be cleared: the
++// descriptor's -dealloc only revokes the items its arrays still hold, so a stale pointer would
++// write into the descriptor's storage after it is gone. An item that is still in a slot must keep
++// its pointer - that slot is tracked through it.
++static void MTLVertexBufferLayoutArrayRetireItem(MTLVertexBufferLayoutDescriptorArray* array, MTLVertexBufferLayoutDescriptor* item)
++{
++    if (!item || !array->_owner) return;
++    if (!MTLVertexBufferLayoutItemIsExactClass(item)) return;
++    if (item->_dirtyWord != &array->_owner->_layoutDirty) return;
++    for (int i = 0; i < 31; ++i) if (array->_items[i] == item) return;
++    item->_dirtyWord = NULL; item->_dirtyBit = 0;
++}
++static void MTLVertexAttributeArrayRetireItem(MTLVertexAttributeDescriptorArray* array, MTLVertexAttributeDescriptor* item)
++{
++    if (!item || !array->_owner) return;
++    if (!MTLVertexAttributeItemIsExactClass(item)) return;
++    if (item->_dirtyWord != &array->_owner->_attrDirty) return;
++    for (int i = 0; i < 31; ++i) if (array->_items[i] == item) return;
++    item->_dirtyWord = NULL; item->_dirtyBit = 0;
++}
++// The arrays are released with the descriptor, but a caller may hold an array (or an item) past
++// it: the array must then not reach the dead descriptor again, and an item that still points at
++// the descriptor's mask must not mark it. Both are cleared here, while the items are alive (the
++// descriptor keeps the arrays, and they keep the items).
++static void MTLVertexBufferLayoutArrayRevokeItems(MTLVertexBufferLayoutDescriptorArray* array, uint32_t* word)
++{
++    if (!array) return;
++    array->_owner = nil;
++    for (uint32_t bits = array->_present; bits; bits &= bits - 1) {
++        const int i = __builtin_ctz(bits);
++        MTLVertexBufferLayoutDescriptor* item = array->_items[i];
++        if (item && MTLVertexBufferLayoutItemIsExactClass(item) && item->_dirtyWord == word) {
++            item->_dirtyWord = NULL; item->_dirtyBit = 0;
++        }
++    }
++}
++static void MTLVertexAttributeArrayRevokeItems(MTLVertexAttributeDescriptorArray* array, uint32_t* word)
++{
++    if (!array) return;
++    array->_owner = nil;
++    for (uint32_t bits = array->_present; bits; bits &= bits - 1) {
++        const int i = __builtin_ctz(bits);
++        MTLVertexAttributeDescriptor* item = array->_items[i];
++        if (item && MTLVertexAttributeItemIsExactClass(item) && item->_dirtyWord == word) {
++            item->_dirtyWord = NULL; item->_dirtyBit = 0;
 +        }
 +    }
 +}
@@ -2755,26 +2900,52 @@ index cde968d..a3819d0 100644
 +- (void)dealloc { for (int i = 0; i < 31; ++i) [_items[i] release]; [super dealloc]; }
 +- (MTLVertexBufferLayoutDescriptor*)objectAtIndexedSubscript:(NSUInteger)index {
 +    if (index >= 31) [NSException raise:NSRangeException format:@"Vertex descriptor index %lu exceeds 30", (unsigned long)index];
-+    if (!_items[index]) { _items[index] = [MTLVertexBufferLayoutDescriptor new]; _present |= 1u << index; _concrete |= 1u << index; }
++    if (!_items[index]) {
++        _items[index] = [MTLVertexBufferLayoutDescriptor new]; _present |= 1u << index; _concrete |= 1u << index;
++        // a fresh item holds the defaults, so nothing is marked until it is written; the slot is
++        // what a later setter marks
++        if (_owner) { _items[index]->_dirtyWord = &_owner->_layoutDirty; _items[index]->_dirtyBit = 1u << index; }
++    }
 +    return _items[index];
 +}
 +- (MTLVertexBufferLayoutDescriptor*)existingObjectAtIndex:(NSUInteger)index { return index < 31 ? _items[index] : nil; }
 +// reset in place: the game calls -[MTLVertexDescriptor reset] for every draw and then refills it, so keep the objects
-+- (void)resetAll { MTLVertexBufferLayoutArrayResetItems(self); }
++- (void)resetAll {
++    MTLVertexBufferLayoutArrayResetSlots(self, _present);
++    if (_owner) _owner->_layoutDirty &= ~_present;
++}
 +- (void)setObject:(MTLVertexBufferLayoutDescriptor*)descriptor atIndexedSubscript:(NSUInteger)index {
 +    if (index >= 31) [NSException raise:NSRangeException format:@"Vertex descriptor index %lu exceeds 30", (unsigned long)index];
-+    id old = _items[index];
++    MTLVertexBufferLayoutDescriptor* old = _items[index];
 +    _items[index] = [descriptor retain];
 +    [old release];
++    MTLVertexBufferLayoutArrayRetireItem(self, old);
 +    const uint32_t bit = 1u << index;
 +    if (descriptor) _present |= bit; else _present &= ~bit;
 +    if (descriptor && object_getClass(descriptor) == [MTLVertexBufferLayoutDescriptor class]) _concrete |= bit; else _concrete &= ~bit;
++    // The next reset must write this slot unless its item is one this descriptor tracks at exactly
++    // this slot: a subclass with its own setters, an item that belongs to another descriptor or
++    // another slot, or an item with no slot at all is marked "always" instead, which keeps the
++    // reset exact (over-marking never changes what a reset writes).
++    if (_owner) {
++        if (!descriptor) {
++            _owner->_layoutDirty &= ~bit;
++            _owner->_layoutPinned &= ~bit;
++        } else {
++            const int tracking = MTLVertexBufferLayoutItemIsExactClass(descriptor)
++                ? MTLVertexSlotTrackingFor(descriptor->_dirtyWord, descriptor->_dirtyBit, &_owner->_layoutDirty, bit)
++                : 2;
++            if (tracking == 1) _owner->_layoutDirty |= bit; else _owner->_layoutPinned |= bit;
++        }
++    }
 +}
 +- (id)copyWithZone:(NSZone*)zone {
 +    MTLVertexBufferLayoutDescriptorArray* copy = [[[self class] allocWithZone:zone] init];
 +    for (int i = 0; i < 31; ++i) if (_items[i]) copy->_items[i] = [_items[i] copy];
 +    copy->_present = _present;
 +    copy->_concrete = _concrete; // -copy of a concrete item returns the same class
++    // the copied items are new objects and are not tracked; the descriptor that adopts this array
++    // binds them and marks their slots (see MTLVertexDescriptor -copyWithZone:)
 +    return copy;
 +}
 +@end
@@ -2782,25 +2953,50 @@ index cde968d..a3819d0 100644
 +@synthesize format = _format;
 +@synthesize offset = _offset;
 +@synthesize bufferIndex = _bufferIndex;
++// Hand-written for the same reason as MTLVertexBufferLayoutDescriptor's: the setter marks the
++// descriptor slot this item fills.
++- (void)setFormat:(MTLVertexFormat)format { MTLVertexDescriptorItemTouched(_dirtyWord, _dirtyBit); _format = format; }
++- (void)setOffset:(NSUInteger)offset { MTLVertexDescriptorItemTouched(_dirtyWord, _dirtyBit); _offset = offset; }
++- (void)setBufferIndex:(NSUInteger)bufferIndex { MTLVertexDescriptorItemTouched(_dirtyWord, _dirtyBit); _bufferIndex = bufferIndex; }
 +- (id)copyWithZone:(NSZone*)zone { MTLVertexAttributeDescriptor* copy = [[[self class] allocWithZone:zone] init]; copy.format = _format; copy.offset = _offset; copy.bufferIndex = _bufferIndex; return copy; }
 +@end
 +@implementation MTLVertexAttributeDescriptorArray
 +- (void)dealloc { for (int i = 0; i < 31; ++i) [_items[i] release]; [super dealloc]; }
 +- (MTLVertexAttributeDescriptor*)objectAtIndexedSubscript:(NSUInteger)index {
 +    if (index >= 31) [NSException raise:NSRangeException format:@"Vertex descriptor index %lu exceeds 30", (unsigned long)index];
-+    if (!_items[index]) { _items[index] = [MTLVertexAttributeDescriptor new]; _present |= 1u << index; _concrete |= 1u << index; }
++    if (!_items[index]) {
++        _items[index] = [MTLVertexAttributeDescriptor new]; _present |= 1u << index; _concrete |= 1u << index;
++        // a fresh item holds the defaults; the slot is what a later setter marks
++        if (_owner) { _items[index]->_dirtyWord = &_owner->_attrDirty; _items[index]->_dirtyBit = 1u << index; }
++    }
 +    return _items[index];
 +}
 +- (MTLVertexAttributeDescriptor*)existingObjectAtIndex:(NSUInteger)index { return index < 31 ? _items[index] : nil; }
-+- (void)resetAll { MTLVertexAttributeArrayResetItems(self); }
++- (void)resetAll {
++    MTLVertexAttributeArrayResetSlots(self, _present);
++    if (_owner) _owner->_attrDirty &= ~_present;
++}
 +- (void)setObject:(MTLVertexAttributeDescriptor*)descriptor atIndexedSubscript:(NSUInteger)index {
 +    if (index >= 31) [NSException raise:NSRangeException format:@"Vertex descriptor index %lu exceeds 30", (unsigned long)index];
-+    id old = _items[index];
++    MTLVertexAttributeDescriptor* old = _items[index];
 +    _items[index] = [descriptor retain];
 +    [old release];
++    MTLVertexAttributeArrayRetireItem(self, old);
 +    const uint32_t bit = 1u << index;
 +    if (descriptor) _present |= bit; else _present &= ~bit;
 +    if (descriptor && object_getClass(descriptor) == [MTLVertexAttributeDescriptor class]) _concrete |= bit; else _concrete &= ~bit;
++    // see MTLVertexBufferLayoutDescriptorArray -setObject:atIndexedSubscript: for the rule
++    if (_owner) {
++        if (!descriptor) {
++            _owner->_attrDirty &= ~bit;
++            _owner->_attrPinned &= ~bit;
++        } else {
++            const int tracking = MTLVertexAttributeItemIsExactClass(descriptor)
++                ? MTLVertexSlotTrackingFor(descriptor->_dirtyWord, descriptor->_dirtyBit, &_owner->_attrDirty, bit)
++                : 2;
++            if (tracking == 1) _owner->_attrDirty |= bit; else _owner->_attrPinned |= bit;
++        }
++    }
 +}
 +- (id)copyWithZone:(NSZone*)zone {
 +    MTLVertexAttributeDescriptorArray* copy = [[[self class] allocWithZone:zone] init];
@@ -2810,31 +3006,65 @@ index cde968d..a3819d0 100644
 +    return copy;
 +}
 +@end
++// The reset work itself, kept in a static so the host model can run the shipping code (see
++// tools/riot-metal-bind-model/extract-vertex-reset.py): the mask words name the slots whose values
++// may differ from the defaults, and the helpers write exactly those, in ascending slot order.
++static void MTLVertexDescriptorResetMarks(MTLVertexDescriptor* descriptor)
++{
++    const uint32_t layouts = descriptor->_layoutDirty | descriptor->_layoutPinned;
++    const uint32_t attributes = descriptor->_attrDirty | descriptor->_attrPinned;
++    descriptor->_layoutDirty = descriptor->_layoutPinned;
++    descriptor->_attrDirty = descriptor->_attrPinned;
++    MTLVertexBufferLayoutArrayResetSlots(descriptor->_layouts, layouts);
++    MTLVertexAttributeArrayResetSlots(descriptor->_attributes, attributes);
++    if (MTLVertexDescriptorResetCounters()) {
++        MTLVertexDescriptorResetCount(__builtin_popcount(layouts) + __builtin_popcount(attributes),
++                __builtin_popcount(descriptor->_layouts->_present & ~layouts) + __builtin_popcount(descriptor->_attributes->_present & ~attributes));
++    }
++}
++// Guest diagnosis, same shape as the bind counters in MTLRenderCommandEncoder.mm: with
++// /tmp/metal-debug-binds (or the trace flag) present every reset reports how many slots it had to
++// write and how many it left at the defaults, so the next match measures what the marks save.
++// The flag is tested inline at the call site, so an ordinary match pays one load and a branch.
 +@implementation MTLVertexDescriptor
 +@synthesize layouts = _layouts;
 +@synthesize attributes = _attributes;
 ++ (instancetype)vertexDescriptor { return [[[self alloc] init] autorelease]; }
 +- (instancetype)init { self = [super init]; if (self) [self reset]; return self; }
-+- (void)dealloc { [_layouts release]; [_attributes release]; [super dealloc]; }
++- (void)dealloc {
++    // an item (or an array) a caller kept must not reach this descriptor's storage after this
++    MTLVertexBufferLayoutArrayRevokeItems(_layouts, &_layoutDirty);
++    MTLVertexAttributeArrayRevokeItems(_attributes, &_attrDirty);
++    [_layouts release]; [_attributes release]; [super dealloc];
++}
 +- (void)reset {
 +    if (_layouts && _attributes) {
-+        // Direct call instead of [_layouts resetAll]/[_attributes resetAll]: the game
-+        // resets a vertex descriptor for every draw. Both arrays are only ever created
-+        // by -init/-reset/-copyWithZone: in this file and the two properties are
-+        // readonly, so their storage is the concrete class. The per-entry subclass
-+        // case below keeps using the property setters through their own message sends.
-+        MTLVertexBufferLayoutArrayResetItems(_layouts);
-+        MTLVertexAttributeArrayResetItems(_attributes);
++        // Only the slots whose values may differ from the defaults are written, in the same
++        // ascending order as before; the rest were left at the defaults by the previous reset (or
++        // hold a fresh item), so writing them would change nothing. The dirty marks are cleared as
++        // the slots are written; the pinned marks stay (their items are written every time).
++        MTLVertexDescriptorResetMarks(self);
 +        return;
 +    }
 +    [_layouts release]; [_attributes release];
 +    _layouts = [MTLVertexBufferLayoutDescriptorArray new];
 +    _attributes = [MTLVertexAttributeDescriptorArray new];
++    ((MTLVertexBufferLayoutDescriptorArray*)_layouts)->_owner = self;
++    ((MTLVertexAttributeDescriptorArray*)_attributes)->_owner = self;
++    _attrDirty = 0; _attrPinned = 0; _layoutDirty = 0; _layoutPinned = 0;
 +}
 +- (id)copyWithZone:(NSZone*)zone {
 +    MTLVertexDescriptor* copy = [[[self class] allocWithZone:zone] init];
 +    [copy->_layouts release]; [copy->_attributes release];
 +    copy->_layouts = [_layouts copy]; copy->_attributes = [_attributes copy];
++    // the copied items are new objects nothing tracks; bind them to the copy and let its resets
++    // write every slot they occupy (a copy is rare, and this keeps it exact without tracking it)
++    MTLVertexBufferLayoutDescriptorArray* layouts = copy->_layouts;
++    MTLVertexAttributeDescriptorArray* attributes = copy->_attributes;
++    layouts->_owner = copy;
++    attributes->_owner = copy;
++    copy->_layoutPinned = layouts->_present;
++    copy->_attrPinned = attributes->_present;
 +    return copy;
 +}
 +#if DARLING_METAL_ENABLED
