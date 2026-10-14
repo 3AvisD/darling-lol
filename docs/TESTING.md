@@ -249,6 +249,16 @@ python3 tools/riot-match-capture/profile-report.py build/logs/host-profile-<stam
 python3 tools/riot-match-capture/profile-symbols.py build/logs/host-profile-<stamp> <main tid> Metal libobjc.A.dylib libindium.dylib
 ```
 
+Hardware counters for the main thread (counting only: no samples, no addresses) show whether the game loses time to TLB misses, which decides whether huge pages for its code or heap are worth pursuing:
+
+```sh
+c++ -O2 -std=c++17 -o build/riot-hw-counters tools/riot-match-capture/hw-counters.cpp
+python3 tools/riot-match-capture/counter-match.py
+python3 tools/riot-match-capture/counter-report.py build/logs/host-counters-<stamp>.jsonl "$HOME/.darling/Applications/League of Legends.app/Contents/LoL/Logs/GameLogs/<date>"
+```
+
+The raw TLB events are AMD Zen 3 encodings. On the Ryzen 5 5500, a random-read test over 1 GiB of 4 KiB pages reports about 62 dTLB walks per 1000 instructions; the same test on huge pages reports 0.04.
+
 The profiler samples each thread's user-space instruction pointer every 1 ms on the main thread and every 4 ms on the others, with no call stacks and no registers. The wrapper records the memory map every 15 seconds so the report can attribute samples to modules. Ask the person playing before profiling their match.
 
 ## Manual game observation
