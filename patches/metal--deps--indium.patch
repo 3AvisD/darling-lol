@@ -87,30 +87,47 @@ index 900d03a..ae5eff1 100644
  	};
  
 diff --git a/private-include/indium/blit-command-encoder.private.hpp b/private-include/indium/blit-command-encoder.private.hpp
-index d6e71b2..fc19a42 100644
+index d6e71b2..ae31d39 100644
 --- a/private-include/indium/blit-command-encoder.private.hpp
 +++ b/private-include/indium/blit-command-encoder.private.hpp
-@@ -19,6 +19,11 @@ namespace Indium {
+@@ -19,21 +19,28 @@ namespace Indium {
  		std::shared_ptr<PrivateDevice> _privateDevice;
  		BlitPassDescriptor _descriptor;
  
+-		void copy(std::shared_ptr<Texture> source, size_t sourceSlice, size_t sourceLevel, Origin sourceOrigin, std::shared_ptr<Texture> destination, size_t destinationSlice, size_t destinationLevel, Origin destinationOrigin, size_t sliceCount, size_t levelCount, Size size);
 +		// destination textures that need presentation synchronization (drawables)
 +		std::vector<std::shared_ptr<Texture>> _readWriteTextures;
 +
 +		void noteDestination(const std::shared_ptr<Texture>& destination);
 +
- 		void copy(std::shared_ptr<Texture> source, size_t sourceSlice, size_t sourceLevel, Origin sourceOrigin, std::shared_ptr<Texture> destination, size_t destinationSlice, size_t destinationLevel, Origin destinationOrigin, size_t sliceCount, size_t levelCount, Size size);
++		void copy(const std::shared_ptr<Texture>& source, size_t sourceSlice, size_t sourceLevel, Origin sourceOrigin, const std::shared_ptr<Texture>& destination, size_t destinationSlice, size_t destinationLevel, Origin destinationOrigin, size_t sliceCount, size_t levelCount, Size size);
  
  	public:
-@@ -26,6 +31,8 @@ namespace Indium {
+ 		PrivateBlitCommandEncoder(std::shared_ptr<PrivateCommandBuffer> commandBuffer);
  		PrivateBlitCommandEncoder(std::shared_ptr<PrivateCommandBuffer> commandBuffer, const BlitPassDescriptor& descriptor);
  		~PrivateBlitCommandEncoder();
  
+-		virtual void copy(std::shared_ptr<Buffer> source, size_t sourceOffset, std::shared_ptr<Buffer> destination, size_t destinationOffset, size_t size) override;
+-		virtual void copy(std::shared_ptr<Buffer> source, size_t sourceOffset, size_t sourceBytesPerRow, size_t sourceBytesPerImage, Size sourceSize, std::shared_ptr<Texture> destination, size_t destinationSlice, size_t destinationLevel, Origin destinationOrigin, BlitOption options = BlitOption::None) override;
+-		virtual void copy(std::shared_ptr<Texture> source, size_t sourceSlice, size_t sourceLevel, Origin sourceOrigin, Size sourceSize, std::shared_ptr<Buffer> destination, size_t destinationOffset, size_t destinationBytesPerRow, size_t destinationBytesPerImage, BlitOption options = BlitOption::None) override;
+-		virtual void copy(std::shared_ptr<Texture> source, std::shared_ptr<Texture> destination) override;
+-		virtual void copy(std::shared_ptr<Texture> source, size_t sourceSlice, size_t sourceLevel, std::shared_ptr<Texture> destination, size_t destinationSlice, size_t destinationLevel, size_t sliceCount, size_t levelCount) override;
+-		virtual void copy(std::shared_ptr<Texture> source, size_t sourceSlice, size_t sourceLevel, Origin sourceOrigin, Size sourceSize, std::shared_ptr<Texture> destination, size_t destinationSlice, size_t destinationLevel, Origin destinationOrigin) override;
+-		virtual void fillBuffer(std::shared_ptr<Buffer> buffer, Range<size_t> range, uint8_t value) override;
+-		virtual void generateMipmapsForTexture(std::shared_ptr<Texture> texture) override;
 +		const std::vector<std::shared_ptr<Texture>>& readWriteTextures() const { return _readWriteTextures; };
 +
- 		virtual void copy(std::shared_ptr<Buffer> source, size_t sourceOffset, std::shared_ptr<Buffer> destination, size_t destinationOffset, size_t size) override;
- 		virtual void copy(std::shared_ptr<Buffer> source, size_t sourceOffset, size_t sourceBytesPerRow, size_t sourceBytesPerImage, Size sourceSize, std::shared_ptr<Texture> destination, size_t destinationSlice, size_t destinationLevel, Origin destinationOrigin, BlitOption options = BlitOption::None) override;
- 		virtual void copy(std::shared_ptr<Texture> source, size_t sourceSlice, size_t sourceLevel, Origin sourceOrigin, Size sourceSize, std::shared_ptr<Buffer> destination, size_t destinationOffset, size_t destinationBytesPerRow, size_t destinationBytesPerImage, BlitOption options = BlitOption::None) override;
++		virtual void copy(const std::shared_ptr<Buffer>& source, size_t sourceOffset, const std::shared_ptr<Buffer>& destination, size_t destinationOffset, size_t size) override;
++		virtual void copy(const std::shared_ptr<Buffer>& source, size_t sourceOffset, size_t sourceBytesPerRow, size_t sourceBytesPerImage, Size sourceSize, const std::shared_ptr<Texture>& destination, size_t destinationSlice, size_t destinationLevel, Origin destinationOrigin, BlitOption options = BlitOption::None) override;
++		virtual void copy(const std::shared_ptr<Texture>& source, size_t sourceSlice, size_t sourceLevel, Origin sourceOrigin, Size sourceSize, const std::shared_ptr<Buffer>& destination, size_t destinationOffset, size_t destinationBytesPerRow, size_t destinationBytesPerImage, BlitOption options = BlitOption::None) override;
++		virtual void copy(const std::shared_ptr<Texture>& source, const std::shared_ptr<Texture>& destination) override;
++		virtual void copy(const std::shared_ptr<Texture>& source, size_t sourceSlice, size_t sourceLevel, const std::shared_ptr<Texture>& destination, size_t destinationSlice, size_t destinationLevel, size_t sliceCount, size_t levelCount) override;
++		virtual void copy(const std::shared_ptr<Texture>& source, size_t sourceSlice, size_t sourceLevel, Origin sourceOrigin, Size sourceSize, const std::shared_ptr<Texture>& destination, size_t destinationSlice, size_t destinationLevel, Origin destinationOrigin) override;
++		virtual void fillBuffer(const std::shared_ptr<Buffer>& buffer, Range<size_t> range, uint8_t value) override;
++		virtual void generateMipmapsForTexture(const std::shared_ptr<Texture>& texture) override;
+ 
+ 		virtual void endEncoding() override;
+ 	};
 diff --git a/private-include/indium/buffer.private.hpp b/private-include/indium/buffer.private.hpp
 index a348b2b..9ad8975 100644
 --- a/private-include/indium/buffer.private.hpp
@@ -1433,7 +1450,7 @@ index 8d00405..6a5fde8 100644
  		// TODO
  		abort();
 diff --git a/src/indium/blit-command-encoder.cpp b/src/indium/blit-command-encoder.cpp
-index e58f0ba..3191023 100644
+index e58f0ba..616d177 100644
 --- a/src/indium/blit-command-encoder.cpp
 +++ b/src/indium/blit-command-encoder.cpp
 @@ -3,6 +3,7 @@
@@ -1444,7 +1461,7 @@ index e58f0ba..3191023 100644
  
  Indium::BlitCommandEncoder::~BlitCommandEncoder() {};
  
-@@ -17,6 +18,19 @@ Indium::PrivateBlitCommandEncoder::PrivateBlitCommandEncoder(std::shared_ptr<Pri
+@@ -17,14 +18,27 @@ Indium::PrivateBlitCommandEncoder::PrivateBlitCommandEncoder(std::shared_ptr<Pri
  	_descriptor(descriptor)
  	{};
  
@@ -1464,15 +1481,32 @@ index e58f0ba..3191023 100644
  Indium::PrivateBlitCommandEncoder::~PrivateBlitCommandEncoder() {
  	// nothing for now
  };
-@@ -38,6 +52,7 @@ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Buffer> source, siz
+ 
+-void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Buffer> source, size_t sourceOffset, std::shared_ptr<Buffer> destination, size_t destinationOffset, size_t size) {
++void Indium::PrivateBlitCommandEncoder::copy(const std::shared_ptr<Buffer>& source, size_t sourceOffset, const std::shared_ptr<Buffer>& destination, size_t destinationOffset, size_t size) {
+ 	auto cmdbuf = _privateCommandBuffer.lock();
+-	auto privateSource = std::dynamic_pointer_cast<PrivateBuffer>(source);
+-	auto privateDest = std::dynamic_pointer_cast<PrivateBuffer>(destination);
++	auto* privateSource = dynamic_cast<PrivateBuffer*>(source.get());
++	auto* privateDest = dynamic_cast<PrivateBuffer*>(destination.get());
+ 
+ 	VkBufferCopy info {};
+ 
+@@ -37,18 +51,18 @@ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Buffer> source, siz
+ 	DynamicVK::vkCmdCopyBuffer(cmdbuf->commandBuffer(), privateSource->buffer(), privateDest->buffer(), 1, &info);
  };
  
- void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Buffer> source, size_t sourceOffset, size_t sourceBytesPerRow, size_t sourceBytesPerImage, Size sourceSize, std::shared_ptr<Texture> destination, size_t destinationSlice, size_t destinationLevel, Origin destinationOrigin, BlitOption options) {
+-void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Buffer> source, size_t sourceOffset, size_t sourceBytesPerRow, size_t sourceBytesPerImage, Size sourceSize, std::shared_ptr<Texture> destination, size_t destinationSlice, size_t destinationLevel, Origin destinationOrigin, BlitOption options) {
++void Indium::PrivateBlitCommandEncoder::copy(const std::shared_ptr<Buffer>& source, size_t sourceOffset, size_t sourceBytesPerRow, size_t sourceBytesPerImage, Size sourceSize, const std::shared_ptr<Texture>& destination, size_t destinationSlice, size_t destinationLevel, Origin destinationOrigin, BlitOption options) {
 +	noteDestination(destination);
  	auto cmdbuf = _privateCommandBuffer.lock();
- 	auto privateSource = std::dynamic_pointer_cast<PrivateBuffer>(source);
- 	auto privateDest = std::dynamic_pointer_cast<PrivateTexture>(destination);
-@@ -47,8 +62,7 @@ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Buffer> source, siz
+-	auto privateSource = std::dynamic_pointer_cast<PrivateBuffer>(source);
+-	auto privateDest = std::dynamic_pointer_cast<PrivateTexture>(destination);
++	auto* privateSource = dynamic_cast<PrivateBuffer*>(source.get());
++	auto* privateDest = dynamic_cast<PrivateTexture*>(destination.get());
+ 
+ 	if (options != BlitOption::None) {
+ 		throw std::runtime_error("TODO: support blit options");
  	}
  
  	auto aspect = pixelFormatToVkImageAspectFlags(privateDest->pixelFormat());
@@ -1495,7 +1529,20 @@ index e58f0ba..3191023 100644
  	copyInfo.imageSubresource.aspectMask = aspect;
  	copyInfo.imageSubresource.mipLevel = destinationLevel;
  	copyInfo.imageSubresource.baseArrayLayer = destinationSlice;
-@@ -105,8 +119,7 @@ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Texture> source, si
+@@ -95,18 +109,17 @@ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Buffer> source, siz
+ 	DynamicVK::vkCmdPipelineBarrier(cmdbuf->commandBuffer(), VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+ };
+ 
+-void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Texture> source, size_t sourceSlice, size_t sourceLevel, Origin sourceOrigin, Size sourceSize, std::shared_ptr<Buffer> destination, size_t destinationOffset, size_t destinationBytesPerRow, size_t destinationBytesPerImage, BlitOption options) {
++void Indium::PrivateBlitCommandEncoder::copy(const std::shared_ptr<Texture>& source, size_t sourceSlice, size_t sourceLevel, Origin sourceOrigin, Size sourceSize, const std::shared_ptr<Buffer>& destination, size_t destinationOffset, size_t destinationBytesPerRow, size_t destinationBytesPerImage, BlitOption options) {
+ 	auto cmdbuf = _privateCommandBuffer.lock();
+-	auto privateSource = std::dynamic_pointer_cast<PrivateTexture>(source);
+-	auto privateDest = std::dynamic_pointer_cast<PrivateBuffer>(destination);
++	auto* privateSource = dynamic_cast<PrivateTexture*>(source.get());
++	auto* privateDest = dynamic_cast<PrivateBuffer*>(destination.get());
+ 
+ 	if (options != BlitOption::None) {
+ 		throw std::runtime_error("TODO: support blit options");
  	}
  
  	auto aspect = pixelFormatToVkImageAspectFlags(privateSource->pixelFormat());
@@ -1518,22 +1565,70 @@ index e58f0ba..3191023 100644
  	copyInfo.imageSubresource.aspectMask = aspect;
  	copyInfo.imageSubresource.mipLevel = sourceLevel;
  	copyInfo.imageSubresource.baseArrayLayer = sourceSlice;
-@@ -154,6 +167,7 @@ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Texture> source, si
+@@ -153,10 +166,11 @@ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Texture> source, si
+ 	DynamicVK::vkCmdPipelineBarrier(cmdbuf->commandBuffer(), VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
  };
  
- void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Texture> source, size_t sourceSlice, size_t sourceLevel, Origin sourceOrigin, std::shared_ptr<Texture> destination, size_t destinationSlice, size_t destinationLevel, Origin destinationOrigin, size_t sliceCount, size_t levelCount, Size size) {
+-void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Texture> source, size_t sourceSlice, size_t sourceLevel, Origin sourceOrigin, std::shared_ptr<Texture> destination, size_t destinationSlice, size_t destinationLevel, Origin destinationOrigin, size_t sliceCount, size_t levelCount, Size size) {
++void Indium::PrivateBlitCommandEncoder::copy(const std::shared_ptr<Texture>& source, size_t sourceSlice, size_t sourceLevel, Origin sourceOrigin, const std::shared_ptr<Texture>& destination, size_t destinationSlice, size_t destinationLevel, Origin destinationOrigin, size_t sliceCount, size_t levelCount, Size size) {
 +	noteDestination(destination);
  	auto cmdbuf = _privateCommandBuffer.lock();
- 	auto privateSource = std::dynamic_pointer_cast<PrivateTexture>(source);
- 	auto privateDest = std::dynamic_pointer_cast<PrivateTexture>(destination);
-@@ -315,6 +329,7 @@ void Indium::PrivateBlitCommandEncoder::fillBuffer(std::shared_ptr<Buffer> buffe
+-	auto privateSource = std::dynamic_pointer_cast<PrivateTexture>(source);
+-	auto privateDest = std::dynamic_pointer_cast<PrivateTexture>(destination);
++	auto* privateSource = dynamic_cast<PrivateTexture*>(source.get());
++	auto* privateDest = dynamic_cast<PrivateTexture*>(destination.get());
+ 
+ 	auto aspect = pixelFormatToVkImageAspectFlags(privateSource->pixelFormat());
+ 
+@@ -231,10 +245,10 @@ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Texture> source, si
+ 	DynamicVK::vkCmdPipelineBarrier(cmdbuf->commandBuffer(), VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, sizeof(barriers) / sizeof(*barriers), barriers);
  };
  
- void Indium::PrivateBlitCommandEncoder::generateMipmapsForTexture(std::shared_ptr<Texture> texture) {
+-void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Texture> source, std::shared_ptr<Texture> destination) {
++void Indium::PrivateBlitCommandEncoder::copy(const std::shared_ptr<Texture>& source, const std::shared_ptr<Texture>& destination) {
+ 	auto cmdbuf = _privateCommandBuffer.lock();
+-	auto privateSource = std::dynamic_pointer_cast<PrivateTexture>(source);
+-	auto privateDest = std::dynamic_pointer_cast<PrivateTexture>(destination);
++	auto* privateSource = dynamic_cast<PrivateTexture*>(source.get());
++	auto* privateDest = dynamic_cast<PrivateTexture*>(destination.get());
+ 	size_t sourceMipLevel = SIZE_MAX;
+ 	size_t destMipLevel = SIZE_MAX;
+ 
+@@ -282,18 +296,18 @@ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Texture> source, st
+ 	copy(source, 0, sourceMipLevel, Origin { 0, 0, 0 }, destination, 0, destMipLevel, Origin { 0, 0, 0 }, sliceCount, mipCount, Size { source->width() / divisor, source->height() / divisor, source->depth() / divisor });
+ };
+ 
+-void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Texture> source, size_t sourceSlice, size_t sourceLevel, std::shared_ptr<Texture> destination, size_t destinationSlice, size_t destinationLevel, size_t sliceCount, size_t levelCount) {
++void Indium::PrivateBlitCommandEncoder::copy(const std::shared_ptr<Texture>& source, size_t sourceSlice, size_t sourceLevel, const std::shared_ptr<Texture>& destination, size_t destinationSlice, size_t destinationLevel, size_t sliceCount, size_t levelCount) {
+ 	size_t divisor = static_cast<size_t>(1) << sourceLevel;
+ 	copy(source, sourceSlice, sourceLevel, Origin { 0, 0, 0 }, destination, destinationSlice, destinationLevel, Origin { 0, 0, 0 }, sliceCount, levelCount, Size { source->width() / divisor, source->height() / divisor, source->depth() / divisor });
+ };
+ 
+-void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Texture> source, size_t sourceSlice, size_t sourceLevel, Origin sourceOrigin, Size sourceSize, std::shared_ptr<Texture> destination, size_t destinationSlice, size_t destinationLevel, Origin destinationOrigin) {
++void Indium::PrivateBlitCommandEncoder::copy(const std::shared_ptr<Texture>& source, size_t sourceSlice, size_t sourceLevel, Origin sourceOrigin, Size sourceSize, const std::shared_ptr<Texture>& destination, size_t destinationSlice, size_t destinationLevel, Origin destinationOrigin) {
+ 	copy(source, sourceSlice, sourceLevel, sourceOrigin, destination, destinationSlice, destinationLevel, destinationOrigin, 1, 1, sourceSize);
+ };
+ 
+-void Indium::PrivateBlitCommandEncoder::fillBuffer(std::shared_ptr<Buffer> buffer, Range<size_t> range, uint8_t value) {
++void Indium::PrivateBlitCommandEncoder::fillBuffer(const std::shared_ptr<Buffer>& buffer, Range<size_t> range, uint8_t value) {
+ 	auto cmdbuf = _privateCommandBuffer.lock();
+-	auto privateBuffer = std::dynamic_pointer_cast<PrivateBuffer>(buffer);
++	auto* privateBuffer = dynamic_cast<PrivateBuffer*>(buffer.get());
+ 	uint32_t value32 =
+ 		((uint32_t)value << 24) |
+ 		((uint32_t)value << 16) |
+@@ -314,8 +328,9 @@ void Indium::PrivateBlitCommandEncoder::fillBuffer(std::shared_ptr<Buffer> buffe
+ 	DynamicVK::vkCmdFillBuffer(cmdbuf->commandBuffer(), privateBuffer->buffer(), range.start, range.length, value32);
+ };
+ 
+-void Indium::PrivateBlitCommandEncoder::generateMipmapsForTexture(std::shared_ptr<Texture> texture) {
+-	auto privateTexture = std::dynamic_pointer_cast<PrivateTexture>(texture);
++void Indium::PrivateBlitCommandEncoder::generateMipmapsForTexture(const std::shared_ptr<Texture>& texture) {
 +	noteDestination(texture);
- 	auto privateTexture = std::dynamic_pointer_cast<PrivateTexture>(texture);
++	auto* privateTexture = dynamic_cast<PrivateTexture*>(texture.get());
  	auto cmdbuf = _privateCommandBuffer.lock();
  
+ 	auto aspect = pixelFormatToVkImageAspectFlags(privateTexture->pixelFormat());
 @@ -439,5 +454,5 @@ void Indium::PrivateBlitCommandEncoder::generateMipmapsForTexture(std::shared_pt
  };
  
@@ -7289,3 +7384,29 @@ new file mode 100644
 +		}
 +	}
 +}
+diff --git a/include/indium/blit-command-encoder.hpp b/include/indium/blit-command-encoder.hpp
+index b000d25..98baa9b 100644
+--- a/include/indium/blit-command-encoder.hpp
++++ b/include/indium/blit-command-encoder.hpp
+@@ -28,13 +28,13 @@ namespace Indium {
+ 	public:
+ 		virtual ~BlitCommandEncoder() = 0;
+ 
+-		virtual void copy(std::shared_ptr<Buffer> source, size_t sourceOffset, std::shared_ptr<Buffer> destination, size_t destinationOffset, size_t size) = 0;
+-		virtual void copy(std::shared_ptr<Buffer> source, size_t sourceOffset, size_t sourceBytesPerRow, size_t sourceBytesPerImage, Size sourceSize, std::shared_ptr<Texture> destination, size_t destinationSlice, size_t destinationLevel, Origin destinationOrigin, BlitOption options = BlitOption::None) = 0;
+-		virtual void copy(std::shared_ptr<Texture> source, size_t sourceSlice, size_t sourceLevel, Origin sourceOrigin, Size sourceSize, std::shared_ptr<Buffer> destination, size_t destinationOffset, size_t destinationBytesPerRow, size_t destinationBytesPerImage, BlitOption options = BlitOption::None) = 0;
+-		virtual void copy(std::shared_ptr<Texture> source, std::shared_ptr<Texture> destination) = 0;
+-		virtual void copy(std::shared_ptr<Texture> source, size_t sourceSlice, size_t sourceLevel, std::shared_ptr<Texture> destination, size_t destinationSlice, size_t destinationLevel, size_t sliceCount, size_t levelCount) = 0;
+-		virtual void copy(std::shared_ptr<Texture> source, size_t sourceSlice, size_t sourceLevel, Origin sourceOrigin, Size sourceSize, std::shared_ptr<Texture> destination, size_t destinationSlice, size_t destinationLevel, Origin destinationOrigin) = 0;
+-		virtual void fillBuffer(std::shared_ptr<Buffer> buffer, Range<size_t> range, uint8_t value) = 0;
+-		virtual void generateMipmapsForTexture(std::shared_ptr<Texture> texture) = 0;
++		virtual void copy(const std::shared_ptr<Buffer>& source, size_t sourceOffset, const std::shared_ptr<Buffer>& destination, size_t destinationOffset, size_t size) = 0;
++		virtual void copy(const std::shared_ptr<Buffer>& source, size_t sourceOffset, size_t sourceBytesPerRow, size_t sourceBytesPerImage, Size sourceSize, const std::shared_ptr<Texture>& destination, size_t destinationSlice, size_t destinationLevel, Origin destinationOrigin, BlitOption options = BlitOption::None) = 0;
++		virtual void copy(const std::shared_ptr<Texture>& source, size_t sourceSlice, size_t sourceLevel, Origin sourceOrigin, Size sourceSize, const std::shared_ptr<Buffer>& destination, size_t destinationOffset, size_t destinationBytesPerRow, size_t destinationBytesPerImage, BlitOption options = BlitOption::None) = 0;
++		virtual void copy(const std::shared_ptr<Texture>& source, const std::shared_ptr<Texture>& destination) = 0;
++		virtual void copy(const std::shared_ptr<Texture>& source, size_t sourceSlice, size_t sourceLevel, const std::shared_ptr<Texture>& destination, size_t destinationSlice, size_t destinationLevel, size_t sliceCount, size_t levelCount) = 0;
++		virtual void copy(const std::shared_ptr<Texture>& source, size_t sourceSlice, size_t sourceLevel, Origin sourceOrigin, Size sourceSize, const std::shared_ptr<Texture>& destination, size_t destinationSlice, size_t destinationLevel, Origin destinationOrigin) = 0;
++		virtual void fillBuffer(const std::shared_ptr<Buffer>& buffer, Range<size_t> range, uint8_t value) = 0;
++		virtual void generateMipmapsForTexture(const std::shared_ptr<Texture>& texture) = 0;
+ 	};
+ };

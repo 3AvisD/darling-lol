@@ -78,6 +78,12 @@ A separate multi-window path stopped the active async presenter when another dif
 
 ## Lower fight FPS than Windows
 
-Host observation found substantial Darling CPU/RPC costs and main-thread socket waits, with reported fight FPS of 70–80 and quieter moments at 100–120 on the Ryzen 5 5500 / RX 6600. GPU utilization averaged about 61%; the CPU reached 92–94°C. These observations identify areas to investigate, not the full cause of every slow frame.
+The game code itself runs natively under Darling: the x86-64 slice of the universal binary executes unchanged, picks its instruction-set paths with `cpuid` on the real CPU, and sizes its worker pool from the real logical CPU count. What differs from Windows is the path around it. Every Metal call goes through Objective-C, the Metal wrapper, Indium and Vulkan instead of a native Direct3D driver, and kernel services go through the emulation and darlingserver. In an ARAM fight the game's own code now takes most of a frame; see [status](STATUS.md#game-fps-2026-10-1314) for measurements.
 
-The server now retains unused receive buffers and avoids preparing disabled debug strings. The host socket fixture reduces warmed empty receive allocations from 32 to zero and single-packet allocations from 64 to two. Normal launches also stop forcing unlimited UI frames and inspector scheduling hooks. An FPS gain has not yet been measured after activation. Compare manually played matches with the same graphics settings and record CPU/GPU utilization, temperature and memory pressure. Do not use legacy automated practice or profiling cycles.
+If FPS drops back towards the 10-13 morning numbers (75–85 on Hexgate):
+
+1. Make sure the current kernel library, Metal and Indium overlays are installed and active: exit the game and both clients, then `darling shutdown` and `sh scripts/run.sh` ([setup](SETUP.md#game-process-switches)).
+2. Check the game's line in `/tmp/rclol-game-decisions.log`: it should read `local_semaphores=1` and `core_isolation=0`. No `/tmp/rclol-no-local-*` file should exist unless you created it on purpose.
+3. Capture a match with `tools/riot-match-capture/sample-match.py` and compare it with an earlier one using `compare-matches.py` ([testing](TESTING.md#passive-match-capture)). A server wait above about 0.5 ms per frame means one of the local paths is off. A runqueue wait above a few percent on the main thread means the CPU is oversubscribed, for example by `/tmp/rclol-core-isolation` or background load.
+
+Compare matches on the same map: Bilgewater runs a few percent below Hexgate.

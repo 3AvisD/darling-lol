@@ -9,7 +9,7 @@ for line in (build/'CMakeFiles/darlingserver.dir/flags.make').read_text().splitl
  if line.startswith('CXX_') and ' = ' in line:
   k,v=line.split(' = ',1);flags[k]=shlex.split(v)
 link=shlex.split((build/'CMakeFiles/darlingserver.dir/link.txt').read_text())
-for name in ['call','message','darlingserver','process']:
+for name in ['call','message','darlingserver','process','server']:
  obj=project/f'build/riot-server-{name}.o'
  subprocess.run(['clang++',*flags['CXX_DEFINES'],*flags['CXX_INCLUDES'],*flags['CXX_FLAGS'],'-c',str(project/f'build/darling-src/src/external/darlingserver/src/{name}.cpp'),'-o',str(obj)],check=True)
  link[link.index(f'CMakeFiles/darlingserver.dir/src/{name}.cpp.o')]=str(obj)

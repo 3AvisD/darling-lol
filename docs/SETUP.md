@@ -32,13 +32,77 @@ These commands assume the pinned, patched source tree and its configured Makefil
 
 ```sh
 cmake --build build/darling-src/build --target darlingserver system_kernel --parallel 1
+python3 build/runtime/tools/build-riot-kqueue-runtime.py
 sudo python3 tools/install-riot-darling-server.py
 python3 tools/install-riot-memory-runtime.py
 ```
 
-These two Python installers derive paths from the checkout/configuration and may be run directly from `tools/`; tokenized framework builders still require their rendered copies. The server installer defaults to `/usr/local/bin/darlingserver`, saves a checksum-named backup under `build/backups/darlingserver`, and preserves active server mappings. The memory installer updates the guest `RuntimeLibraries` and per-prefix bootstrap copy of `libsystem_kernel.dylib`, plus `build/riot-libsystem_kernel.dylib` if present. It leaves the system SDK alone. Each replacement is staged and verified before installation; the memory installer prepares every destination before replacing any. Replacement is atomic per file, not a transaction across all files.
+These two Python installers derive paths from the checkout/configuration and may be run directly from `tools/`; tokenized framework builders still require their rendered copies. The server installer defaults to `/usr/local/bin/darlingserver`, saves a checksum-named backup under `build/backups/darlingserver`, and preserves active server mappings. The CMake tree is configured without an optimization level, so `build-riot-kqueue-runtime.py` relinks `build/riot-libsystem_kernel.dylib` with the per-call paths rebuilt at `-O2`; the memory installer installs that relink by default into the guest `RuntimeLibraries` and the per-prefix bootstrap copy, and never overwrites it with a different library. It leaves the system SDK alone. Each replacement is staged and verified before installation; the memory installer prepares every destination before replacing any. Replacement is atomic per file, not a transaction across all files.
 
 Memory backups default to **`build/memory-runtime-backups`**, separate from the potentially root-owned directory created by the sudo server installer. If a custom backup directory is unwritable, choose another with `--backup-dir /path/to/writable/backups`. See [permission troubleshooting](TROUBLESHOOTING.md#memory-installer-permission-denied). Neither installer stops or starts any process.
+
+### Real CPU topology and the Foundation overlay
+
+The kernel relink also reports the host's real CPU counts for `hw.*`/`machdep.cpu.*` (previously a fixed 8 logical / 8 physical MacBookPro16,1 configuration, which made the game create 7 worker threads on a 12-thread host). The memory installer above installs that library; no extra step is needed for the sysctl side. The rebuild also produces the commpage fix (`kNumCPUs`, physical/logical counts) as `build/riot-mldr`, whose SDK copy is root-owned:
+
+```sh
+sudo install -m755 build/riot-mldr /usr/local/libexec/darling/usr/libexec/darling/mldr
+```
+
+The optimized Foundation overlay is built and installed per user:
+
+```sh
+python3 build/runtime/tools/build-riot-foundation-runtime.py
+python3 tools/install-riot-foundation-runtime.py
+```
+
+The installer seeds `~/.darling/Users/<user>/RuntimeFrameworks/Foundation.framework` from the SDK (the same overlay mechanism CoreFoundation/AppKit use), replaces `Versions/C/Foundation` atomically after staging a checksum-named backup in `build/foundation-runtime-backups`, and prints JSON; `--binary`/`--backup-dir` override the defaults. Do not run it while a client is mid-update; a restart is required for activation. To A/B the old fixed CPU counts without reinstalling, run `touch /tmp/rclol-fixed-cpu-count` before starting a guest process and `rm /tmp/rclol-fixed-cpu-count` to go back to the real topology (the flag is read once per process). **The in-game FPS effect of both changes is unmeasured.** The topology change can add worker threads to the clients as well; if clients become busier during matches, use the opt-out flag for a controlled comparison. Rollbacks: `build/memory-runtime-backups` and `build/foundation-runtime-backups` hold the previous libraries; the pre-change kernel artifact is `build/perf-research/impl-cpu/riot-libsystem_kernel.dylib.before`.
+
+### Optimized libc, libm, libc++ and string-primitive overlays
+
+Four more libraries have optimized overlays. They are built from the configured tree without a full CMake rebuild:
+
+```sh
+sh build/runtime/tools/build-riot-libs-runtime.sh
+python3 build/runtime/tools/install-riot-libs-runtime.py
+```
+
+The builders recompile libsystem_c (618 of its 641 objects), libc++ and libc++abi (38 and 18) and the libsystem_platform string primitives at `-O2`, each object with its own configured defines, includes and per-file options, and relink with the configured link line. `-fno-strict-aliasing` is added for this old BSD C and no `-DNDEBUG`, `-ffast-math` or LTO is. Files whose correctness depends on frame layout, on running in a forked child, or on the floating-point environment keep their configured flags: the fork paths and the stack guard handler in libc and the frame-pointer backtrace walker. libsystem_m is not rebuilt: its sources are built at `-O0` upstream, and an `-O2` rebuild made the Riot client UI render a black window. The libkqueue objects libsystem_c also links belong to the kernel library's target and are left alone. Each builder stops while a League game process is running, because compiling would skew the FPS the user measures.
+
+The installer writes the four files into `~/.darling/Users/<user>/RuntimeLibraries`, the directory the launcher puts in `DYLD_LIBRARY_PATH`; dyld searches those directories by leaf name before the install path, which is why an overlay there replaces the prefix and SDK copies of `libsystem_c.dylib`, `libc++.1.dylib`, `libc++abi.dylib` and `libsystem_platform.dylib` without touching either. Every replaced file is backed up first (`build/libs-runtime-backups`), the staged file is verified against the built artifact, and the rename is atomic. The installer never stops a process, so a running guest keeps the library it already loaded; exit the game and both clients and restart the namespace for activation. One command restores the previous state:
+
+```sh
+python3 build/runtime/tools/install-riot-libs-runtime.py --rollback
+```
+
+`--rollback` restores every file this installer replaced and removes the ones it created, so the SDK copy is used again. The policy and the rollback are checked offline by `python3 tools/riot-libs-installer-offline-check.py`, and each artifact is compared with the library it replaces by `python3 tools/riot_overlay_verify.py <artifact> <effective>` (same install name, versions, dependencies, re-exports, segment protections and exported symbols, no new undefined symbol). **The in-game FPS effect of these overlays is unmeasured.** The per-call effect of the string primitives is measured on the host (`build/riot-platform-memory-bench`); see [testing](TESTING.md#optimized-library-overlays-and-string-primitives).
+
+### Metal and Indium overlays
+
+The Metal wrapper and Indium share a private blit interface, so install them as a pair:
+
+```sh
+python3 build/runtime/tools/build-riot-indium-runtime.py
+python3 build/runtime/tools/build-riot-metal-runtime.py
+sh build/runtime/tools/install-riot-metal-pair.sh
+```
+
+The installer copies `build/riot-Metal` and `build/riot-libindium.dylib` into the guest `RuntimeFrameworks/Metal.framework` and `RuntimeLibraries`. It backs up the pair it replaces in `build/metal-pair-backups`; a repeated install keeps the older backup. `sh build/runtime/tools/install-riot-metal-pair.sh --rollback` restores that backup. `tools/install-riot-gpu-runtime.sh` still builds and installs the whole GPU set, including these two. Activation needs the namespace restart below.
+
+### Game-process switches
+
+The kernel library decides these once when a process starts, and only for the League game process (`.../LeagueofLegends.app/Contents/MacOS/LeagueofLegends`). The Riot and League clients keep the server path. Each switch is a host file, so it takes effect at the next game start without reinstalling:
+
+| Path | Default in the game | Host file |
+|---|---|---|
+| Local pthread mutexes (first-fit) | on | `/tmp/rclol-no-local-mutex` turns it off |
+| Local condition variables | on | `/tmp/rclol-no-local-condvars` turns it off |
+| Local Mach semaphores | on | `/tmp/rclol-no-local-semaphores` turns it off |
+| Core isolation of the main thread | off | `/tmp/rclol-core-isolation` turns it on (it lowered FPS) |
+| Region-query pacing (50 µs) | on | `/tmp/rclol-region-pace-us` overrides the interval |
+| Main-thread RPC reply polling | off | `/tmp/rclol-rpc-spin-us` (µs, at most 500) turns it on |
+
+The former opt-in files `/tmp/rclol-local-mutex`, `/tmp/rclol-local-condvars` and `/tmp/rclol-local-semaphores` are ignored. Each game start appends its decisions to `/tmp/rclol-game-decisions.log`, for example `local_semaphores=1` and `core_isolation=0 errno=-1`. `-all` variants (`/tmp/rclol-local-mutex-all` and the like) enable a local path in every process; they exist for probe tests and are not for normal play.
 
 An on-disk update is not activation. Existing processes keep their old executable/library mappings, and Darling's active overlay can expose an old library even to a new guest process. After manually exiting the game and both Riot/League clients, restart the entire namespace:
 

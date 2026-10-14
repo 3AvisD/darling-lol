@@ -102,7 +102,7 @@
       "revision": "89751e64bc6c2082f7725061824ee0e33395b0de",
       "repository": "https://github.com/darlinghq/darlingserver.git",
       "patch": "patches/darlingserver.patch",
-      "modified_files": 34,
+      "modified_files": 36,
       "new_files": [
         "duct-tape/src/fileport.c"
       ]
@@ -180,8 +180,10 @@
       "revision": "5a3e5b529d25c70257dcfa97e94f1826e71e9f40",
       "repository": "https://github.com/darlinghq/darling-libplatform.git",
       "patch": "patches/libplatform.patch",
-      "modified_files": 3,
-      "new_files": []
+      "modified_files": 6,
+      "new_files": [
+        "private/platform/string_avx2.h"
+      ]
     },
     {
       "path": "src/external/libpthread",
@@ -256,15 +258,16 @@
       "revision": "fa29287aa2f0115271e091f1031f53c9e024005d",
       "repository": "https://github.com/darlinghq/darling-xnu.git",
       "patch": "patches/xnu.patch",
-      "modified_files": 63,
+      "modified_files": 64,
       "new_files": [
-        "darling/src/libsystem_kernel/emulation/include/conversion/xattr/name.h",
-        "darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/mac_syscall.h",
-        "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/mac_syscall.c",
+        "darling/src/libsystem_kernel/emulation/include/common/cpu_topology.h",
         "darling/src/libsystem_kernel/emulation/include/common/private_mutex.h",
         "darling/src/libsystem_kernel/emulation/include/common/slowwait.h",
+        "darling/src/libsystem_kernel/emulation/include/conversion/xattr/name.h",
         "darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/guarded/change_fdguard_np.h",
+        "darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/mac_syscall.h",
         "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/guarded/change_fdguard_np.c",
+        "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/mac_syscall.c",
         "libsyscall/wrappers/__sysctlbyname.S"
       ]
     },
@@ -273,7 +276,7 @@
       "revision": "8423a7d2f053167030d2bc4a227f96243c740667",
       "repository": "https://github.com/darlinghq/indium.git",
       "patch": "patches/metal--deps--indium.patch",
-      "modified_files": 35,
+      "modified_files": 36,
       "new_files": [
         "private-include/indium/counters.private.hpp",
         "private-include/indium/deferred-render-encoder.private.hpp",

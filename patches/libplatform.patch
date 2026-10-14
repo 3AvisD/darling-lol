@@ -1,8 +1,8 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 54d2843..b6ec62e 100644
+index 54d2843..cb87d13 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -127,3 +127,12 @@ if (BUILD_TARGET_64BIT)
+@@ -127,3 +127,27 @@ if (BUILD_TARGET_64BIT)
  endif (BUILD_TARGET_64BIT)
  
  install(TARGETS platform DESTINATION libexec/darling/usr/lib/system)
@@ -11,26 +11,316 @@ index 54d2843..b6ec62e 100644
 +# otherwise unoptimized development build. Disable builtin recognition so
 +# optimizing their loops cannot introduce recursive libc calls.
 +set_source_files_properties(
++    src/string/generic/bzero.c
++    src/string/generic/ffsll.c
++    src/string/generic/flsll.c
++    src/string/generic/memccpy.c
++    src/string/generic/memchr.c
++    src/string/generic/memcmp.c
 +    src/string/generic/memmove.c
 +    src/string/generic/memset_pattern.c
-+    src/string/generic/bzero.c
++    src/string/generic/strchr.c
++    src/string/generic/strcmp.c
++    src/string/generic/strcpy.c
++    src/string/generic/strlcat.c
++    src/string/generic/strlcpy.c
++    src/string/generic/strlen.c
++    src/string/generic/strncmp.c
++    src/string/generic/strncpy.c
++    src/string/generic/strnlen.c
++    src/string/generic/strstr.c
 +    PROPERTIES COMPILE_OPTIONS "-O2;-fno-builtin")
+diff --git a/private/platform/string_avx2.h b/private/platform/string_avx2.h
+new file mode 100644
+index 0000000..32cdf76
+--- /dev/null
++++ b/private/platform/string_avx2.h
+@@ -0,0 +1,142 @@
++/*
++ * AVX2 primitives for the x86_64 string routines.
++ *
++ * Every _PLATFORM_OPTIMIZED_* selector is 0, so the guest's memcpy, memmove,
++ * memset, bzero, memcmp and memchr all land in the generic loops next to this
++ * header. Those loops move at most one word per iteration and have no wide
++ * path at all; the routines below add one, selected at run time from the
++ * commpage capability word (the same word OSAtomicFifo.c reads).
++ *
++ * mldr maps the commpage and writes the capability word before it loads dyld
++ * or any other library (startup/mldr/mldr.c:commpage_setup), and a word that
++ * has not been written yet - it is zero - selects the generic loop, so the
++ * primitives stay usable on an early or unusual path.
++ *
++ * Every routine below keeps the exact semantics of the routine it
++ * accelerates: it reads and writes [dst, dst+n) and [src, src+n) only, nothing
++ * outside them, including the last short copy, so no page boundary is ever
++ * crossed. No routine calls out of this library, so all of them stay
++ * async-signal safe.
++ */
++
++#ifndef _PLATFORM_STRING_AVX2_H_
++#define _PLATFORM_STRING_AVX2_H_
++
++#include <platform/string.h>
++
++#if defined(__x86_64__)
++
++#include <stdint.h>
++#include <immintrin.h>
++#include <i386/cpu_capabilities.h>
++
++void *_platform_memmove_avx2(void *dst, const void *src, size_t n);
++void *_platform_memset_avx2(void *b, int c, size_t n);
++int _platform_memcmp_avx2(const void *s1, const void *s2, size_t n);
++void *_platform_memchr_avx2(const void *s, int c, size_t n);
++
++/* The width all of these move, and the number of bytes one iteration of the
++   wide loops moves. */
++#define PLATFORM_MEM_VECTOR	32
++#define PLATFORM_MEM_STEP	64
++
++/*
++ * The capability word is read once and cached. Two threads can store the same
++ * value at the same time, which is harmless; a zero word is re-read, so a
++ * process that starts using a primitive before the word is filled in keeps
++ * falling back until it is.
++ */
++static inline uint64_t
++platform_cpu_capabilities(void)
++{
++	static volatile uint64_t capabilities;
++
++	uint64_t caps = capabilities;
++
++	if (__builtin_expect(caps == 0, 0)) {
++		caps = *(const volatile uint64_t *)(uintptr_t)_COMM_PAGE_CPU_CAPABILITIES64;
++		capabilities = caps;
++	}
++	return (caps);
++}
++
++static inline int
++platform_has_avx2(void)
++{
++	return ((platform_cpu_capabilities() & kHasAVX2_0) != 0);
++}
++
++/*
++ * Copies of fewer than 32 bytes as 8, 4, 2 and 1 byte moves. Every load is
++ * issued before the stores that could overwrite its bytes, so head and tail
++ * may overlap each other and the copy is correct in either direction; all
++ * loads and stores stay inside [source, source+length).
++ */
++typedef unsigned long long __attribute__((aligned(1), may_alias)) platform_u64u;
++typedef unsigned int __attribute__((aligned(1), may_alias)) platform_u32u;
++typedef unsigned short __attribute__((aligned(1), may_alias)) platform_u16u;
++
++static inline void
++platform_copy_short(unsigned char *destination, const unsigned char *source,
++                    size_t length)
++{
++	if (length >= 16) {
++		const unsigned long long first = *(const platform_u64u *)source;
++		const unsigned long long second = *(const platform_u64u *)(source + 8);
++		const unsigned long long low = *(const platform_u64u *)(source + length - 16);
++		const unsigned long long high = *(const platform_u64u *)(source + length - 8);
++		*(platform_u64u *)destination = first;
++		*(platform_u64u *)(destination + 8) = second;
++		*(platform_u64u *)(destination + length - 16) = low;
++		*(platform_u64u *)(destination + length - 8) = high;
++	} else if (length >= 8) {
++		const unsigned long long first = *(const platform_u64u *)source;
++		const unsigned long long last = *(const platform_u64u *)(source + length - 8);
++		*(platform_u64u *)destination = first;
++		*(platform_u64u *)(destination + length - 8) = last;
++	} else if (length >= 4) {
++		const unsigned first = *(const platform_u32u *)source;
++		const unsigned last = *(const platform_u32u *)(source + length - 4);
++		*(platform_u32u *)destination = first;
++		*(platform_u32u *)(destination + length - 4) = last;
++	} else if (length >= 2) {
++		const unsigned short first = *(const platform_u16u *)source;
++		const unsigned short last = *(const platform_u16u *)(source + length - 2);
++		*(platform_u16u *)destination = first;
++		*(platform_u16u *)(destination + length - 2) = last;
++	} else if (length != 0) {
++		destination[0] = source[0];
++	}
++}
++
++/*
++ * Fills of fewer than 32 bytes with 8, 4, 2 and 1 byte stores. A fill may
++ * write its last bytes twice, so the overlapping store needs no extra care.
++ */
++static inline void
++platform_fill_short(unsigned char *destination, unsigned char value, size_t length)
++{
++	const unsigned long long wide = 0x0101010101010101ull * value;
++
++	if (length >= 16) {
++		*(platform_u64u *)destination = wide;
++		*(platform_u64u *)(destination + 8) = wide;
++		*(platform_u64u *)(destination + length - 16) = wide;
++		*(platform_u64u *)(destination + length - 8) = wide;
++	} else if (length >= 8) {
++		*(platform_u64u *)destination = wide;
++		*(platform_u64u *)(destination + length - 8) = wide;
++	} else if (length >= 4) {
++		*(platform_u32u *)destination = (unsigned)(wide & 0xffffffffu);
++		*(platform_u32u *)(destination + length - 4) = (unsigned)(wide & 0xffffffffu);
++	} else if (length >= 2) {
++		*(platform_u16u *)destination = (unsigned short)(wide & 0xffffu);
++		*(platform_u16u *)(destination + length - 2) = (unsigned short)(wide & 0xffffu);
++	} else if (length != 0) {
++		destination[0] = value;
++	}
++}
++
++#endif /* __x86_64__ */
++
++#endif /* _PLATFORM_STRING_AVX2_H_ */
+diff --git a/src/string/generic/bzero.c b/src/string/generic/bzero.c
+index 4559dde..b059fb4 100644
+--- a/src/string/generic/bzero.c
++++ b/src/string/generic/bzero.c
+@@ -23,6 +23,10 @@
+ 
+ #include <platform/string.h>
+ 
++#if defined(__x86_64__)
++#include <platform/string_avx2.h>
++#endif
++
+ #if !VARIANT_STATIC
+ // to satisfy compiler-generated memset inside libplatform (e.g. makecontext)
+ __attribute__((visibility("hidden")))
+@@ -35,10 +39,51 @@ memset(void *b, int c, size_t len)
+ 
+ #if !_PLATFORM_OPTIMIZED_MEMSET
+ 
++#if defined(__x86_64__)
++/*
++ * A fill has no overlap to preserve, so the vector and string-engine paths
++ * below write 32 bytes at a time and let the last store overlap the ones
++ * before it. Only [b, b+len) is written.
++ */
++__attribute__((target("avx2"), visibility("hidden")))
++void *
++_platform_memset_avx2(void *b, int c, size_t len)
++{
++	const __m256i pattern = _mm256_set1_epi8((char)c);
++	unsigned char *destination = (unsigned char *)b;
++	size_t filled = 0;
++
++	while (len - filled >= PLATFORM_MEM_STEP) {
++		_mm256_storeu_si256((__m256i *)(void *)(destination + filled), pattern);
++		_mm256_storeu_si256((__m256i *)(void *)(destination + filled + PLATFORM_MEM_VECTOR), pattern);
++		filled += PLATFORM_MEM_STEP;
++	}
++	while (len - filled >= PLATFORM_MEM_VECTOR) {
++		_mm256_storeu_si256((__m256i *)(void *)(destination + filled), pattern);
++		filled += PLATFORM_MEM_VECTOR;
++	}
++	if (filled != len)
++		_mm256_storeu_si256((__m256i *)(void *)(destination + len - PLATFORM_MEM_VECTOR), pattern);
++	_mm256_zeroupper();
++	return (b);
++}
++#endif /* __x86_64__ */
++
+ void *
+ _platform_memset(void *b, int c, size_t len) {
+ 	unsigned char pattern[4];
+ 
++#if defined(__x86_64__)
++	if (platform_has_avx2()) {
++		if (len >= PLATFORM_MEM_VECTOR)
++			return _platform_memset_avx2(b, c, len);
++		/* The doubling fill below costs two memmove calls per call; a
++		   short fill writes the bytes directly instead. */
++		platform_fill_short(b, (unsigned char)c, len);
++		return b;
++	}
++#endif
++
+ 	pattern[0] = (unsigned char)c;
+ 	pattern[1] = (unsigned char)c;
+ 	pattern[2] = (unsigned char)c;
+diff --git a/src/string/generic/memchr.c b/src/string/generic/memchr.c
+index 3e1dc30..937e7d1 100644
+--- a/src/string/generic/memchr.c
++++ b/src/string/generic/memchr.c
+@@ -36,12 +36,57 @@
+ 
+ #include <stdlib.h>
+ 
++#if defined(__x86_64__)
++#include <platform/string_avx2.h>
++
++/*
++ * 32 bytes at a time, then the last possibly overlapping 32 bytes; a position
++ * inside a block is the first match overall because every block below it was
++ * scanned first. Only [s, s+n) is read.
++ */
++__attribute__((target("avx2"), visibility("hidden")))
++void *
++_platform_memchr_avx2(const void *s, int c, size_t n)
++{
++	const unsigned char *p = s;
++	const __m256i needle = _mm256_set1_epi8((char)c);
++
++	while (n >= PLATFORM_MEM_VECTOR) {
++		const __m256i block = _mm256_loadu_si256((const __m256i *)(const void *)p);
++		const unsigned equal = (unsigned)_mm256_movemask_epi8(_mm256_cmpeq_epi8(block, needle));
++
++		if (equal != 0) {
++			_mm256_zeroupper();
++			return ((void *)(p + (unsigned)__builtin_ctz(equal)));
++		}
++		p += PLATFORM_MEM_VECTOR;
++		n -= PLATFORM_MEM_VECTOR;
++	}
++	if (n != 0) {
++		const unsigned char *tail = p + n - PLATFORM_MEM_VECTOR;
++		const __m256i block = _mm256_loadu_si256((const __m256i *)(const void *)tail);
++		const unsigned equal = (unsigned)_mm256_movemask_epi8(_mm256_cmpeq_epi8(block, needle));
++
++		_mm256_zeroupper();
++		if (equal != 0)
++			return ((void *)(tail + (unsigned)__builtin_ctz(equal)));
++		return (NULL);
++	}
++	_mm256_zeroupper();
++	return (NULL);
++}
++#endif
++
+ void *
+ _platform_memchr(const void *s, int c, size_t n)
+ {
+ 	if (n != 0) {
+ 		const unsigned char *p = s;
+ 
++#if defined(__x86_64__)
++		if (n >= PLATFORM_MEM_VECTOR && platform_has_avx2())
++			return (_platform_memchr_avx2(s, c, n));
++#endif
+ 		do {
+ 			if (*p++ == (unsigned char)c)
+ 				return ((void *)(p - 1));
 diff --git a/src/string/generic/memcmp.c b/src/string/generic/memcmp.c
-index fd4311d..34e52aa 100644
+index fd4311d..ee89f67 100644
 --- a/src/string/generic/memcmp.c
 +++ b/src/string/generic/memcmp.c
-@@ -34,6 +34,79 @@
+@@ -34,6 +34,122 @@
  
  #if !_PLATFORM_OPTIMIZED_MEMCMP
  
 +#if defined(__x86_64__)
-+#include <emmintrin.h>
++#include <platform/string_avx2.h>
 +
 +// The byte loop below was 12% of the League main thread (the game compares buffers every frame, most of them
 +// shorter than 16 bytes). Blocks are compared with SSE2 (always present on x86_64) and the remainder with
 +// overlapping unaligned loads; no read goes past either buffer.
-+typedef unsigned long long __attribute__((aligned(1), may_alias)) platform_u64u;
-+typedef unsigned int __attribute__((aligned(1), may_alias)) platform_u32u;
 +
 +static inline int
 +platform_memcmp16(const unsigned char *p1, const unsigned char *p2)
@@ -46,11 +336,56 @@ index fd4311d..34e52aa 100644
 +	return (0);
 +}
 +
++__attribute__((target("avx2")))
++static inline int
++platform_memcmp32(const unsigned char *p1, const unsigned char *p2)
++{
++	const __m256i a = _mm256_loadu_si256((const __m256i *)(const void *)p1);
++	const __m256i b = _mm256_loadu_si256((const __m256i *)(const void *)p2);
++	const unsigned equal = (unsigned)_mm256_movemask_epi8(_mm256_cmpeq_epi8(a, b));
++
++	if (equal != 0xffffffffu) {
++		const unsigned i = (unsigned)__builtin_ctz(~equal);
++		return (p1[i] - p2[i]);
++	}
++	return (0);
++}
++
++/*
++ * 32 bytes at a time, then the last possibly overlapping 32 bytes. Only
++ * [s1, s1+n) and [s2, s2+n) are read, and a block is only reached when every
++ * byte below it compared equal, so the returned difference is the first one.
++ */
++__attribute__((target("avx2"), visibility("hidden")))
++int
++_platform_memcmp_avx2(const void *s1, const void *s2, size_t n)
++{
++	const unsigned char *p1 = s1, *p2 = s2;
++	int result;
++
++	while (n >= PLATFORM_MEM_VECTOR) {
++		if ((result = platform_memcmp32(p1, p2)) != 0) {
++			_mm256_zeroupper();
++			return (result);
++		}
++		p1 += PLATFORM_MEM_VECTOR; p2 += PLATFORM_MEM_VECTOR;
++		n -= PLATFORM_MEM_VECTOR;
++	}
++	if (n != 0)
++		result = platform_memcmp32(p1 + n - PLATFORM_MEM_VECTOR, p2 + n - PLATFORM_MEM_VECTOR);
++	else
++		result = 0;
++	_mm256_zeroupper();
++	return (result);
++}
++
 +int
 +_platform_memcmp(const void *s1, const void *s2, size_t n)
 +{
 +	const unsigned char *p1 = s1, *p2 = s2;
 +
++	if (n >= PLATFORM_MEM_VECTOR && platform_has_avx2())
++		return (_platform_memcmp_avx2(s1, s2, n));
 +	if (n >= 16) {
 +		int r;
 +
@@ -99,7 +434,7 @@ index fd4311d..34e52aa 100644
  int
  _platform_memcmp(const void *s1, const void *s2, size_t n)
  {
-@@ -48,6 +121,8 @@ _platform_memcmp(const void *s1, const void *s2, size_t n)
+@@ -48,6 +164,8 @@ _platform_memcmp(const void *s1, const void *s2, size_t n)
  	return (0);
  }
  
@@ -108,6 +443,117 @@ index fd4311d..34e52aa 100644
  #if VARIANT_STATIC
  int
  memcmp(const void *s1, const void *s2, size_t n)
+diff --git a/src/string/generic/memmove.c b/src/string/generic/memmove.c
+index e11f68c..573d4b5 100644
+--- a/src/string/generic/memmove.c
++++ b/src/string/generic/memmove.c
+@@ -34,6 +34,10 @@
+ 
+ #if !_PLATFORM_OPTIMIZED_MEMMOVE
+ 
++#if defined(__x86_64__)
++#include <platform/string_avx2.h>
++#endif
++
+ #include <sys/types.h>
+ 
+ /*
+@@ -45,6 +49,83 @@ typedef	long word;		/* "word" used for optimal copy speed */
+ #define	wsize	sizeof(word)
+ #define	wmask	(wsize - 1)
+ 
++#if defined(__x86_64__)
++
++/*
++ * A forward copy moves low to high and reads each 32-byte block before it
++ * writes it, so an overlapping copy stays correct: the block written at
++ * offset i ends below the first source byte not read yet. The block that does
++ * not fill a vector is finished with the 8, 4, 2 and 1 byte moves of
++ * platform_copy_short, which read every byte before they write any of it.
++ */
++__attribute__((target("avx2"), visibility("hidden")))
++static void
++platform_copy_forward_avx2(unsigned char *destination, const unsigned char *source, size_t length)
++{
++	size_t copied = 0;
++
++	while (length - copied >= PLATFORM_MEM_STEP) {
++		const __m256i first = _mm256_loadu_si256((const __m256i *)(const void *)(source + copied));
++		const __m256i second = _mm256_loadu_si256((const __m256i *)(const void *)(source + copied + PLATFORM_MEM_VECTOR));
++
++		_mm256_storeu_si256((__m256i *)(void *)(destination + copied), first);
++		_mm256_storeu_si256((__m256i *)(void *)(destination + copied + PLATFORM_MEM_VECTOR), second);
++		copied += PLATFORM_MEM_STEP;
++	}
++	while (length - copied >= PLATFORM_MEM_VECTOR) {
++		const __m256i block = _mm256_loadu_si256((const __m256i *)(const void *)(source + copied));
++
++		_mm256_storeu_si256((__m256i *)(void *)(destination + copied), block);
++		copied += PLATFORM_MEM_VECTOR;
++	}
++	platform_copy_short(destination + copied, source + copied, length - copied);
++}
++
++/* The same, high to low, for a destination above the source. */
++__attribute__((target("avx2"), visibility("hidden")))
++static void
++platform_copy_backward_avx2(unsigned char *destination, const unsigned char *source, size_t length)
++{
++	size_t copied = 0;
++
++	while (length - copied >= PLATFORM_MEM_STEP) {
++		const __m256i first = _mm256_loadu_si256((const __m256i *)(const void *)(source + length - copied - PLATFORM_MEM_STEP));
++		const __m256i second = _mm256_loadu_si256((const __m256i *)(const void *)(source + length - copied - PLATFORM_MEM_VECTOR));
++
++		copied += PLATFORM_MEM_STEP;
++		_mm256_storeu_si256((__m256i *)(void *)(destination + length - copied), first);
++		_mm256_storeu_si256((__m256i *)(void *)(destination + length - copied + PLATFORM_MEM_VECTOR), second);
++	}
++	while (length - copied >= PLATFORM_MEM_VECTOR) {
++		__m256i block;
++
++		copied += PLATFORM_MEM_VECTOR;
++		block = _mm256_loadu_si256((const __m256i *)(const void *)(source + length - copied));
++		_mm256_storeu_si256((__m256i *)(void *)(destination + length - copied), block);
++	}
++	platform_copy_short(destination, source, length - copied);
++}
++
++__attribute__((target("avx2"), visibility("hidden")))
++void *
++_platform_memmove_avx2(void *dst, const void *src, size_t length)
++{
++	unsigned char *destination = (unsigned char *)dst;
++	const unsigned char *source = (const unsigned char *)src;
++	const unsigned long destinationAddress = (unsigned long)destination;
++	const unsigned long sourceAddress = (unsigned long)source;
++
++	if (destinationAddress < sourceAddress) {
++		platform_copy_forward_avx2(destination, source, length);
++	} else if (destinationAddress > sourceAddress) {
++		platform_copy_backward_avx2(destination, source, length);
++	}
++	_mm256_zeroupper();
++	return (dst);
++}
++
++#endif /* __x86_64__ */
++
+ /*
+  * Copy a block of memory, handling overlap.
+  * This is the routine that actually implements
+@@ -58,6 +139,11 @@ _platform_memmove(void *dst0, const void *src0, size_t length)
+ 	const char *src = src0;
+ 	size_t t;
+ 
++#if defined(__x86_64__)
++	if (length >= PLATFORM_MEM_VECTOR && platform_has_avx2())
++		return (_platform_memmove_avx2(dst0, src0, length));
++#endif
++
+ 	if (length == 0 || dst == src)		/* nothing to do */
+ 		goto done;
+ 
 diff --git a/src/string/generic/memset_pattern.c b/src/string/generic/memset_pattern.c
 index 94aa085..0966fb7 100644
 --- a/src/string/generic/memset_pattern.c

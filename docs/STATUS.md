@@ -1,6 +1,32 @@
-# Snapshot status — 2026-10-13
+# Snapshot status — 2026-10-14
 
 This repository preserves a development runtime, including historical experiments. All 29 patches apply to their pinned revisions and the exported source matches the development tree for the patched files. A fresh checkout/build/install has not been validated end to end on another machine. The normal workflow uses manual client installation and play, without debugger attachment, client API calls or input automation.
+
+## Game FPS, 2026-10-13/14
+
+All matches were ARAM, played manually with unchanged game settings; FPS is the game's own 10-second average (`netstats.csv`). Bilgewater runs a few percent below Hexgate on the same build.
+
+| Match | Map | Runtime | Avg FPS | Slowest quarter |
+|---|---|---|---|---|
+| 10-13 12:51 | Hexgate | before this work | 83.8 | — |
+| 10-13 13:14 | Bilgewater | before this work | 76.9 | — |
+| 10-13 16:54 | Hexgate | first kernel batch | 110.7 | — |
+| 10-13 20:36 | Bilgewater | + `-O2` libc/libc++, AVX2 string primitives, real CPU count | 109.7 | — |
+| 10-14 13:04 | Hexgate | lock switches off (lost to a reboot) | 119.2 | 104.2 |
+| 10-14 14:18 | Hexgate | + core isolation (since made opt-in) | 102.9 | 92.0 |
+| 10-14 14:42 | Bilgewater | local mutexes, condition variables and semaphores | 119.5 | 103.4 |
+| 10-14 16:26 | Hexgate | + Metal bind deduplication and cheaper blits | 126.7 | 109.6 |
+
+The 13:04 and 16:26 Hexgate matches were captured with the passive sampler (`tools/riot-match-capture`). Per frame, the game's main thread waited 1.36 ms on darlingserver in the first and 0.10 ms in the second. It blocked 39 times per frame in the first and 14 in the second. darlingserver CPU fell from 82% to 61% of a core. GPU utilization stayed at 70–74%: the main thread is the limit and is now about 90% busy running code. Frame times within each 10-second window vary by about 1–1.4 ms (standard deviation) and never more than 2.7 ms, versus hitch windows of 77–168 ms in the matches of 10-13 morning.
+
+What changed in the runtime (all in the patches):
+
+- **Process-local pthread mutexes and condition variables** (`psynch_mutexwait.c`, `bsdthread_register.c`): contended first-fit mutexes and their condition variables sleep on futexes inside the game instead of making two darlingserver round trips. On by default in the League game process only.
+- **Process-local Mach semaphores** (`mach_traps.c`): semaphores the game creates are counted and waited on in the process. A destroyed or reused slot can no longer satisfy a wait or take another semaphore's signal: the count and the slot generation change in one compare-exchange, and a destroy leaves a negative marker. A forked child resets the table, and every name the table did not create goes to the server. The game's worker threads wake 380 times a second instead of 940. On by default in the game process only. The 2026-10-10 client crash happened while the switch was on in every process; the clients still use the server path. A local wait cannot be interrupted by `thread_abort`, and a semaphore shared with another task is not supported locally.
+- **Metal render encoder** (`MTLRenderCommandEncoder.mm`): re-binding the identical texture, sampler, buffer and offset, pipeline or depth-stencil state at the same slot is dropped before any work. The comparison key is the Indium object, which the encoder's binding tables keep alive, so a reused wrapper address cannot alias. The depth-stencil state, which Indium does not retain, is retained by the record. `endEncoding` clears the records. Blit encoder calls pass the resources by reference: 5 atomic operations per copy become 1. `-[MTLVertexDescriptor reset]` no longer resets every attribute twice.
+- **Core isolation** (`mach_traps.c`, opt-in with `/tmp/rclol-core-isolation`): gives the game's main thread its own Linux core-scheduling cookie. In its one match the main thread waited for a CPU 12.6% of the time instead of 1%, and FPS fell from 118 to 103 over the same minutes. It stays in the tree for experiments only.
+
+Where the main thread's time goes now: about 72% of its user time is in the game binary, mostly in memory-latency-bound code. The game binary runs natively and selects its AVX paths with `cpuid`. Objective-C dispatch, the Metal wrapper, Indium, the allocator and the Vulkan driver take most of the rest. The remaining Darling-side levers are smaller: more of the heap on transparent huge pages (35% of anonymous memory is), and the per-draw Metal/Objective-C path.
 
 ## New PC: verified runtime changes
 
@@ -22,7 +48,7 @@ Server-only CPU samples identified worker context switching and receive/message 
 
 The receive queue now retains unused receive slots, transfers real messages into the existing queue and adopts every returned control header before potentially throwing. This preserves received descriptor ownership even if deque allocation fails. Disabled debug logging no longer prepares PID/TID strings. Independent host socket checks reduce warmed empty receive allocations from 32 to zero and single-packet allocations from 64 to two. Normal and address/undefined-behavior sanitizer checks passed, including exception cleanup and descriptor ownership.
 
-The normal launcher no longer enables a client inspector, starts scheduling/update/link helpers or forces unlimited UI frames. The user installed the new server atomically while the old server remained active. **No post-activation FPS gain has been measured.** Validate through manually played matches after a full Darling restart when the game and clients are closed.
+The normal launcher no longer enables a client inspector, starts scheduling/update/link helpers or forces unlimited UI frames. The user installed the new server atomically while the old server remained active. Later matches measured the gains of this and the following changes; see [Game FPS, 2026-10-13/14](#game-fps-2026-10-1314).
 
 ## Memory reclamation and activation
 

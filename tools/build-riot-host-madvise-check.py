@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the host-only check against Darling's actual madvise implementation."""
+"""Build and run the host-only check against Darling's actual madvise translation."""
 from pathlib import Path
 import subprocess
 
@@ -14,6 +14,9 @@ if alias.resolve() != headers.resolve():
     raise RuntimeError("Unexpected host-test header alias")
 source = project / "build/darling-src/src/external/xnu/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/madvise.c"
 binary = folder / "host-madvise-check"
-subprocess.run(["cc", "-std=c11", "-O2", "-I", str(folder / "include"),
+subprocess.run(["cc", "-std=gnu11", "-O2", "-I", str(folder / "include"),
                 str(project / "tools/riot-host-madvise-check.c"), str(source), "-o", str(binary)], check=True)
 print("Built", binary)
+# One process per host THP policy; the code reads the policy once per process.
+for mode in ("always", "never", "madvise"):
+    subprocess.run([str(binary), mode], check=True)

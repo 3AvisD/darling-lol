@@ -103,6 +103,371 @@ index 207dae6..f5e96db 100644
  #ifndef BUILDING_BASE_C
  
  VISIBLE
+diff --git a/darling/src/libsystem_kernel/emulation/include/common/cpu_topology.h b/darling/src/libsystem_kernel/emulation/include/common/cpu_topology.h
+new file mode 100644
+index 0000000..8ae1665
+--- /dev/null
++++ b/darling/src/libsystem_kernel/emulation/include/common/cpu_topology.h
+@@ -0,0 +1,272 @@
++#ifndef DARLING_COMMON_CPU_TOPOLOGY_H
++#define DARLING_COMMON_CPU_TOPOLOGY_H
++
++#include <stdbool.h>
++
++#include <darling/emulation/common/base.h>
++#include <darling/emulation/common/simple.h>
++#include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
++
++/*
++ * darling-lol: the host's real CPU topology for the hw.* / machdep.cpu.* sysctls.
++ *
++ * The guest used to be told the fixed MacBookPro16,1 configuration (8 logical
++ * and 8 physical CPUs). The game and the clients size their worker pools from
++ * hw.ncpu / hw.activecpu, so on this 6-core/12-thread host the game created 7
++ * workers where the same PC runs 12 threads under Windows. Report what the
++ * host really has instead, while the emulated Mac identity (hw.model, brand
++ * string) stays unchanged.
++ *
++ * Values are cached once per process. avail/active reflect the process's
++ * affinity mask (cgroup or taskset restrictions); max values reflect the
++ * online CPUs. The host flag file /tmp/rclol-fixed-cpu-count (checked once
++ * with a raw access() syscall) restores the old fixed values for A/B runs.
++ */
++
++/* From src/xnu_syscall/bsd/helper/misc/sysctl_proc.c */
++bool read_string(const char* path, char* dst, int maxlen);
++
++#define DARLING_CPU_FIXED_COUNT 8
++#define DARLING_CPU_MASK_BYTES 128 /* 1024 CPUs, enough for any League host */
++#define DARLING_CPU_MAX_SCAN 256
++
++/* The A/B opt-out flag file; the host check overrides the path. */
++#ifndef DARLING_CPU_FIXED_FLAG
++#define DARLING_CPU_FIXED_FLAG "/tmp/rclol-fixed-cpu-count"
++#endif
++
++struct darling_cpu_topology
++{
++	unsigned int online;             /* CPUs online on the host (hw.ncpu) */
++	unsigned int available;          /* CPUs this process may run on (hw.activecpu) */
++	unsigned int physical_online;    /* physical cores among the online CPUs */
++	unsigned int physical_available; /* physical cores among the available CPUs */
++	bool fixed;                      /* the opt-out flag file is present */
++	bool detected;                   /* the host answered; false means "use the old 8s" */
++};
++
++/* Number of CPUs in a sysfs list such as "0-1,4-5" or "0,6" */
++static inline unsigned int darling_cpu_count_list(const char* list)
++{
++	unsigned int count = 0;
++	const char* p = list;
++
++	for (;;)
++	{
++		unsigned long long first = 0, last;
++		const char* start;
++
++		while (*p == ',' || *p == ' ' || *p == '\t' || *p == '\n')
++			++p;
++		start = p;
++		while (*p >= '0' && *p <= '9')
++			first = first * 10 + (unsigned int)(*p++ - '0');
++		if (p == start)
++			break;
++
++		last = first;
++		if (*p == '-')
++		{
++			++p;
++			last = 0;
++			while (*p >= '0' && *p <= '9')
++				last = last * 10 + (unsigned int)(*p++ - '0');
++		}
++
++		if (last >= first && last - first < 4096)
++			count += (unsigned int)(last - first + 1);
++
++		if (*p != ',' && *p != ' ' && *p != '\t' && *p != '\n')
++			break;
++	}
++
++	return count;
++}
++
++static inline bool darling_cpu_mask_has(const unsigned char* mask, long mask_bytes, unsigned int cpu)
++{
++	long byte = (long)(cpu >> 3);
++
++	if (byte >= mask_bytes)
++		return false;
++	return (mask[byte] & (1u << (cpu & 7))) != 0;
++}
++
++static inline unsigned int darling_cpu_mask_count(const unsigned char* mask, long mask_bytes)
++{
++	unsigned int count = 0;
++
++	for (long i = 0; i < mask_bytes; ++i)
++		count += (unsigned int)__builtin_popcount(mask[i]);
++
++	return count;
++}
++
++/*
++ * Count distinct (physical_package_id, core_id) pairs among the CPUs in
++ * [0, online). With a mask, only the CPUs it selects are counted and their
++ * pair count is returned through available_cores. Returns the total pair
++ * count, or 0 when the host does not expose the topology (the caller then
++ * falls back to an SMT estimate).
++ */
++static inline unsigned int darling_cpu_scan_cores(const unsigned char* mask, long mask_bytes,
++		unsigned int online, unsigned int* available_cores)
++{
++	unsigned long long pairs[DARLING_CPU_MAX_SCAN], available_pairs[DARLING_CPU_MAX_SCAN];
++	unsigned int pair_count = 0, available_count = 0;
++
++	if (available_cores != NULL)
++		*available_cores = 0;
++	if (online > DARLING_CPU_MAX_SCAN)
++		return 0;
++
++	for (unsigned int cpu = 0; cpu < online; ++cpu)
++	{
++		char path[112], buf[32];
++		unsigned long long package, core, pair;
++		bool seen = false;
++
++		__simple_sprintf(path, "/sys/devices/system/cpu/cpu%u/topology/physical_package_id", cpu);
++		if (!read_string(path, buf, sizeof(buf)))
++			return 0;
++		package = __simple_atoi(buf, NULL);
++
++		__simple_sprintf(path, "/sys/devices/system/cpu/cpu%u/topology/core_id", cpu);
++		if (!read_string(path, buf, sizeof(buf)))
++			return 0;
++		core = __simple_atoi(buf, NULL);
++
++		pair = (package << 32) | (core & 0xffffffffull);
++
++		for (unsigned int i = 0; i < pair_count; ++i)
++		{
++			if (pairs[i] == pair)
++			{
++				seen = true;
++				break;
++			}
++		}
++		if (!seen)
++			pairs[pair_count++] = pair;
++
++		if (mask != NULL && darling_cpu_mask_has(mask, mask_bytes, cpu))
++		{
++			seen = false;
++			for (unsigned int i = 0; i < available_count; ++i)
++			{
++				if (available_pairs[i] == pair)
++				{
++					seen = true;
++					break;
++				}
++			}
++			if (!seen)
++				available_pairs[available_count++] = pair;
++		}
++	}
++
++	if (available_cores != NULL)
++		*available_cores = available_count;
++	return pair_count;
++}
++
++/* SMT estimate from cpu0's sibling list, used when the per-CPU scan fails. */
++static inline unsigned int darling_cpu_smt_estimate(unsigned int online)
++{
++	char buf[128];
++	unsigned int siblings;
++
++	if (!read_string("/sys/devices/system/cpu/cpu0/topology/thread_siblings_list", buf, sizeof(buf)))
++		return 0;
++
++	siblings = darling_cpu_count_list(buf);
++	if (siblings == 0 || online % siblings != 0)
++		return 0;
++	return online / siblings;
++}
++
++static inline void darling_cpu_topology_probe(struct darling_cpu_topology* topo)
++{
++	unsigned char mask[DARLING_CPU_MASK_BYTES];
++	char buf[512];
++	long mask_bytes;
++
++	*topo = (struct darling_cpu_topology) { 0 };
++
++	/* The A/B opt-out is a host flag file, like the other darling-lol opt-ins. */
++	if (LINUX_SYSCALL(__NR_access, DARLING_CPU_FIXED_FLAG, 0) == 0)
++	{
++		topo->fixed = true;
++		return;
++	}
++
++	if (read_string("/sys/devices/system/cpu/online", buf, sizeof(buf)))
++		topo->online = darling_cpu_count_list(buf);
++	else if (read_string("/sys/devices/system/cpu/present", buf, sizeof(buf)))
++		topo->online = darling_cpu_count_list(buf);
++
++	mask_bytes = LINUX_SYSCALL(__NR_sched_getaffinity, 0, (long)sizeof(mask), mask);
++	if (mask_bytes > 0)
++	{
++		if (mask_bytes > (long)sizeof(mask))
++			mask_bytes = (long)sizeof(mask);
++		topo->available = darling_cpu_mask_count(mask, mask_bytes);
++	}
++	else
++	{
++		mask_bytes = 0;
++	}
++
++	if (topo->online == 0)
++		topo->online = topo->available;
++	if (topo->available == 0)
++		topo->available = topo->online;
++	if (topo->online == 0)
++		return; /* detection failed: the caller keeps the fixed 8s */
++
++	if (topo->available > topo->online)
++		topo->available = topo->online;
++
++	topo->physical_online = darling_cpu_scan_cores(NULL, 0, topo->online, NULL);
++	if (topo->physical_online == 0)
++		topo->physical_online = darling_cpu_smt_estimate(topo->online);
++	/* libmalloc divides logical by physical and only accepts ratios 1/2/4. */
++	if (topo->physical_online == 0 || topo->online % topo->physical_online != 0)
++		topo->physical_online = topo->online;
++
++	if (mask_bytes > 0)
++	{
++		unsigned int available_cores = 0;
++		unsigned int total = darling_cpu_scan_cores(mask, mask_bytes, topo->online, &available_cores);
++
++		topo->physical_available = (total > 0) ? available_cores : topo->physical_online;
++	}
++	else
++	{
++		topo->physical_available = topo->physical_online;
++	}
++	if (topo->physical_available > topo->physical_online)
++		topo->physical_available = topo->physical_online;
++
++	topo->detected = true;
++}
++
++/* Cached for the life of the process; the probe runs at most once per copy. */
++static inline const struct darling_cpu_topology* darling_host_cpu_topology(void)
++{
++	static struct darling_cpu_topology cached;
++	static int decided;
++
++	if (__atomic_load_n(&decided, __ATOMIC_ACQUIRE) == 0)
++	{
++		struct darling_cpu_topology probe;
++
++		darling_cpu_topology_probe(&probe);
++		cached = probe;
++		__atomic_store_n(&decided, 1, __ATOMIC_RELEASE);
++	}
++
++	return &cached;
++}
++
++#endif // DARLING_COMMON_CPU_TOPOLOGY_H
+diff --git a/darling/src/libsystem_kernel/emulation/include/common/private_mutex.h b/darling/src/libsystem_kernel/emulation/include/common/private_mutex.h
+new file mode 100644
+index 0000000..5379dd4
+--- /dev/null
++++ b/darling/src/libsystem_kernel/emulation/include/common/private_mutex.h
+@@ -0,0 +1,20 @@
++#ifndef DARLING_EMULATION_PRIVATE_MUTEX_H
++#define DARLING_EMULATION_PRIVATE_MUTEX_H
++#include <darling/emulation/linux_premigration/ext/futex.h>
++/* Bootstrap-safe private mutex. Kernel emulation must not export placeholder
++ * os_unfair_lock functions: umbrella lookup can bind app calls to those stubs
++ * instead of libplatform, silently removing allocator mutual exclusion. */
++typedef struct { int value; } emulation_mutex;
++#define EMULATION_MUTEX_INITIALIZER {0}
++static inline void emulation_mutex_lock(emulation_mutex *mutex) {
++    int expected = 0;
++    if (__atomic_compare_exchange_n(&mutex->value, &expected, 1, 0,
++                                    __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return;
++    while (__atomic_exchange_n(&mutex->value, 2, __ATOMIC_ACQUIRE) != 0)
++        __linux_futex_reterr(&mutex->value, FUTEX_WAIT | 128, 2, 0, 0, 0);
++}
++static inline void emulation_mutex_unlock(emulation_mutex *mutex) {
++    if (__atomic_exchange_n(&mutex->value, 0, __ATOMIC_RELEASE) == 2)
++        __linux_futex_reterr(&mutex->value, FUTEX_WAKE | 128, 1, 0, 0, 0);
++}
++#endif
+diff --git a/darling/src/libsystem_kernel/emulation/include/common/slowwait.h b/darling/src/libsystem_kernel/emulation/include/common/slowwait.h
+new file mode 100644
+index 0000000..c310159
+--- /dev/null
++++ b/darling/src/libsystem_kernel/emulation/include/common/slowwait.h
+@@ -0,0 +1,55 @@
++#ifndef _DARLING_SLOWWAIT_H_
++#define _DARLING_SLOWWAIT_H_
++/* darling-lol diagnostic: with /tmp/metal-debug-timing present, log main-thread blocking waits over 400 ms. */
++#include <darling/emulation/common/base.h>
++#include <darling/emulation/common/simple.h>
++#include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
++
++/* darling-lol diagnostic: with /tmp/metal-debug-timing present, log mach semaphore waits that block for more than
++ * 400 ms, with the caller's frame-pointer chain, to /tmp/semwait.log. */
++static inline int slowwait_enabled(void)
++{
++	static int state = -1;
++	if (state < 0) {
++		state = LINUX_SYSCALL(__NR_access, "/tmp/metal-debug-timing", 0) == 0 ? 1 : 0;
++	}
++	return state;
++}
++
++static inline unsigned long long slowwait_now(void)
++{
++	struct { long tv_sec; long tv_nsec; } ts;
++	LINUX_SYSCALL(__NR_clock_gettime, 1, &ts);
++	return (unsigned long long) ts.tv_sec * 1000000000ULL + (unsigned long long) ts.tv_nsec;
++}
++
++static inline void slowwait_log(const char* kind, unsigned int name, unsigned long long start, void** frame, unsigned int extra1, unsigned int extra2)
++{
++	unsigned long long elapsed = slowwait_now() - start;
++	/* only the main thread (tid == pid), the frame loop; other threads idle in these waits by design */
++	if (elapsed < 400ULL * 1000000ULL || LINUX_SYSCALL(__NR_gettid) != LINUX_SYSCALL(__NR_getpid)) {
++		return;
++	}
++	char line[512];
++	int n = __simple_sprintf(line, "%s name=%u x1=%x x2=%u ms=%llu tid=%d frames:", kind, name, extra1, extra2, elapsed / 1000000ULL, (int) LINUX_SYSCALL(__NR_gettid));
++	void** fp = frame;
++	for (int i = 0; i < 10 && fp && ((unsigned long) fp & 7) == 0; ++i) {
++		void* ret = fp[1];
++		n += __simple_sprintf(line + n, " %lx", (unsigned long) ret);
++		void** next = (void**) fp[0];
++		if (next <= fp || (unsigned long) next - (unsigned long) fp > 0x100000) {
++			break;
++		}
++		fp = next;
++	}
++	n += __simple_sprintf(line + n, "\n");
++	long fd = LINUX_SYSCALL(__NR_open, "/tmp/semwait.log", 02101 /* O_WRONLY|O_CREAT|O_APPEND */, 0666);
++	if (fd >= 0) {
++		LINUX_SYSCALL(__NR_write, fd, line, n);
++		LINUX_SYSCALL(__NR_close, fd);
++	}
++}
++
++
++
++#endif
 diff --git a/darling/src/libsystem_kernel/emulation/include/conversion/xattr/name.h b/darling/src/libsystem_kernel/emulation/include/conversion/xattr/name.h
 new file mode 100644
 index 0000000..976e5d0
@@ -394,6 +759,20 @@ index f6588cc..c60d8f9 100644
  };
  
  #define dserver_rpc_hooks_get_interrupt_status() (-LINUX_EINTR)
+diff --git a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/guarded/change_fdguard_np.h b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/guarded/change_fdguard_np.h
+new file mode 100644
+index 0000000..ac5a0e6
+--- /dev/null
++++ b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/guarded/change_fdguard_np.h
+@@ -0,0 +1,8 @@
++#ifndef LINUX_CHANGE_FDGUARD_H
++#define LINUX_CHANGE_FDGUARD_H
++
++#include <stdint.h>
++
++long sys_change_fdguard_np(int fd, uint64_t* guard, uint64_t* nguard, unsigned guardflags, int* fdflagsp);
++
++#endif // LINUX_CHANGE_FDGUARD_H
 diff --git a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/mac_syscall.h b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/mac_syscall.h
 new file mode 100644
 index 0000000..b4c307a
@@ -721,19 +1100,114 @@ index d077d04..3dcafea 100644
  void _start()
  {
 diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/ext/clock_gettime.c b/darling/src/libsystem_kernel/emulation/src/linux_premigration/ext/clock_gettime.c
-index f27a888..6945458 100644
+index f27a888..1bbfc73 100644
 --- a/darling/src/libsystem_kernel/emulation/src/linux_premigration/ext/clock_gettime.c
 +++ b/darling/src/libsystem_kernel/emulation/src/linux_premigration/ext/clock_gettime.c
-@@ -5,11 +5,233 @@
+@@ -3,13 +3,334 @@
+ #include <darling/emulation/common/base.h>
+ #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
  
++#include <elfcalls.h>
++
  extern long cerror(int __err);
  
++extern struct elf_calls* _elfcalls;
++
 +#if defined(__x86_64__)
-+/* darling-lol: user-space CLOCK_MONOTONIC / CLOCK_REALTIME.
++/* darling-lol: read the clock through the host vDSO.
 + *
-+ * Every mach_absolute_time and gettimeofday of a Darwin process lands here as a real Linux syscall. On hosts whose
-+ * kernel clocksource is HPET (the TSCs of the cores are not synchronised, so the kernel refuses the TSC and the vDSO
-+ * falls back to the syscall as well) one read costs ~1.4 us, and the League main thread makes ~200 of them per frame.
++ * The guest process is a native Linux process, so the kernel's vDSO is mapped
++ * and its __vdso_clock_gettime can be called directly - the same ELF bridge
++ * libmalloc uses for __vdso_getcpu. A vDSO read uses the same clocksource as
++ * the syscall, so no calibration and no /tmp opt-in are involved.
++ *
++ * The pointer is resolved once per process. Resolution runs dlopen/dlsym
++ * through the native loader, so it is also done eagerly from mach_driver_init()
++ * where the ELF bridge is known to be usable; the steady-state path is one
++ * atomic load and an indirect call, which keeps clock reads from signal
++ * handlers and RPC-guarded callers safe. A missing bridge is not cached: the
++ * next call retries. */
++static void* vdso_clock_gettime_fn; /* 0 unresolved, -1 absent, else the vDSO entry */
++
++/* Some glibc versions expose the __vdso_* entries only through the LINUX_2.6
++ * symbol version (libmalloc's __vdso_getcpu lookup uses dlvsym for the same
++ * reason). */
++static void* vdso_symbol(struct elf_calls* calls, void* vdso, const char* name, const char* version)
++{
++	void* function = calls->dlsym(vdso, name);
++	if (function == 0 && version != 0)
++	{
++		void* libc = calls->dlopen("libc.so.6");
++		void* (*dlvsym)(void*, const char*, const char*) = libc ? calls->dlsym(libc, "dlvsym") : 0;
++		if (dlvsym != 0)
++			function = dlvsym(vdso, name, version);
++	}
++	return function;
++}
++
++static void* vdso_clock_gettime_resolve(void)
++{
++	void* function = __atomic_load_n(&vdso_clock_gettime_fn, __ATOMIC_ACQUIRE);
++	struct elf_calls* calls;
++
++	if (function != 0)
++		return function == (void*) -1 ? 0 : function;
++
++	calls = _elfcalls;
++	if (calls == 0 || calls->dlopen == 0 || calls->dlsym == 0)
++		return 0; /* the bridge is not up yet; retry on the next call */
++
++	if (!__atomic_compare_exchange_n(&vdso_clock_gettime_fn, &function, (void*) -1, 0,
++			__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
++		return function == (void*) -1 ? 0 : function;
++
++	{
++		void* vdso = calls->dlopen("linux-vdso.so.1");
++		void* resolved = vdso ? vdso_symbol(calls, vdso, "__vdso_clock_gettime", "LINUX_2.6") : 0;
++		__atomic_store_n(&vdso_clock_gettime_fn, resolved ? resolved : (void*) -1, __ATOMIC_RELEASE);
++		return resolved;
++	}
++}
++
++/* The guest syscall trampoline does not promise ELF stack alignment (sys_fork
++ * realigns for the same reason) and the vDSO is System V ABI code: realign the
++ * stack for the call. noinline keeps the realignment when this is inlined. */
++__attribute__((noinline))
++__attribute__((force_align_arg_pointer))
++static int vdso_clock_gettime_call(void* function, int clockid, struct timespec* res)
++{
++	return ((int (*)(int, struct timespec*)) function)(clockid, res);
++}
++
++/* 0: *res filled by the vDSO; 1: no vDSO answer, the caller must fall back */
++__attribute__((visibility("hidden")))
++int __darling_vdso_clock_gettime(int clockid, struct timespec* res)
++{
++	void* function = vdso_clock_gettime_resolve();
++
++	if (function == 0)
++		return 1;
++	if (vdso_clock_gettime_call(function, clockid, res) != 0)
++		return 1;
++
++	return 0;
++}
++
++/* Resolve before the first clock read can happen in a signal handler or with
++ * the RPC signal mask held. Called from mach_driver_init(). */
++__attribute__((visibility("hidden")))
++void __darling_vdso_clock_init(void)
++{
++	vdso_clock_gettime_resolve();
++}
++#endif /* __x86_64__ */
++
++#if defined(__x86_64__)
++/* darling-lol: user-space CLOCK_MONOTONIC / CLOCK_REALTIME fallback.
++ *
++ * The host vDSO is tried first (see above); this path is the fallback for a host whose vDSO cannot serve
++ * the clock (for example an HPET kernel clocksource where the vDSO falls back to the syscall as well and
++ * one read costs ~1.4 us), and the League main thread makes ~200 clock reads per frame.
 + *
 + * Each core's TSC still counts at one constant rate; only the offsets between cores differ. RDTSCP returns the TSC and
 + * the CPU it was read on in one instruction, so the clock is kept per CPU: a (TSC, monotonic ns) pair sampled with a
@@ -950,6 +1424,12 @@ index f27a888..6945458 100644
  	int rv;
  
 +#if defined(__x86_64__)
++	/* Exact and cheaper than the syscall; the vDSO answer comes from the same
++	 * clocksource the syscall would read. */
++	rv = __darling_vdso_clock_gettime(__clockid, __res);
++	if (rv == 0)
++		return 0;
++
 +	rv = __darling_fast_clock(__clockid, __res);
 +	if (rv == 0)
 +		return 0;
@@ -1270,6 +1750,50 @@ index 206e92e..0646cb7 100644
  			}
  		}
  	}
+diff --git a/darling/src/libsystem_kernel/emulation/src/other/mach/lkm.c b/darling/src/libsystem_kernel/emulation/src/other/mach/lkm.c
+index 8c6d5d9..6fd1acf 100644
+--- a/darling/src/libsystem_kernel/emulation/src/other/mach/lkm.c
++++ b/darling/src/libsystem_kernel/emulation/src/other/mach/lkm.c
+@@ -97,6 +97,15 @@ void mach_driver_init(const char** applep)
+ 		// we're being called in the child after a fork; let xtrace know about it
+ 		_xtrace_postfork_child();
+ 	}
++
++#if defined(__x86_64__)
++	/* darling-lol: resolve the host vDSO clock entry now, while the native
++	 * loader is known to be usable; clock reads can then happen from signal
++	 * handlers and RPC-guarded callers without running dlopen/dlsym. The vDSO
++	 * mapping survives fork(), so the cached pointer stays valid in the child. */
++	extern void __darling_vdso_clock_init(void);
++	__darling_vdso_clock_init();
++#endif
+ }
+ 
+ __attribute__((visibility("default")))
+@@ -128,12 +137,20 @@ uint64_t mach_absolute_time(void)
+ {
+ 	struct timespec ts;
+ 	uint64_t out;
+-	
++
++	/* darling-lol: the vDSO copy of the clock is exact and avoids a host
++	 * syscall; `clock_gettime` here is the Linux wrapper, which repeats the
++	 * vDSO check and otherwise falls back to the opt-in TSC clock and the
++	 * syscall. */
++#if defined(__x86_64__)
++	extern int __darling_vdso_clock_gettime(int clockid, struct timespec* res);
++	if (__darling_vdso_clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
++#endif
+ 	clock_gettime(CLOCK_MONOTONIC, &ts);
+-	
++
+ 	out = ts.tv_nsec;
+ 	out += ts.tv_sec * NSEC_PER_SEC;
+-	
++
+ 	return out;
+ }
+ 
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall_table.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall_table.c
 index 7d5ef80..46debb8 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall_table.c
@@ -1315,10 +1839,26 @@ index 7d5ef80..46debb8 100644
  	[521] = sys_abort_with_payload,
  	[524] = sys_setattrlistat,
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
-index f273989..6107548 100644
+index f273989..1093a3a 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
-@@ -25,6 +25,8 @@ enum {
+@@ -9,6 +9,7 @@
+ #include <darling/emulation/xnu_syscall/bsd/helper/misc/sysctl_proc.h>
+ #include <darling/emulation/linux_premigration/ext/sys/utsname.h>
+ #include <darling/emulation/common/simple.h>
++#include <darling/emulation/common/cpu_topology.h>
+ #include <darling/emulation/common/string.h>
+ 
+ extern kern_return_t mach_port_deallocate(ipc_space_t task, mach_port_name_t name);
+@@ -16,6 +17,7 @@ extern kern_return_t host_info(mach_port_name_t host, int itype, void* hinfo, ma
+ 
+ /* Darling specific */
+ enum {
++	_HW_ACTIVECPU = 26, // hw.activecpu's OID in XNU; unused in this table before
+ 	_HW_PHYSICAL_CPU = 1000,
+ 	_HW_PHYSICAL_CPU_MAX,
+ 	_HW_LOGICAL_CPU,
+@@ -25,9 +27,12 @@ enum {
  	_HW_CPUTHREADTYPE,
  	_HW_64BITCAPABLE,
  	_HW_CPUFREQUENCY = 15,
@@ -1327,7 +1867,11 @@ index f273989..6107548 100644
  };
  
  static sysctl_handler(handle_availcpu);
-@@ -39,7 +41,72 @@ static sysctl_handler(handle_cpusubtype);
++static sysctl_handler(handle_ncpu);
+ static sysctl_handler(handle_physicalcpu);
+ static sysctl_handler(handle_physicalcpu_max);
+ static sysctl_handler(handle_logicalcpu);
+@@ -39,11 +44,77 @@ static sysctl_handler(handle_cpusubtype);
  static sysctl_handler(handle_cputhreadtype);
  static sysctl_handler(handle_cpu64bitcapable);
  static sysctl_handler(handle_machine);
@@ -1400,7 +1944,13 @@ index f273989..6107548 100644
  
  const struct known_sysctl sysctls_hw[] = {
  	{ .oid = HW_AVAILCPU, .type = CTLTYPE_INT, .exttype = "", .name = "availcpu", .handler = handle_availcpu },
-@@ -55,7 +122,11 @@ const struct known_sysctl sysctls_hw[] = {
+-	{ .oid = HW_NCPU, .type = CTLTYPE_INT, .exttype = "", .name = "ncpu", .handler = handle_availcpu },
++	{ .oid = _HW_ACTIVECPU, .type = CTLTYPE_INT, .exttype = "", .name = "activecpu", .handler = handle_availcpu },
++	{ .oid = HW_NCPU, .type = CTLTYPE_INT, .exttype = "", .name = "ncpu", .handler = handle_ncpu },
+ 	{ .oid = _HW_PHYSICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu", .handler = handle_physicalcpu },
+ 	{ .oid = _HW_PHYSICAL_CPU_MAX, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu_max", .handler = handle_physicalcpu_max },
+ 	{ .oid = _HW_LOGICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "logicalcpu", .handler = handle_logicalcpu },
+@@ -55,7 +126,11 @@ const struct known_sysctl sysctls_hw[] = {
  	{ .oid = _HW_CPUTHREADTYPE, .type = CTLTYPE_INT, .exttype = "", .name = "cputhreadtype", .handler = handle_cputhreadtype },
  	{ .oid = _HW_64BITCAPABLE, .type = CTLTYPE_INT, .exttype = "", .name = "cpu64bit_capable", .handler = handle_cpu64bitcapable },
  	{ .oid = HW_MACHINE, .type = CTLTYPE_STRING, .exttype = "S", .name = "machine", .handler = handle_machine },
@@ -1412,20 +1962,54 @@ index f273989..6107548 100644
  	{ .oid = -1 }
  };
  
-@@ -71,6 +142,12 @@ static const struct host_basic_info* gethostinfo(void)
+@@ -71,6 +146,32 @@ static const struct host_basic_info* gethostinfo(void)
  		hself = mach_host_self();
  		host_info(hself, HOST_BASIC_INFO, &hinfo, &hcount);
  		mach_port_deallocate(mach_task_self(), hself);
 +
-+		// Report the fixed MacBookPro16,1 configuration rather than the Linux host's
-+		hinfo.avail_cpus = hinfo.max_cpus = 8;
-+		hinfo.physical_cpu = hinfo.physical_cpu_max = 8;
-+		hinfo.logical_cpu = hinfo.logical_cpu_max = 8;
-+		hinfo.max_mem = 17179869184ULL; // 16 GB
++		// Keep the emulated MacBookPro16,1 identity (hw.model, brand string,
++		// memory size), but report the host's real CPU counts. The game and the
++		// clients size their worker pools from these values; the old fixed
++		// 8 logical / 8 physical configuration made the game create 7 workers
++		// on a 12-thread host. Note it did not even match the emulated machine:
++		// a MacBookPro16,1 with the i9-9980HK is 8-core/16-thread.
++		// /tmp/rclol-fixed-cpu-count restores the old values for A/B runs.
++		const struct darling_cpu_topology* topo = darling_host_cpu_topology();
++
++		if (topo->detected && !topo->fixed)
++		{
++			hinfo.avail_cpus = topo->available;
++			hinfo.max_cpus = topo->online;
++			hinfo.physical_cpu = topo->physical_available;
++			hinfo.physical_cpu_max = topo->physical_online;
++			hinfo.logical_cpu = topo->available;
++			hinfo.logical_cpu_max = topo->online;
++		}
++		else
++		{
++			hinfo.avail_cpus = hinfo.max_cpus = DARLING_CPU_FIXED_COUNT;
++			hinfo.physical_cpu = hinfo.physical_cpu_max = DARLING_CPU_FIXED_COUNT;
++			hinfo.logical_cpu = hinfo.logical_cpu_max = DARLING_CPU_FIXED_COUNT;
++		}
++		hinfo.max_mem = 17179869184ULL; // 16 GB, matching the emulated machine
  	}
  
  	return &hinfo;
-@@ -174,6 +251,8 @@ sysctl_handler(handle_cpufrequency)
+@@ -83,6 +184,13 @@ sysctl_handler(handle_availcpu)
+ 	return 0;
+ }
+ 
++sysctl_handler(handle_ncpu)
++{
++	sysctl_handle_size(sizeof(int));
++	*((int*) old) = gethostinfo()->max_cpus;
++	return 0;
++}
++
+ sysctl_handler(handle_physicalcpu)
+ {
+ 	sysctl_handle_size(sizeof(int));
+@@ -174,6 +282,8 @@ sysctl_handler(handle_cpufrequency)
  	int freq = 2400000;
  	char buf[16];
  
@@ -1434,7 +2018,7 @@ index f273989..6107548 100644
  	if (read_string("/sys/bus/cpu/devices/cpu0/cpufreq/cpuinfo_max_freq", buf, sizeof(buf)))
  		freq = __simple_atoi(buf, NULL);
  	*((int*) old) = freq;
-@@ -193,3 +272,121 @@ sysctl_handler(handle_machine)
+@@ -193,3 +303,104 @@ sysctl_handler(handle_machine)
  	copyout_string(need_uname()->machine, (char*) old, oldlen);
  	return 0;
  }
@@ -1460,24 +2044,7 @@ index f273989..6107548 100644
 +	return v;
 +}
 +
-+// Number of CPUs in a sysfs list such as "0-1,4-5"
-+static unsigned int cpu_list_count(const char* s)
-+{
-+	unsigned int count = 0;
-+
-+	while (*s >= '0' && *s <= '9')
-+	{
-+		unsigned long long first = parse_ull(s, &s), last = first;
-+
-+		if (*s == '-')
-+			last = parse_ull(s + 1, &s);
-+		if (last >= first)
-+			count += last - first + 1;
-+		if (*s == ',')
-+			s++;
-+	}
-+	return count;
-+}
++// Number of CPUs in a sysfs list such as "0-1,4-5" (darling_cpu_count_list, shared with the topology probe)
 +
 +// Describes the data/unified cache of one level (1 = L1D) of the host's CPU 0.
 +// Instruction caches are skipped, as in XNU. Returns false if the host doesn't report the level.
@@ -1511,7 +2078,7 @@ index f273989..6107548 100644
 +		*size = value;
 +
 +		__simple_sprintf(path, HOST_CACHE_DIR "index%d/shared_cpu_list", index);
-+		*sharing = read_string(path, buf, sizeof(buf)) ? cpu_list_count(buf) : 1;
++		*sharing = read_string(path, buf, sizeof(buf)) ? darling_cpu_count_list(buf) : 1;
 +		if (*sharing == 0)
 +			*sharing = 1;
 +		return true;
@@ -1591,10 +2158,26 @@ index bd9cdc2..83ad15c 100644
  		// we don't want the microseconds to be constantly jumping around
  		// (that actually causes an infinite loop in `_mach_boottime_usec` in libc)
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
-index 4319355..e44e2a2 100644
+index 4319355..122ad3a 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
-@@ -32,8 +32,13 @@ static sysctl_handler(handle_max_basic);
+@@ -4,6 +4,7 @@
+ #include <alloca.h>
+ 
+ #include <darling/emulation/common/simple.h>
++#include <darling/emulation/common/cpu_topology.h>
+ #include <darling/emulation/conversion/fcntl/open.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/fcntl/open.h>
+ #include <darling/emulation/xnu_syscall/bsd/helper/misc/readline.h>
+@@ -25,6 +26,7 @@ enum {
+ 	_CPU_BRAND_STRING,
+ 	_CPU_FEATURES,
+ 	_CPU_CORE_COUNT,
++	_CPU_THREAD_COUNT,
+ };
+ 
+ static sysctl_handler(handle_vendor);
+@@ -32,9 +34,15 @@ static sysctl_handler(handle_max_basic);
  static sysctl_handler(handle_family);
  static sysctl_handler(handle_model);
  static sysctl_handler(handle_stepping);
@@ -1608,9 +2191,11 @@ index 4319355..e44e2a2 100644
 +
 +sysctl_handler(handle_features);
  static sysctl_handler(handle_core_count);
++static sysctl_handler(handle_thread_count);
  
  const struct known_sysctl sysctls_machdep_cpu[] = {
-@@ -42,7 +47,7 @@ const struct known_sysctl sysctls_machdep_cpu[] = {
+     { .oid = _CPU_MAX_BASIC, .type = CTLTYPE_INT, .exttype = "I", .name = "max_basic", .handler = handle_max_basic },
+@@ -42,9 +50,10 @@ const struct known_sysctl sysctls_machdep_cpu[] = {
      { .oid = _CPU_FAMILY, .type = CTLTYPE_INT, .exttype = "I", .name = "family", .handler = handle_family },
  		{ .oid = _CPU_MODEL, .type = CTLTYPE_INT, .exttype = "I", .name = "model", .handler = handle_model },
  		{ .oid = _CPU_STEPPING, .type = CTLTYPE_INT, .exttype = "I", .name = "stepping", .handler = handle_stepping },
@@ -1618,8 +2203,11 @@ index 4319355..e44e2a2 100644
 +		{ .oid = _CPU_BRAND_STRING, .type = CTLTYPE_STRING, .exttype = "S", .name = "brand_string", .handler = handle_brand_string },
  		{ .oid = _CPU_FEATURES, .type = CTLTYPE_STRING, .exttype = "S", .name = "features", .handler = handle_features },
  		{ .oid = _CPU_CORE_COUNT, .type = CTLTYPE_INT, .exttype = "I", .name = "core_count", .handler = handle_core_count },
++		{ .oid = _CPU_THREAD_COUNT, .type = CTLTYPE_INT, .exttype = "I", .name = "thread_count", .handler = handle_thread_count },
  	{ .oid = -1 }
-@@ -154,38 +159,37 @@ sysctl_handler(handle_stepping)
+ };
+ 
+@@ -154,38 +163,37 @@ sysctl_handler(handle_stepping)
      return 0;
  }
  
@@ -1633,6 +2221,7 @@ index 4319355..e44e2a2 100644
 -
 -    if (eax < 0x80000004) // the information is not implemented
 -        return 2;
+-
 +	union
 +	{
 +		unsigned int brand[12];
@@ -1642,15 +2231,14 @@ index 4319355..e44e2a2 100644
  
 +	__asm__("cpuid" : "=a" (eax), "=b" (ebx), "=c" (ecx), "=d" (edx) : "0" (0x80000000u), "2" (0));
  
-+	if (eax < 0x80000004) // the information is not implemented
-+		return -ENOENT;
- 
 -    union
 -    {
 -        unsigned int brand[12];
 -        char name[49];
 -    } v;
--
++	if (eax < 0x80000004) // the information is not implemented
++		return -ENOENT;
+ 
 -		for (int i = 1; i < 4; i++)
 -		{
 -				eax = 0x80000000+i;
@@ -1681,6 +2269,112 @@ index 4319355..e44e2a2 100644
  
  sysctl_handler(handle_features)
  {
+@@ -269,45 +277,54 @@ sysctl_handler(handle_features)
+ // TODO: i doubt core count is ever going to change.
+ //       this is something that could be cached if we had some way of doing something only once in libsystem_kernel (i.e. a simple version of dispatch_once).
+ sysctl_handler(handle_core_count) {
+-	// it's easier to use /proc/cpuinfo for this.
+-	// using cpuid directly is more difficult because AMD processors don't use the same method as Intel processors.
++	// the topology probe (shared with the hw.* sysctls) reads the host's
++	// package/core ids and caches the answer; fall back to /proc/cpuinfo when
++	// the host doesn't expose /sys.
++	const struct darling_cpu_topology* topo = darling_host_cpu_topology();
++	size_t core_count = (topo->detected && !topo->fixed) ? topo->physical_online : 0;
++	int infofd = -1;
+ 
+-	int infofd = sys_open_nocancel("/proc/cpuinfo", BSD_O_RDONLY, 0);
+-	struct rdline_buffer rbuf;
+-	const char* line;
++	if (core_count == 0) {
++		// it's easier to use /proc/cpuinfo for this.
++		// using cpuid directly is more difficult because AMD processors don't use the same method as Intel processors.
+ 
+-	// a reasonable default
+-	size_t core_count = 1;
++		infofd = sys_open_nocancel("/proc/cpuinfo", BSD_O_RDONLY, 0);
++		struct rdline_buffer rbuf;
++		const char* line;
+ 
+-	if (infofd < 0)
+-		goto out;
++		// a reasonable default
++		core_count = 1;
+ 
+-	_readline_init(&rbuf);
++		if (infofd < 0)
++			goto out;
+ 
+-	while ((line = _readline(infofd, &rbuf)) != NULL) {
+-		if (strncmp(line, "cpu cores", 9) != 0) {
+-			continue;
+-		}
++		_readline_init(&rbuf);
+ 
+-		// great, we've got "cpu cores"
+-		// now find the actual number
+-		while (*line != ':' && *line != '\0')
+-			++line;
++		while ((line = _readline(infofd, &rbuf)) != NULL) {
++			if (strncmp(line, "cpu cores", 9) != 0) {
++				continue;
++			}
+ 
+-		// shouldn't happen, but just in case
+-		if (*line == '\0')
+-			continue;
++			// great, we've got "cpu cores"
++			// now find the actual number
++			while (*line != ':' && *line != '\0')
++				++line;
+ 
+-		++line; // skip the colon
+-		if (*line == '\0')
+-			continue;
++			// shouldn't happen, but just in case
++			if (*line == '\0')
++				continue;
+ 
+-		++line; // skip the space
+-		if (*line == '\0')
+-			continue;
++			++line; // skip the colon
++			if (*line == '\0')
++				continue;
+ 
+-		core_count = __simple_atoi(line, NULL);
+-		break;
++			++line; // skip the space
++			if (*line == '\0')
++				continue;
++
++			core_count = __simple_atoi(line, NULL);
++			break;
++		}
+ 	}
+ 
+ out:
+@@ -319,3 +336,21 @@ out:
+ 		*oldlen = sizeof(uint32_t);
+ 	return 0;
+ }
++
++// The host's online logical CPU count (machdep.cpu.thread_count on macOS).
++sysctl_handler(handle_thread_count) {
++	const struct darling_cpu_topology* topo = darling_host_cpu_topology();
++	size_t thread_count = (topo->detected && !topo->fixed) ? topo->online : 0;
++
++	if (thread_count == 0) {
++		// Detection failed or the opt-out is active: fall back to the same
++		// fixed value the hw.* handlers use.
++		thread_count = DARLING_CPU_FIXED_COUNT;
++	}
++
++	if (old != NULL && oldlen && *oldlen >= sizeof(uint32_t))
++		*(uint32_t*)old = thread_count;
++	if (oldlen)
++		*oldlen = sizeof(uint32_t);
++	return 0;
++}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_net.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_net.c
 index 8fabdda..6cc204e 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_net.c
@@ -1799,22 +2493,29 @@ index 6f8cf43..c5f6d08 100644
  	guard_entry_options_t options;
  	options.close = __dserver_close_socket;
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/bsdthread/bsdthread_register.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/bsdthread/bsdthread_register.c
-index 919205b..ecd19cd 100644
+index 919205b..5c678ab 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/bsdthread/bsdthread_register.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/bsdthread/bsdthread_register.c
-@@ -34,6 +34,22 @@ struct _pthread_registration_data {
+@@ -34,6 +34,29 @@ struct _pthread_registration_data {
  
  static struct _pthread_registration_data g_pth_regdata;
  
 +extern int __darling_is_league_game(void);
++extern void __darling_core_isolate_main_thread(void);
++extern void __darling_core_isolate_new_thread(void);
 +/* Modern libpthread registration has stack_addr_hint at byte 36, followed
 + * by mutex_default_policy at byte 44. Keep the old prefix ABI unchanged. */
++/* darling-lol: the League game process takes FIRSTFIT mutexes, whose contention the process handles itself
++ * (see psynch_mutexwait.c) and whose condition variables then use the ulock path. This is decided once per
++ * process: on for the game unless /tmp/rclol-no-local-condvars exists, and /tmp/rclol-local-condvars-all turns
++ * it on for every process (probe tests). /tmp/rclol-local-condvars used to be the opt-in switch; the file may
++ * still exist and is now ignored. */
 +static void enable_local_conditions(const struct _pthread_registration_data* data,
 +                                    unsigned long length)
 +{
 +    if (length < 48 || data->version < 48) return;
 +    if (LINUX_SYSCALL(__NR_access, "/tmp/rclol-local-condvars-all", 0) != 0 &&
-+        (LINUX_SYSCALL(__NR_access, "/tmp/rclol-local-condvars", 0) != 0 ||
++        (LINUX_SYSCALL(__NR_access, "/tmp/rclol-no-local-condvars", 0) == 0 ||
 +         !__darling_is_league_game())) return;
 +    /* FIRSTFIT (3) | USE_ULOCK (0x100). Recursive/error-check/shared mutexes
 +     * still take libpthread's psynch path. This field is a kernel copyout. */
@@ -1825,15 +2526,41 @@ index 919205b..ecd19cd 100644
  long sys_bsdthread_register(void* thread_start, void* wqthread, int pthsize,
  		const struct _pthread_registration_data* pth_regdata,
  		unsigned long pth_regdata_len, unsigned long long dpq_offset)
-@@ -42,6 +58,7 @@ long sys_bsdthread_register(void* thread_start, void* wqthread, int pthsize,
+@@ -42,6 +65,12 @@ long sys_bsdthread_register(void* thread_start, void* wqthread, int pthsize,
  	pthread_entry_point = (bsdthread_entry_t) thread_start;
  	wqueue_entry_point = (bsdwqthread_entry_t) wqthread;
  	g_pth_regdata = *pth_regdata;
 +	enable_local_conditions(pth_regdata, pth_regdata_len);
++	/* darling-lol: libpthread initializes here, on the process' initial thread, before any thread can be
++	 * created. That is the one place where the game process' main thread can be given its own core
++	 * scheduling cookie (see mach_traps.c). The call decides for itself whether this is the game, whether
++	 * the caller is the initial thread and whether the host supports the prctl. */
++	__darling_core_isolate_main_thread();
  
  	uintptr_t pthread_handle = _pthread_getspecific_direct(_PTHREAD_TSD_SLOT_PTHREAD_SELF);
  	uintptr_t dispatch_qaddr = pthread_handle + g_pth_regdata.tsd_offset + g_pth_regdata.dispatch_queue_offset;
-@@ -156,6 +173,11 @@ void wqueue_entry_point_asm_jump(void* self, int thread_port, void* stackaddr,
+@@ -59,6 +88,10 @@ long sys_bsdthread_register(void* thread_start, void* wqthread, int pthsize,
+ void pthread_entry_point_wrapper(void* self, int thread_port, void* funptr,
+ 		void* funarg, unsigned long stack_addr, unsigned int flags)
+ {
++	/* darling-lol: every guest thread starts here; it must not keep the core scheduling cookie it
++	 * inherited from its creator (a thread created by the main thread would carry the main cookie and
++	 * could run on the main thread's core). See mach_traps.c. */
++	__darling_core_isolate_new_thread();
+ 	sigexc_thread_setup();
+ 
+ 	uintptr_t pthread_handle = (unsigned long) self;
+@@ -122,6 +155,9 @@ void pthread_entry_point_wrapper(void* self, int thread_port, void* funptr,
+ void wqueue_entry_point_wrapper(void* self, int thread_port, void* stackaddr,
+ 		void* item, int reuse, int nevents)
+ {
++	/* darling-lol: workqueue threads start here too and must lose the inherited core scheduling
++	 * cookie the same way normal pthreads do (see mach_traps.c). */
++	__darling_core_isolate_new_thread();
+ 	sigexc_thread_setup();
+ 	wqueue_entry_point_asm_jump(self, thread_port, stackaddr, item, reuse, nevents);
+ }
+@@ -156,6 +192,11 @@ void wqueue_entry_point_asm_jump(void* self, int thread_port, void* stackaddr,
  		// `_start_wqthread` does not expect the stack to be aligned (using the 
  		// call instruction will add the return address to the stack, causing 
  		// it to be aligned).
@@ -2165,6 +2892,25 @@ index dbcdd98..0021dc2 100644
  }
  
  #define __PTHREAD_PRIORITY_CBIT_USER_INTERACTIVE 0x20
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/guarded/change_fdguard_np.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/guarded/change_fdguard_np.c
+new file mode 100644
+index 0000000..0bb5800
+--- /dev/null
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/guarded/change_fdguard_np.c
+@@ -0,0 +1,13 @@
++#include <darling/emulation/xnu_syscall/bsd/impl/guarded/change_fdguard_np.h>
++
++#include <darling/emulation/common/base.h>
++
++/* darling-lol M57: Chromium's UDP socket code calls change_fdguard_np
++ * (Darwin syscall 444). Darling's fdguard support is a no-op everywhere
++ * (guarded_open_np/guarded_close_np/guarded_kqueue_np all ignore it), so
++ * accept the request and report success. Without this the syscall was
++ * unhandled (ENOSYS), which made Chromium FATAL in udp_socket_posix.cc. */
++long sys_change_fdguard_np(int fd, uint64_t* guard, uint64_t* nguard, unsigned guardflags, int* fdflagsp)
++{
++	return 0;
++}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/guarded/guarded_close_np.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/guarded/guarded_close_np.c
 index 8980d77..361efc4 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/guarded/guarded_close_np.c
@@ -2574,6 +3320,113 @@ index 10f39a5..29747d4 100644
  
  		current = next;
  		token = strtok_r(NULL, ".", &saveptr);
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/madvise.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/madvise.c
+index 10c412b..adb7e24 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/madvise.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/madvise.c
+@@ -4,23 +4,97 @@
+ 
+ #include <darling/emulation/conversion/errno.h>
+ #include <darling/emulation/common/base.h>
++#include <darling/emulation/common/simple.h>
+ #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
++#include <darling/emulation/xnu_syscall/bsd/helper/misc/sysctl_proc.h>
+ 
+ #define MADV_FREE 5
+ #define MADV_FREE_REUSABLE 7
+ #define MADV_FREE_REUSE 8
++#define LINUX_MADV_FREE 8
++#define LINUX_MADV_POPULATE_WRITE 23
++
++/* darling-lol: Linux splits a transparent huge page when MADV_FREE covers only
++ * part of it. libmalloc hands the free hint out per 4 KiB page of its tiny,
++ * small and medium regions, i.e. for the mappings that otherwise get 2 MiB
++ * huge pages (measured on the target host: one 4 KiB hint turned 2 MiB of
++ * AnonHugePages into 512 small pages). Forwarding the hint only for whole huge
++ * pages stays inside the Darwin contract (a hint may cover less than the
++ * requested range) and keeps the huge pages.
++ *
++ * The host policy is read once per process: with THP "always" every anonymous
++ * mapping gets huge pages, so partial hints are skipped; with "never" or
++ * "madvise" there are no huge pages for this layer to split (the emulation
++ * never requests MADV_HUGEPAGE), so the full range is forwarded as before.
++ * An unreadable policy keeps the old full-range behaviour. */
++static unsigned long thp_huge_page_size; /* written before thp_mode */
++static int thp_mode = -1; /* -1 not probed, 0 full range, 1 whole huge pages only */
++
++static int host_thp_mode(void)
++{
++	int mode = __atomic_load_n(&thp_mode, __ATOMIC_ACQUIRE);
++	char buffer[64];
++
++	if (mode >= 0)
++		return mode;
++
++	mode = 0;
++	if (read_string("/sys/kernel/mm/transparent_hugepage/enabled", buffer, sizeof(buffer)))
++	{
++		const char* selected;
++
++		/* the selected policy is the one in brackets */
++		for (selected = buffer; *selected != '\0' && *selected != '['; ++selected)
++			;
++		if (selected[0] == '[' && selected[1] == 'a') /* [always] */
++			mode = 1;
++	}
++	if (mode == 1 && read_string("/sys/kernel/mm/transparent_hugepage/hpage_pmd_size", buffer, sizeof(buffer)))
++	{
++		unsigned long size = __simple_atoi(buffer, 0);
++		if (size >= 4096 && (size & (size - 1)) == 0)
++			thp_huge_page_size = size;
++	}
++	__atomic_store_n(&thp_mode, mode, __ATOMIC_RELEASE);
++	return mode;
++}
+ 
+ long sys_madvise(void* addr, unsigned long len, int advice)
+ {
+ 	int ret;
+ 
+-	if (advice == MADV_FREE_REUSABLE || advice == MADV_FREE_REUSE)
+-		advice = MADV_FREE;
++	if (advice == MADV_FREE || advice == MADV_FREE_REUSABLE) {
++		if (host_thp_mode() == 1) {
++			unsigned long page = thp_huge_page_size;
++			unsigned long lo, hi;
+ 
+-	// advice < 0 are identical between OS X and Linux
+-	// advice >= 5 are specific to OS X/BSD
+-	if (advice >= 5)
++			if (page == 0)
++				page = 2 * 1024 * 1024;
++			/* round the range inward to whole huge pages */
++			lo = ((unsigned long) addr + page - 1) & ~(page - 1);
++			hi = ((unsigned long) addr + len) & ~(page - 1);
++			if (hi <= lo)
++				return 0; /* no whole huge page: nothing to split */
++			addr = (void*) lo;
++			len = hi - lo;
++		}
++		// The allocator no longer needs these private anonymous pages. Linux
++		// may reclaim them without swapping; subsequent writes cancel reclaim.
++		advice = LINUX_MADV_FREE;
++	} else if (advice == MADV_FREE_REUSE) {
++		// Reused pages must stop being lazily discardable. A write-prefault
++		// cancels MADV_FREE without changing the surviving page contents.
++		// This operation is available on Linux 5.14 and later.
++		//
++		// The full range is forwarded on purpose: Darwin promises that the
++		// range is no longer lazily reclaimable when REUSE returns, and a
++		// caller may reuse a page range that an earlier free hint marked.
++		// Only a write-prefault of that particular page cancels its laziness.
++		advice = LINUX_MADV_POPULATE_WRITE;
++	} else if (advice >= 5) {
++		// Other OS X/BSD-specific hints do not share Linux's numeric values.
+ 		return 0;
++	}
+ 
+ 	ret = LINUX_SYSCALL(__NR_madvise, addr, len, advice);
+ 
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/network/accept.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/network/accept.c
 index 4daa631..5aeedd0 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/network/accept.c
@@ -2646,7 +3499,7 @@ index 927ccbb..ae353d3 100644
  	if (ret < 0)
  		ret = errno_linux_to_bsd(ret);
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/process/fork.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/process/fork.c
-index 76b6f53..478e158 100644
+index 76b6f53..a6c24ff 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/process/fork.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/process/fork.c
 @@ -4,6 +4,7 @@
@@ -2687,6 +3540,18 @@ index 76b6f53..478e158 100644
  	else if (ret == 0)
  	{
  		// in the child
+@@ -39,6 +43,11 @@ long sys_fork(void)
+ 		// that should also take care of closing descriptors for any other threads.
+ 		guard_table_postfork_child();
+ 
++		/* darling-lol: the child's IPC space is fresh (duct-tape ipc_task_init creates an empty one),
++		 * so local Mach semaphores inherited from the parent must not be served in the child. */
++		extern void __darling_local_semaphores_after_fork(void);
++		__darling_local_semaphores_after_fork();
++
+ 		// create a new dserver RPC socket
+ 		__dserver_per_thread_socket_refresh();
+ 		int newReadFd = __dserver_process_lifetime_pipe_refresh();
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/psynch/psynch_cvwait.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/psynch/psynch_cvwait.c
 index d093b73..b5d0ab1 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/psynch/psynch_cvwait.c
@@ -2747,10 +3612,10 @@ index 1799f60..d6f4879 100644
  	int ret = dserver_rpc_psynch_mutexdrop(mutex, mgen, ugen, tid, flags, &retval);
  
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/psynch/psynch_mutexwait.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/psynch/psynch_mutexwait.c
-index 2a05251..4893775 100644
+index 2a05251..205eaa6 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/psynch/psynch_mutexwait.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/psynch/psynch_mutexwait.c
-@@ -7,11 +7,273 @@
+@@ -7,11 +7,274 @@
  #include <darling/emulation/conversion/duct_errno.h>
  
  #include <darlingserver/rpc.h>
@@ -2769,8 +3634,9 @@ index 2a05251..4893775 100644
 + * waits). A waiter sleeps on a futex. Fair-share and process-shared mutexes, condition variables and rwlocks still go
 + * to the server; psynch_cvwait performs the mutex drop here first when the mutex is a local one.
 + *
-+ * Decided once per process: the League game process only, and only with the host file /tmp/rclol-local-mutex
-+ * (opt-in while it is being validated). /tmp/rclol-local-mutex-all enables it in every process (probe tests). */
++ * Decided once per process: in the League game process this is on unless the host file /tmp/rclol-no-local-mutex
++ * exists. (/tmp/rclol-local-mutex used to be the opt-in switch and is now a no-op.) /tmp/rclol-local-mutex-all
++ * still enables it in every process (probe tests). */
 +#define LMTX_COUNT_MASK 0xffffff00u
 +#define LMTX_KBIT 0x01u
 +#define LMTX_EBIT 0x02u
@@ -2861,7 +3727,7 @@ index 2a05251..4893775 100644
 +	if (state == 0) {
 +		if (LINUX_SYSCALL(__NR_access, "/tmp/rclol-local-mutex-all", 0) == 0)
 +			state = 1;
-+		else if (LINUX_SYSCALL(__NR_access, "/tmp/rclol-local-mutex", 0) == 0 && __darling_is_league_game())
++		else if (LINUX_SYSCALL(__NR_access, "/tmp/rclol-no-local-mutex", 0) != 0 && __darling_is_league_game())
 +			state = 1;
 +		else
 +			state = -1;
@@ -3578,10 +4444,10 @@ index 687a1b5..83b905a 100644
  		ret = errno_linux_to_bsd(ret);
  
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/time/gettimeofday.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/time/gettimeofday.c
-index be89afd..cdf71d2 100644
+index be89afd..96bc339 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/time/gettimeofday.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/time/gettimeofday.c
-@@ -3,12 +3,27 @@
+@@ -3,12 +3,32 @@
  #include <darling/emulation/common/base.h>
  #include <darling/emulation/conversion/errno.h>
  #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
@@ -3596,9 +4462,14 @@ index be89afd..cdf71d2 100644
 +	/* darling-lol: user-space clock, see linux_premigration/ext/clock_gettime.c */
 +	if (tz == 0)
 +	{
++		extern int __darling_vdso_clock_gettime(int clockid, struct timespec* res);
 +		extern int __darling_fast_clock(int clockid, struct timespec* res);
 +		struct timespec ts;
-+		if (__darling_fast_clock(0 /* CLOCK_REALTIME */, &ts) == 0)
++		/* The vDSO's CLOCK_REALTIME is the same value the syscall would
++		 * return; the TSC path stays the fallback for a host whose vDSO
++		 * cannot serve the clock. */
++		if (__darling_vdso_clock_gettime(0 /* CLOCK_REALTIME */, &ts) == 0
++				|| __darling_fast_clock(0 /* CLOCK_REALTIME */, &ts) == 0)
 +		{
 +			tv->tv_sec = ts.tv_sec;
 +			tv->tv_usec = ts.tv_nsec / 1000;
@@ -3941,7 +4812,7 @@ index c1b2d50..4e19963 100644
  	return ret;
  }
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/mach/impl/mach_traps.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/mach/impl/mach_traps.c
-index b998456..3e643c1 100644
+index b998456..2783a4a 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/mach/impl/mach_traps.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/mach/impl/mach_traps.c
 @@ -12,9 +12,28 @@
@@ -3996,7 +4867,7 @@ index b998456..3e643c1 100644
  
  	if (code < 0) {
  		if (code == -LINUX_EINTR) {
-@@ -92,33 +117,517 @@ retry:
+@@ -92,33 +117,860 @@ retry:
  			}
  		}
  		__simple_printf("mach_msg_overwrite failed (internally): %d\n", code);
@@ -4067,22 +4938,67 @@ index b998456..3e643c1 100644
 + *
 + * A semaphore created by this task (semaphore_create on mach_task_self) is now also kept here as a futex counter and
 + * all traps on it are served locally. The server-side object still exists, so the port name stays valid, but it is
-+ * never signalled. Limits: a semaphore whose right is sent to another process would not be woken by that process
-+ * (nothing in the game does this), and semaphore_signal_thread with a thread is not supported (KERN_NOT_WAITING).
-+ * OPT-IN again (host file /tmp/rclol-local-semaphores). While it was on by default (2026-10-10 22:22-23:50) LeagueClient
-+ * died ~85 s after start in 3 of 4 checked launches ("mach_msg_overwrite failed -9", then dserver_rpc_interrupt_enter
-+ * -9: its RPC descriptor had become invalid) and the user saw Vanguard errors; with it off the client survived. The
-+ * mechanism is not understood. /tmp/rclol-no-local-semaphores also turns it off, and
-+ * /tmp/rclol-local-semaphores-all turns it on for every process (probe tests). Decided once per process. */
++ * never signalled. Anything the table did not insert itself -- a name it has never seen, a semaphore created by or
++ * for another task, an inherited name in a fork child -- goes to the server path unchanged; the two are never mixed
++ * for one name.
++ *
++ * A slot is (name, generation, value). The generation changes on every assignment and on every destroy, and value+gen
++ * share one atomic word, so a waiter takes a token with a compare-exchange on that word: it can only ever consume a
++ * token of the generation it resolved, and a slot reused after a destroy -- even under the same port name -- is a
++ * different generation, which fails the compare-exchange or one of the generation/name checks every operation makes.
++ * KERN_TERMINATED on a slot that no longer names the resolved object is what Darwin returns for a semaphore that died
++ * while the call was in flight. A fork tombstones the child's copy of the table (see
++ * __darling_local_semaphores_after_fork): the child's IPC space is fresh, no inherited name is valid there.
++ *
++ * LIMITS: a semaphore whose right is sent to another process is signalled through the server on the other side and
++ * never reaches this counter (nothing in the game does this; the counters in build/perf-research/blocking are meant
++ * to prove it before this becomes default); a local wait cannot be interrupted by thread_abort/pthread_cancel (the
++ * server does not know about it), so only a signal, a destroy or its timeout ends one; semaphore_signal_thread with
++ * a specific thread answers KERN_NOT_WAITING. build/perf-research/lsem-fix/REPORT.md has the full list.
++ *
++ * On by default in the League game process only, unless the host file /tmp/rclol-no-local-semaphores exists
++ * (/tmp/rclol-local-semaphores, the former opt-in switch, is now a no-op). While it was on by default in every
++ * process (2026-10-10 22:22-23:50) LeagueClient died ~85 s after start in 3 of 4 checked launches
++ * ("mach_msg_overwrite failed -9", then dserver_rpc_interrupt_enter -9: its RPC descriptor had become invalid) and
++ * the user saw Vanguard errors; that mechanism is not understood, so the clients keep the server path. With the
++ * lifetime fixes above the game ran two full matches with it (2026-10-14: the main thread's server waits fell from
++ * 1.36 to 0.10 ms per frame, 39 to 15 blocks per frame). /tmp/rclol-local-semaphores-all turns it on for every
++ * process (probe tests). Decided once per process and logged
++ * once per game process to /tmp/rclol-game-decisions.log as local_semaphores=0|1. */
 +#define LSEM_SLOTS 8192u
 +#define LSEM_TOMB 0xffffffffu
++/* What a destroy leaves in the token word: a negative count, so no waiter and no signal can take it for a live
++ * token even if it resolved the slot while the destroy was still in flight (the generation and the name are only
++ * two more loads away from being visible; the value is the one the token compare-exchange goes through). */
++#define LSEM_TOMB_VALUE (-1)
 +#define LSEM_FUTEX_WAIT 0
 +#define LSEM_FUTEX_WAKE 1
++#define LSEM_FUTEX_PRIVATE 0x80u /* FUTEX_PRIVATE_FLAG: the word is always this process's own memory */
++/* The token count and the generation are one atomic word: lsem_wait takes a token with a compare-exchange on the
++ * pair, so the token can only come from the generation it checked. The low half is the futex word the syscalls
++ * address; every value write is a generation-checked compare-exchange, never a plain add. */
++union lsem_pv {
++	unsigned long long pair;
++	struct {
++		volatile int value;
++		volatile unsigned int gen;
++	} w;
++};
++_Static_assert(sizeof(union lsem_pv) == 8 && _Alignof(union lsem_pv) == 8,
++	"the token and the generation must share one naturally aligned atomic word");
 +struct lsem {
++	union lsem_pv pv;
 +	volatile unsigned int name;
-+	volatile unsigned int gen;
-+	volatile int value;
-+	volatile int waiters;
++	volatile int waiters; /* a hint for the signal wake filter and signal_all's count; the futex protocol carries correctness */
++};
++/* The second semaphore of a combined wait_signal/timedwait_signal trap. XNU registers the wait on the wait semaphore
++ * and only then signals the signal semaphore (even when the wait did not block); a local wait signals it from inside
++ * the loop, at that same point (see lsem_post_signal). */
++struct lsem_post {
++	struct lsem* s; /* 0: not local, signal the name through the server */
++	unsigned int name;
++	unsigned int gen;
++	volatile int done;
 +};
 +static struct lsem lsems[LSEM_SLOTS];
 +static volatile int lsem_state; /* 0 undecided, 1 on, -1 off */
@@ -4146,21 +5062,203 @@ index b998456..3e643c1 100644
 +	return darling_is_league_game();
 +}
 +
++/* darling-lol: core isolation for the game's initial thread.
++ *
++ * The game's main thread is the bottleneck (~80% of one core) and in the last matches 16% of its running time (up
++ * to 36% in fights) another thread of ours ran on its SMT sibling. Linux core scheduling (CONFIG_SCHED_CORE,
++ * prctl PR_SCHED_CORE, 5.13+) lets a task carry a cookie: tasks with different cookies (an untagged task has
++ * cookie 0) are never scheduled on the same physical core at the same time, the losing sibling is forced idle.
++ * The main thread creates a cookie of its own, so no other thread of the process, no darlingserver thread and no
++ * other process can share its core; the kernel keeps the rest of the system's SMT pairing as it was. On this host
++ * (first run 2026-10-14, build/perf-research/core-isolation/) two threads pinned to the two SMT siblings of one
++ * core did one thread's work when one was tagged and the other was not, and twice that when both were untagged or
++ * shared a cookie.
++ *
++ * A new thread inherits the cookie of the thread that created it (kernel core_sched.c: sched_core_fork()), so a
++ * thread created by the tagged main thread would carry the main cookie and could run on its core again. Every
++ * other thread of the process therefore shares one *other* cookie instead: the first one to start creates it and
++ * remembers its tid, later threads take it over with PR_SCHED_CORE_SHARE_FROM. They stay in one group (they may
++ * still share cores with each other, as before) and only the main thread becomes incompatible with everything
++ * else. Thread pools retire their threads, so if the recorded owner is gone (SHARE_FROM fails) the caller creates
++ * a fresh cookie and takes the role over. A forked child inherits the record as well, and the tid in it can then
++ * name a task of the parent (or of an unrelated process), so the record is only used while it belongs to the
++ * process reading it; a child's first thread takes the worker role over with a cookie of its own.
++ *
++ * Best effort throughout: if the prctl is unavailable (EINVAL/EPERM/ENODEV - host without CONFIG_SCHED_CORE, SMT
++ * off, or a kernel without the feature) nothing changes.
++ *
++ * Opt-in, only with the host file /tmp/rclol-core-isolation: in the first match with it on (2026-10-14, Hexgate,
++ * same minutes compared) the game fell from 118 to 103 fps. The main thread waited for a CPU 12.6% of the time
++ * (1% without) and the other game threads queued as well: forced idle siblings cost more on this busy 6-core host
++ * than the sharing they prevent.
++ * The decision is appended once per process to /tmp/rclol-game-decisions.log as
++ * "core_isolation=0|1 errno=<prctl result, -1 off, -2 registration was not on the initial thread> cookie=<hash>". */
++#define LCORE_PRCTL_SCHED_CORE 62 /* include/uapi/linux/prctl.h */
++#define LCORE_GET 0
++#define LCORE_CREATE 1        /* give the calling thread a cookie of its own */
++#define LCORE_SHARE_FROM 3    /* the calling thread takes over the cookie of the thread at arg3 */
++#define LCORE_SCOPE_THREAD 0
++
++static volatile int lcore_state;      /* 0 undecided, 1 on, -1 off */
++static volatile int lcore_main;       /* 0 not tried, 1 the initial thread has its own cookie, -1 it has none */
++static volatile int lcore_worker_tid; /* tid whose cookie the other threads share, 0 = none yet */
++static volatile int lcore_worker_pid; /* process that tid belongs to; a forked child must not use it */
++
++static void lcore_log(int on, long err, unsigned long long cookie)
++{
++	char line[128];
++	long log = LINUX_SYSCALL(__NR_open, "/tmp/rclol-game-decisions.log", 02101 /* O_WRONLY|O_CREAT|O_APPEND */, 0666);
++	if (log < 0)
++		return;
++	int len = __simple_sprintf(line, "pid=%d core_isolation=%d errno=%ld cookie=%llu\n",
++			(int) LINUX_SYSCALL(__NR_getpid), on, err, cookie);
++	LINUX_SYSCALL(__NR_write, log, line, len);
++	LINUX_SYSCALL(__NR_close, log);
++}
++
++static int lcore_decide(void)
++{
++	int state = __atomic_load_n(&lcore_state, __ATOMIC_ACQUIRE);
++	if (state != 0)
++		return state;
++	if (__darling_is_league_game() && LINUX_SYSCALL(__NR_access, "/tmp/rclol-core-isolation", 0) == 0)
++		state = 1;
++	else
++		state = -1;
++	__atomic_store_n(&lcore_state, state, __ATOMIC_RELEASE);
++	return state;
++}
++
++/* Called from sys_bsdthread_register (libpthread's per-process initialization). */
++__attribute__((visibility("hidden")))
++void __darling_core_isolate_main_thread(void)
++{
++	unsigned long long cookie = 0;
++	int expected = 0;
++	long err;
++
++	/* once per process: a forked child keeps (inherits) whatever the parent's initial thread had */
++	if (!__atomic_compare_exchange_n(&lcore_main, &expected, -1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
++		return;
++
++	if (lcore_decide() != 1) {
++		/* only the game logs its decision; every other Darling process would add a line otherwise */
++		if (__darling_is_league_game())
++			lcore_log(0, -1, 0); /* /tmp/rclol-core-isolation absent */
++		return;
++	}
++	/* Only the process' initial thread may take this cookie: its threads are created with clone() from it and
++	 * the thread entry clears the inherited cookie again. gettid() == getpid() is that initial thread. If
++	 * registration ever ran on another thread, leave everything untagged rather than tag the wrong thread. */
++	if (LINUX_SYSCALL(__NR_gettid) != LINUX_SYSCALL(__NR_getpid)) {
++		lcore_log(0, -2, 0);
++		return;
++	}
++	err = LINUX_SYSCALL5(__NR_prctl, LCORE_PRCTL_SCHED_CORE, LCORE_CREATE, 0, LCORE_SCOPE_THREAD, 0);
++	if (err == 0) {
++		long got = LINUX_SYSCALL5(__NR_prctl, LCORE_PRCTL_SCHED_CORE, LCORE_GET, 0, LCORE_SCOPE_THREAD, &cookie);
++		if (got != 0)
++			cookie = 0;
++		__atomic_store_n(&lcore_main, 1, __ATOMIC_RELEASE);
++	}
++	lcore_log(err == 0, err, cookie);
++}
++
++/* Called from the entry of every new guest thread (pthread_entry_point_wrapper and
++ * wqueue_entry_point_wrapper). */
++__attribute__((visibility("hidden")))
++void __darling_core_isolate_new_thread(void)
++{
++	int pid, me, owner = 0;
++	int expected;
++
++	/* the initial thread was not tagged (not the game, opted out, or the prctl failed): nothing to avoid */
++	if (__atomic_load_n(&lcore_main, __ATOMIC_ACQUIRE) != 1)
++		return;
++
++	pid = (int) LINUX_SYSCALL(__NR_getpid);
++	me = (int) LINUX_SYSCALL(__NR_gettid);
++	if (me == pid)
++		return; /* the initial thread keeps its own cookie */
++
++	if (__atomic_load_n(&lcore_worker_pid, __ATOMIC_ACQUIRE) == pid)
++		owner = __atomic_load_n(&lcore_worker_tid, __ATOMIC_ACQUIRE);
++
++	if (owner == 0) {
++		if (LINUX_SYSCALL5(__NR_prctl, LCORE_PRCTL_SCHED_CORE, LCORE_CREATE, 0, LCORE_SCOPE_THREAD, 0) != 0)
++			return; /* no cookie for this thread; it keeps the one it inherited */
++		expected = 0;
++		if (__atomic_compare_exchange_n(&lcore_worker_tid, &expected, me, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
++			__atomic_store_n(&lcore_worker_pid, pid, __ATOMIC_RELEASE);
++			return; /* this thread owns the shared worker cookie from now on */
++		}
++		/* the published owner belongs to a process that no longer is this one (a forked child saw the
++		 * parent's record): it must not be used, the cookie created above becomes the shared one */
++		if (__atomic_load_n(&lcore_worker_pid, __ATOMIC_ACQUIRE) != pid) {
++			__atomic_store_n(&lcore_worker_tid, me, __ATOMIC_RELEASE);
++			__atomic_store_n(&lcore_worker_pid, pid, __ATOMIC_RELEASE);
++			return;
++		}
++		owner = expected; /* another thread of this process published its cookie first: join it */
++	}
++
++	if (owner == me)
++		return;
++	if (LINUX_SYSCALL5(__NR_prctl, LCORE_PRCTL_SCHED_CORE, LCORE_SHARE_FROM, owner, LCORE_SCOPE_THREAD, 0) == 0)
++		return;
++	/* the recorded owner is gone (retired worker, or a parent process after fork): take the role over */
++	if (LINUX_SYSCALL5(__NR_prctl, LCORE_PRCTL_SCHED_CORE, LCORE_CREATE, 0, LCORE_SCOPE_THREAD, 0) != 0)
++		return;
++	expected = owner;
++	if (__atomic_compare_exchange_n(&lcore_worker_tid, &expected, me, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
++		__atomic_store_n(&lcore_worker_pid, pid, __ATOMIC_RELEASE);
++		return;
++	}
++	if (expected != 0 && expected != me)
++		LINUX_SYSCALL5(__NR_prctl, LCORE_PRCTL_SCHED_CORE, LCORE_SHARE_FROM, expected, LCORE_SCOPE_THREAD, 0);
++}
++
++static void lsem_log(int on)
++{
++	char line[96];
++	long log = LINUX_SYSCALL(__NR_open, "/tmp/rclol-game-decisions.log", 02101 /* O_WRONLY|O_CREAT|O_APPEND */, 0666);
++	if (log < 0)
++		return;
++	int len = __simple_sprintf(line, "pid=%d local_semaphores=%d\n", (int) LINUX_SYSCALL(__NR_getpid), on);
++	LINUX_SYSCALL(__NR_write, log, line, len);
++	LINUX_SYSCALL(__NR_close, log);
++}
++
 +static int lsem_decide(void)
 +{
++	int state = __atomic_load_n(&lsem_state, __ATOMIC_ACQUIRE);
 +	int on = 0;
++	int expected = 0;
++	if (state != 0)
++		return state;
 +	if (LINUX_SYSCALL(__NR_access, "/tmp/rclol-local-semaphores-all", 0) == 0)
 +		on = 1;
-+	else if (LINUX_SYSCALL(__NR_access, "/tmp/rclol-local-semaphores", 0) == 0 &&
-+	         LINUX_SYSCALL(__NR_access, "/tmp/rclol-no-local-semaphores", 0) != 0)
++	else if (LINUX_SYSCALL(__NR_access, "/tmp/rclol-no-local-semaphores", 0) != 0)
 +		on = darling_is_league_game();
-+	__atomic_store_n(&lsem_state, on ? 1 : -1, __ATOMIC_RELEASE);
-+	return on ? 1 : -1;
++	if (__atomic_compare_exchange_n(&lsem_state, &expected, on ? 1 : -1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
++		/* the one line per game process in the host file, next to core_isolation (lcore_log) */
++		if (darling_is_league_game())
++			lsem_log(on);
++		return on ? 1 : -1;
++	}
++	return __atomic_load_n(&lsem_state, __ATOMIC_ACQUIRE); /* another thread decided first */
 +}
 +
 +static inline unsigned int lsem_hash(unsigned int name)
 +{
 +	return (name * 2654435761u) >> 19; /* 13 bits */
++}
++
++/* The generation the caller's lsem_find resolved. Every operation re-checks it, so work that started before a
++ * destroy can never land on the object that took the slot afterwards. */
++static inline unsigned int lsem_capture(struct lsem* s)
++{
++	return __atomic_load_n(&s->pv.w.gen, __ATOMIC_ACQUIRE);
 +}
 +
 +static struct lsem* lsem_find(unsigned int name)
@@ -4182,7 +5280,7 @@ index b998456..3e643c1 100644
 +{
 +	int expected = 0;
 +	while (!__atomic_compare_exchange_n(&lsem_lock, &expected, 1, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
-+		LINUX_SYSCALL(__NR_futex, &lsem_lock, LSEM_FUTEX_WAIT, 1, 0UL, 0UL, 0);
++		LINUX_SYSCALL(__NR_futex, &lsem_lock, LSEM_FUTEX_WAIT | LSEM_FUTEX_PRIVATE, 1, 0UL, 0UL, 0);
 +		expected = 0;
 +	}
 +}
@@ -4190,7 +5288,7 @@ index b998456..3e643c1 100644
 +static void lsem_table_unlock(void)
 +{
 +	__atomic_store_n(&lsem_lock, 0, __ATOMIC_RELEASE);
-+	LINUX_SYSCALL(__NR_futex, &lsem_lock, LSEM_FUTEX_WAKE, 1, 0UL, 0UL, 0);
++	LINUX_SYSCALL(__NR_futex, &lsem_lock, LSEM_FUTEX_WAKE | LSEM_FUTEX_PRIVATE, 1, 0UL, 0UL, 0);
 +}
 +
 +static void lsem_insert(unsigned int name, int value)
@@ -4209,7 +5307,11 @@ index b998456..3e643c1 100644
 +	}
 +	if (!found) found = free_slot;
 +	if (found) { /* a full table leaves the semaphore to the server */
-+		__atomic_store_n(&found->value, value < 0 ? 0 : value, __ATOMIC_RELAXED);
++		/* The new generation and the initial value are one atomic word: a waiter that looked up the old
++		 * generation can never observe a half-updated slot, and no generation is ever handed out twice. */
++		unsigned long long old = __atomic_load_n(&found->pv.pair, __ATOMIC_RELAXED);
++		unsigned long long fresh = (((old >> 32) + 1) << 32) | (unsigned int) (value < 0 ? 0 : value);
++		__atomic_store_n(&found->pv.pair, fresh, __ATOMIC_RELEASE);
 +		__atomic_store_n(&found->waiters, 0, __ATOMIC_RELAXED);
 +		__atomic_store_n(&found->name, name, __ATOMIC_RELEASE);
 +	}
@@ -4222,27 +5324,93 @@ index b998456..3e643c1 100644
 +	if (!s)
 +		return;
 +	lsem_table_lock();
-+	if (s->name == name) {
-+		__atomic_add_fetch(&s->gen, 1, __ATOMIC_RELEASE);
-+		__atomic_store_n(&s->name, LSEM_TOMB, __ATOMIC_RELEASE);
-+		__atomic_store_n(&s->value, 0x40000000, __ATOMIC_RELEASE); /* waiters wake, see the new generation and leave */
-+		LINUX_SYSCALL(__NR_futex, &s->value, LSEM_FUTEX_WAKE, 0x7fffffff, 0UL, 0UL, 0);
++	/* Between the find and the lock another thread may have destroyed (and re-created) the name: the slot then
++	 * holds an object this destroy was not called on, so leave it alone. */
++	if (__atomic_load_n(&s->name, __ATOMIC_ACQUIRE) != name) {
++		lsem_table_unlock();
++		return;
 +	}
++	/* gen+1 and the tombstone value in one word: a waiter either took its token before this compare-exchange or it
++	 * sees the new generation (or the negative value) and returns KERN_TERMINATED; a waiter of a later object in
++	 * the slot can never see a generation it did not resolve. */
++	for (;;) {
++		unsigned long long old = __atomic_load_n(&s->pv.pair, __ATOMIC_SEQ_CST);
++		unsigned long long want = (((old >> 32) + 1) << 32) | (unsigned int) LSEM_TOMB_VALUE;
++		if (__atomic_compare_exchange_n(&s->pv.pair, &old, want, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
++			break;
++	}
++	__atomic_store_n(&s->name, LSEM_TOMB, __ATOMIC_RELEASE);
++	__atomic_store_n(&s->waiters, 0, __ATOMIC_RELAXED);
++	LINUX_SYSCALL(__NR_futex, &s->pv.w.value, LSEM_FUTEX_WAKE | LSEM_FUTEX_PRIVATE, 0x7fffffff, 0UL, 0UL, 0);
 +	lsem_table_unlock();
 +}
 +
-+static kern_return_t lsem_signal(struct lsem* s)
++/* Returns KERN_TERMINATED when the slot no longer names the object the caller resolved: the check and the token are
++ * one compare-exchange on the generation+value word, so no token is ever added to the object that took the slot. */
++static kern_return_t lsem_signal(struct lsem* s, unsigned int name, unsigned int gen)
 +{
-+	__atomic_add_fetch(&s->value, 1, __ATOMIC_SEQ_CST);
++	for (;;) {
++		unsigned long long old = __atomic_load_n(&s->pv.pair, __ATOMIC_SEQ_CST);
++		if ((unsigned int) (old >> 32) != gen || __atomic_load_n(&s->name, __ATOMIC_ACQUIRE) != name)
++			return KERN_TERMINATED;
++		if ((int) (unsigned int) old < 0)
++			return KERN_TERMINATED; /* the tombstone value: the object is being destroyed */
++		if (__atomic_compare_exchange_n(&s->pv.pair, &old, old + 1, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
++			break;
++	}
 +	if (__atomic_load_n(&s->waiters, __ATOMIC_SEQ_CST) > 0)
-+		LINUX_SYSCALL(__NR_futex, &s->value, LSEM_FUTEX_WAKE, 1, 0UL, 0UL, 0);
++		LINUX_SYSCALL(__NR_futex, &s->pv.w.value, LSEM_FUTEX_WAKE | LSEM_FUTEX_PRIVATE, 1, 0UL, 0UL, 0);
 +	return KERN_SUCCESS;
 +}
 +
-+/* timeout: nanoseconds, or -1 to wait forever */
-+static kern_return_t lsem_wait(struct lsem* s, long long timeout_ns)
++static kern_return_t lsem_signal_all(struct lsem* s, unsigned int name, unsigned int gen)
 +{
-+	const unsigned int gen = __atomic_load_n(&s->gen, __ATOMIC_ACQUIRE);
++	for (;;) {
++		unsigned long long old = __atomic_load_n(&s->pv.pair, __ATOMIC_SEQ_CST);
++		int n;
++		if ((unsigned int) (old >> 32) != gen || __atomic_load_n(&s->name, __ATOMIC_ACQUIRE) != name)
++			return KERN_TERMINATED;
++		if ((int) (unsigned int) old < 0)
++			return KERN_TERMINATED; /* the tombstone value: the object is being destroyed */
++		/* wake everybody who is waiting now; nothing is left over for later waiters (XNU resets the count, and
++		 * the trap version banks no count when nobody waits) */
++		n = __atomic_load_n(&s->waiters, __ATOMIC_SEQ_CST);
++		if (n <= 0)
++			return KERN_SUCCESS;
++		if (__atomic_compare_exchange_n(&s->pv.pair, &old, old + (unsigned int) n, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
++			LINUX_SYSCALL(__NR_futex, &s->pv.w.value, LSEM_FUTEX_WAKE | LSEM_FUTEX_PRIVATE, n, 0UL, 0UL, 0);
++			return KERN_SUCCESS;
++		}
++	}
++}
++
++static kern_return_t lsem_signal_thread(struct lsem* s, unsigned int name, unsigned int gen, unsigned int thread_name)
++{
++	unsigned long long old = __atomic_load_n(&s->pv.pair, __ATOMIC_SEQ_CST);
++	if ((unsigned int) (old >> 32) != gen || __atomic_load_n(&s->name, __ATOMIC_ACQUIRE) != name ||
++	    (int) (unsigned int) old < 0)
++		return KERN_TERMINATED;
++	if (thread_name != 0)
++		return KERN_NOT_WAITING; /* a specific thread is not addressable here; see the header comment */
++	if (__atomic_load_n(&s->waiters, __ATOMIC_SEQ_CST) <= 0)
++		return KERN_NOT_WAITING; /* nobody waiting: XNU banks no count here either */
++	return lsem_signal(s, name, gen);
++}
++
++/* Signal the signal semaphore of a combined trap, once, at the point XNU would (after the wait on the other
++ * semaphore registered itself, or after it already succeeded). */
++static kern_return_t lsem_post_signal(struct lsem_post* post)
++{
++	if (!post || __atomic_exchange_n(&post->done, 1, __ATOMIC_ACQ_REL))
++		return KERN_SUCCESS;
++	if (post->s)
++		return lsem_signal(post->s, post->name, post->gen);
++	return semaphore_signal_trap_impl(post->name); /* not local: signal it through the server */
++}
++
++/* timeout: nanoseconds, or -1 to wait forever. (name, gen) is what the caller's lsem_find resolved. */
++static kern_return_t lsem_wait(struct lsem* s, unsigned int name, unsigned int gen, long long timeout_ns, struct lsem_post* post)
++{
 +	struct { long tv_sec; long tv_nsec; } now, rel;
 +	long long deadline = 0;
 +	if (timeout_ns >= 0) {
@@ -4250,26 +5418,55 @@ index b998456..3e643c1 100644
 +		deadline = now.tv_sec * 1000000000ll + now.tv_nsec + timeout_ns;
 +	}
 +	for (;;) {
-+		if (__atomic_load_n(&s->gen, __ATOMIC_ACQUIRE) != gen)
++		/* both the generation and the name have to match: a slot reused for a different object, even one that
++		 * got the same port name again, must not be waited on (Darwin terminated the object we resolved) */
++		if ((unsigned int) __atomic_load_n(&s->pv.w.gen, __ATOMIC_ACQUIRE) != gen ||
++		    __atomic_load_n(&s->name, __ATOMIC_ACQUIRE) != name) {
++			(void) lsem_post_signal(post); /* XNU signals the signal semaphore even when the wait fails */
 +			return KERN_TERMINATED;
-+		int v = __atomic_load_n(&s->value, __ATOMIC_SEQ_CST);
++		}
++		unsigned long long old = __atomic_load_n(&s->pv.pair, __ATOMIC_SEQ_CST);
++		if ((unsigned int) (old >> 32) != gen)
++			continue; /* the slot changed while we looked at it: the top of the loop reports it */
++		int v = (int) (unsigned int) old;
++		if (v < 0) {
++			/* the destroy tombstone: a trap that resolved the slot while the destroy was in flight must
++			 * report the death, never take the tombstone for a token */
++			(void) lsem_post_signal(post);
++			return KERN_TERMINATED;
++		}
 +		if (v > 0) {
-+			if (__atomic_compare_exchange_n(&s->value, &v, v - 1, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
-+				return KERN_SUCCESS;
++			/* take the token only if value and generation still belong to this object: the compare-exchange
++			 * is on the whole pair, so a reused slot cannot hand its token to this waiter */
++			if (__atomic_compare_exchange_n(&s->pv.pair, &old, old - 1, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
++				kern_return_t kr = lsem_post_signal(post);
++				/* the wait succeeded; XNU swallows a dead signal semaphore in this case */
++				return (kr == KERN_SUCCESS || kr == KERN_TERMINATED) ? KERN_SUCCESS : kr;
++			}
 +			continue;
 +		}
 +		void* ts = 0;
 +		if (timeout_ns >= 0) {
 +			LINUX_SYSCALL(__NR_clock_gettime, 1, &now);
 +			long long left = deadline - (now.tv_sec * 1000000000ll + now.tv_nsec);
-+			if (left <= 0)
-+				return KERN_OPERATION_TIMED_OUT;
++			if (left <= 0) {
++				kern_return_t kr = lsem_post_signal(post);
++				return (kr == KERN_SUCCESS || kr == KERN_TERMINATED) ? KERN_OPERATION_TIMED_OUT : kr;
++			}
 +			rel.tv_sec = left / 1000000000ll;
 +			rel.tv_nsec = left % 1000000000ll;
 +			ts = &rel;
 +		}
++		/* register (signal_all and signal_thread see us) and only then release the signal semaphore, as XNU does */
 +		__atomic_add_fetch(&s->waiters, 1, __ATOMIC_SEQ_CST);
-+		LINUX_SYSCALL(__NR_futex, &s->value, LSEM_FUTEX_WAIT, 0, ts, 0UL, 0);
++		if (post) {
++			kern_return_t kr = lsem_post_signal(post);
++			if (kr != KERN_SUCCESS) {
++				__atomic_sub_fetch(&s->waiters, 1, __ATOMIC_SEQ_CST);
++				return kr;
++			}
++		}
++		LINUX_SYSCALL(__NR_futex, &s->pv.w.value, LSEM_FUTEX_WAIT | LSEM_FUTEX_PRIVATE, 0, ts, 0UL, 0);
 +		__atomic_sub_fetch(&s->waiters, 1, __ATOMIC_SEQ_CST);
 +	}
 +}
@@ -4294,6 +5491,30 @@ index b998456..3e643c1 100644
 +	if (task == mach_task_self())
 +		lsem_remove(semaphore);
 +	return __darling_rpc_semaphore_destroy(task, semaphore);
++}
++
++/* darling-lol: the child of fork() has a fresh IPC space (duct-tape ipc_task_init creates an empty one), so a
++ * semaphore name inherited from the parent is not valid in the child. Without this reset the inherited table would
++ * serve the child's traps for those names locally: a wait would succeed without any object behind it (or block where
++ * the server would answer KERN_INVALID_NAME), and a signal would be a no-op the parent (a different address space
++ * after fork) never sees. Runs in the forking thread right after the host fork, before any other thread of the child
++ * exists: the table has no waiters to wake, and the lock (possibly held by a parent thread that does not exist in the
++ * child) can simply be dropped. */
++__attribute__((visibility("hidden")))
++void __darling_local_semaphores_after_fork(void)
++{
++	if (__atomic_load_n(&lsem_state, __ATOMIC_ACQUIRE) != 1)
++		return;
++	for (unsigned int i = 0; i < LSEM_SLOTS; ++i) {
++		unsigned int have = lsems[i].name;
++		if (have != 0 && have != LSEM_TOMB) {
++			unsigned long long old = __atomic_load_n(&lsems[i].pv.pair, __ATOMIC_RELAXED);
++			__atomic_store_n(&lsems[i].pv.pair, (((old >> 32) + 1) << 32) | 0, __ATOMIC_RELEASE);
++			__atomic_store_n(&lsems[i].name, LSEM_TOMB, __ATOMIC_RELEASE);
++			__atomic_store_n(&lsems[i].waiters, 0, __ATOMIC_RELAXED);
++		}
++	}
++	lsem_lock = 0;
 +}
 +
 +/* darling-lol: mach_vm_region_recurse on the caller's own task, answered in the process.
@@ -4464,7 +5685,7 @@ index b998456..3e643c1 100644
  {
 +	struct lsem* local = lsem_find(signal_name);
 +	if (local)
-+		return lsem_signal(local);
++		return lsem_signal(local, signal_name, lsem_capture(local));
  	int code = dserver_rpc_semaphore_signal(signal_name);
 +	int attempt;
 +
@@ -4493,15 +5714,8 @@ index b998456..3e643c1 100644
  				mach_port_name_t signal_name)
  {
 +	struct lsem* local = lsem_find(signal_name);
-+	if (local) {
-+		/* wake everybody who is waiting now; nothing is left over for later waiters */
-+		int n = __atomic_load_n(&local->waiters, __ATOMIC_SEQ_CST);
-+		if (n > 0) {
-+			__atomic_add_fetch(&local->value, n, __ATOMIC_SEQ_CST);
-+			LINUX_SYSCALL(__NR_futex, &local->value, LSEM_FUTEX_WAKE, n, 0UL, 0UL, 0);
-+		}
-+		return KERN_SUCCESS;
-+	}
++	if (local)
++		return lsem_signal_all(local, signal_name, lsem_capture(local));
  	int code = dserver_rpc_semaphore_signal_all(signal_name);
 +	int attempt;
 +
@@ -4517,20 +5731,13 @@ index b998456..3e643c1 100644
  	}
  
  	return code;
-@@ -128,21 +637,40 @@ kern_return_t semaphore_signal_thread_trap_impl(
+@@ -128,21 +980,33 @@ kern_return_t semaphore_signal_thread_trap_impl(
  				mach_port_name_t signal_name,
  				mach_port_name_t thread_name)
  {
 +	struct lsem* local = lsem_find(signal_name);
-+	if (local) {
-+		if (thread_name == 0) {
-+			/* "any thread": wakes a waiter if there is one, never banks a count */
-+			if (__atomic_load_n(&local->waiters, __ATOMIC_SEQ_CST) <= 0)
-+				return KERN_NOT_WAITING;
-+			return lsem_signal(local);
-+		}
-+		return KERN_NOT_WAITING;
-+	}
++	if (local)
++		return lsem_signal_thread(local, signal_name, lsem_capture(local), thread_name);
  	UNIMPLEMENTED_TRAP();
  	return KERN_FAILURE;
  }
@@ -4541,7 +5748,7 @@ index b998456..3e643c1 100644
  {
 +	struct lsem* local = lsem_find(wait_name);
 +	if (local)
-+		return lsem_wait(local, -1);
++		return lsem_wait(local, wait_name, lsem_capture(local), -1, 0);
 +	unsigned long long slowStart = slowwait_enabled() ? slowwait_now() : 0;
  	int code = dserver_rpc_semaphore_wait(wait_name);
 +	if (slowStart) {
@@ -4559,17 +5766,28 @@ index b998456..3e643c1 100644
  	}
  
  	return code;
-@@ -152,14 +680,22 @@ kern_return_t semaphore_wait_signal_trap_impl(
+@@ -152,14 +1016,33 @@ kern_return_t semaphore_wait_signal_trap_impl(
  				mach_port_name_t wait_name,
  				mach_port_name_t signal_name)
  {
 +	struct lsem* localWait = lsem_find(wait_name);
 +	struct lsem* localSignal = lsem_find(signal_name);
 +	if (localWait || localSignal) {
-+		kern_return_t kr = localSignal ? lsem_signal(localSignal) : semaphore_signal_trap_impl(signal_name);
++		/* The wait goes first: XNU registers it on wait_name and only then signals signal_name (even when the
++		 * wait did not block). A local wait can do that from inside its loop; with a server-side wait the
++		 * signal has to be issued first, the only order the server can be given. */
++		if (localWait) {
++			struct lsem_post post;
++			post.s = localSignal;
++			post.name = signal_name;
++			post.gen = localSignal ? lsem_capture(localSignal) : 0;
++			post.done = 0;
++			return lsem_wait(localWait, wait_name, lsem_capture(localWait), -1, &post);
++		}
++		kern_return_t kr = semaphore_signal_trap_impl(signal_name);
 +		if (kr != KERN_SUCCESS)
 +			return kr;
-+		return localWait ? lsem_wait(localWait, -1) : semaphore_wait_trap_impl(wait_name);
++		return semaphore_wait_trap_impl(wait_name);
 +	}
  	int code = dserver_rpc_semaphore_wait_signal(wait_name, signal_name);
  
@@ -4583,13 +5801,16 @@ index b998456..3e643c1 100644
  	}
  
  	return code;
-@@ -170,14 +706,21 @@ kern_return_t semaphore_timedwait_trap_impl(
+@@ -170,14 +1053,24 @@ kern_return_t semaphore_timedwait_trap_impl(
  				unsigned int sec,
  				clock_res_t nsec)
  {
 +	struct lsem* local = lsem_find(wait_name);
-+	if (local)
-+		return lsem_wait(local, (long long) sec * 1000000000ll + nsec);
++	if (local) {
++		if (nsec < 0 || nsec >= 1000000000)
++			return KERN_INVALID_VALUE; /* what the server's BAD_MACH_TIMESPEC check answers */
++		return lsem_wait(local, wait_name, lsem_capture(local), (long long) sec * 1000000000ll + nsec, 0);
++	}
 +	unsigned long long slowStart = slowwait_enabled() ? slowwait_now() : 0;
  	int code = dserver_rpc_semaphore_timedwait(wait_name, sec, nsec);
 +	if (slowStart) {
@@ -4606,17 +5827,27 @@ index b998456..3e643c1 100644
  	}
  
  	return code;
-@@ -189,14 +732,22 @@ kern_return_t semaphore_timedwait_signal_trap_impl(
+@@ -189,14 +1082,32 @@ kern_return_t semaphore_timedwait_signal_trap_impl(
  				unsigned int sec,
  				clock_res_t nsec)
  {
 +	struct lsem* localWait = lsem_find(wait_name);
 +	struct lsem* localSignal = lsem_find(signal_name);
 +	if (localWait || localSignal) {
-+		kern_return_t kr = localSignal ? lsem_signal(localSignal) : semaphore_signal_trap_impl(signal_name);
++		if (localWait) {
++			struct lsem_post post;
++			if (nsec < 0 || nsec >= 1000000000)
++				return KERN_INVALID_VALUE; /* what the server's BAD_MACH_TIMESPEC check answers */
++			post.s = localSignal;
++			post.name = signal_name;
++			post.gen = localSignal ? lsem_capture(localSignal) : 0;
++			post.done = 0;
++			return lsem_wait(localWait, wait_name, lsem_capture(localWait), (long long) sec * 1000000000ll + nsec, &post);
++		}
++		kern_return_t kr = semaphore_signal_trap_impl(signal_name);
 +		if (kr != KERN_SUCCESS)
 +			return kr;
-+		return localWait ? lsem_wait(localWait, (long long) sec * 1000000000ll + nsec) : semaphore_timedwait_trap_impl(wait_name, sec, nsec);
++		return semaphore_timedwait_trap_impl(wait_name, sec, nsec);
 +	}
  	int code = dserver_rpc_semaphore_timedwait_signal(wait_name, signal_name, sec, nsec);
  
@@ -4630,7 +5861,7 @@ index b998456..3e643c1 100644
  	}
  
  	return code;
-@@ -514,6 +1065,12 @@ kern_return_t _kernelrpc_mach_port_construct_trap_impl(
+@@ -514,6 +1425,12 @@ kern_return_t _kernelrpc_mach_port_construct_trap_impl(
  		__simple_printf("mach_port_construct failed (internally): %d\n", code);
  		__simple_abort();
  	}
@@ -4643,7 +5874,7 @@ index b998456..3e643c1 100644
  
  	return code;
  }
-@@ -673,16 +1230,16 @@ kern_return_t macx_backing_store_recovery_impl(
+@@ -673,16 +1590,16 @@ kern_return_t macx_backing_store_recovery_impl(
  	return KERN_FAILURE;
  }
  
@@ -4663,7 +5894,7 @@ index b998456..3e643c1 100644
  	return 0;
  }
  
-@@ -696,6 +1253,41 @@ kern_return_t syscall_thread_switch_impl(
+@@ -696,6 +1613,41 @@ kern_return_t syscall_thread_switch_impl(
  		.tv_sec = 0,
  		.tv_nsec = 1000000
  	};
@@ -4797,124 +6028,9 @@ index ccd2b33..1a1a7c6 100644
  		/*
  		 * This call contains an instruction barrier which will ensure that the
  		 * second read of the abs time isn't speculated above the reads of the
-diff --git a/darling/src/libsystem_kernel/emulation/include/common/private_mutex.h b/darling/src/libsystem_kernel/emulation/include/common/private_mutex.h
-new file mode 100644
---- /dev/null
-+++ b/darling/src/libsystem_kernel/emulation/include/common/private_mutex.h
-@@ -0,0 +1,20 @@
-+#ifndef DARLING_EMULATION_PRIVATE_MUTEX_H
-+#define DARLING_EMULATION_PRIVATE_MUTEX_H
-+#include <darling/emulation/linux_premigration/ext/futex.h>
-+/* Bootstrap-safe private mutex. Kernel emulation must not export placeholder
-+ * os_unfair_lock functions: umbrella lookup can bind app calls to those stubs
-+ * instead of libplatform, silently removing allocator mutual exclusion. */
-+typedef struct { int value; } emulation_mutex;
-+#define EMULATION_MUTEX_INITIALIZER {0}
-+static inline void emulation_mutex_lock(emulation_mutex *mutex) {
-+    int expected = 0;
-+    if (__atomic_compare_exchange_n(&mutex->value, &expected, 1, 0,
-+                                    __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return;
-+    while (__atomic_exchange_n(&mutex->value, 2, __ATOMIC_ACQUIRE) != 0)
-+        __linux_futex_reterr(&mutex->value, FUTEX_WAIT | 128, 2, 0, 0, 0);
-+}
-+static inline void emulation_mutex_unlock(emulation_mutex *mutex) {
-+    if (__atomic_exchange_n(&mutex->value, 0, __ATOMIC_RELEASE) == 2)
-+        __linux_futex_reterr(&mutex->value, FUTEX_WAKE | 128, 1, 0, 0, 0);
-+}
-+#endif
-diff --git a/darling/src/libsystem_kernel/emulation/include/common/slowwait.h b/darling/src/libsystem_kernel/emulation/include/common/slowwait.h
-new file mode 100644
---- /dev/null
-+++ b/darling/src/libsystem_kernel/emulation/include/common/slowwait.h
-@@ -0,0 +1,55 @@
-+#ifndef _DARLING_SLOWWAIT_H_
-+#define _DARLING_SLOWWAIT_H_
-+/* darling-lol diagnostic: with /tmp/metal-debug-timing present, log main-thread blocking waits over 400 ms. */
-+#include <darling/emulation/common/base.h>
-+#include <darling/emulation/common/simple.h>
-+#include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
-+
-+/* darling-lol diagnostic: with /tmp/metal-debug-timing present, log mach semaphore waits that block for more than
-+ * 400 ms, with the caller's frame-pointer chain, to /tmp/semwait.log. */
-+static inline int slowwait_enabled(void)
-+{
-+	static int state = -1;
-+	if (state < 0) {
-+		state = LINUX_SYSCALL(__NR_access, "/tmp/metal-debug-timing", 0) == 0 ? 1 : 0;
-+	}
-+	return state;
-+}
-+
-+static inline unsigned long long slowwait_now(void)
-+{
-+	struct { long tv_sec; long tv_nsec; } ts;
-+	LINUX_SYSCALL(__NR_clock_gettime, 1, &ts);
-+	return (unsigned long long) ts.tv_sec * 1000000000ULL + (unsigned long long) ts.tv_nsec;
-+}
-+
-+static inline void slowwait_log(const char* kind, unsigned int name, unsigned long long start, void** frame, unsigned int extra1, unsigned int extra2)
-+{
-+	unsigned long long elapsed = slowwait_now() - start;
-+	/* only the main thread (tid == pid), the frame loop; other threads idle in these waits by design */
-+	if (elapsed < 400ULL * 1000000ULL || LINUX_SYSCALL(__NR_gettid) != LINUX_SYSCALL(__NR_getpid)) {
-+		return;
-+	}
-+	char line[512];
-+	int n = __simple_sprintf(line, "%s name=%u x1=%x x2=%u ms=%llu tid=%d frames:", kind, name, extra1, extra2, elapsed / 1000000ULL, (int) LINUX_SYSCALL(__NR_gettid));
-+	void** fp = frame;
-+	for (int i = 0; i < 10 && fp && ((unsigned long) fp & 7) == 0; ++i) {
-+		void* ret = fp[1];
-+		n += __simple_sprintf(line + n, " %lx", (unsigned long) ret);
-+		void** next = (void**) fp[0];
-+		if (next <= fp || (unsigned long) next - (unsigned long) fp > 0x100000) {
-+			break;
-+		}
-+		fp = next;
-+	}
-+	n += __simple_sprintf(line + n, "\n");
-+	long fd = LINUX_SYSCALL(__NR_open, "/tmp/semwait.log", 02101 /* O_WRONLY|O_CREAT|O_APPEND */, 0666);
-+	if (fd >= 0) {
-+		LINUX_SYSCALL(__NR_write, fd, line, n);
-+		LINUX_SYSCALL(__NR_close, fd);
-+	}
-+}
-+
-+
-+
-+#endif
-diff --git a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/guarded/change_fdguard_np.h b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/guarded/change_fdguard_np.h
-new file mode 100644
---- /dev/null
-+++ b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/guarded/change_fdguard_np.h
-@@ -0,0 +1,8 @@
-+#ifndef LINUX_CHANGE_FDGUARD_H
-+#define LINUX_CHANGE_FDGUARD_H
-+
-+#include <stdint.h>
-+
-+long sys_change_fdguard_np(int fd, uint64_t* guard, uint64_t* nguard, unsigned guardflags, int* fdflagsp);
-+
-+#endif // LINUX_CHANGE_FDGUARD_H
-diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/guarded/change_fdguard_np.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/guarded/change_fdguard_np.c
-new file mode 100644
---- /dev/null
-+++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/guarded/change_fdguard_np.c
-@@ -0,0 +1,13 @@
-+#include <darling/emulation/xnu_syscall/bsd/impl/guarded/change_fdguard_np.h>
-+
-+#include <darling/emulation/common/base.h>
-+
-+/* darling-lol M57: Chromium's UDP socket code calls change_fdguard_np
-+ * (Darwin syscall 444). Darling's fdguard support is a no-op everywhere
-+ * (guarded_open_np/guarded_close_np/guarded_kqueue_np all ignore it), so
-+ * accept the request and report success. Without this the syscall was
-+ * unhandled (ENOSYS), which made Chromium FATAL in udp_socket_posix.cc. */
-+long sys_change_fdguard_np(int fd, uint64_t* guard, uint64_t* nguard, unsigned guardflags, int* fdflagsp)
-+{
-+	return 0;
-+}
 diff --git a/libsyscall/wrappers/__sysctlbyname.S b/libsyscall/wrappers/__sysctlbyname.S
 new file mode 100644
+index 0000000..f185f6c
 --- /dev/null
 +++ b/libsyscall/wrappers/__sysctlbyname.S
 @@ -0,0 +1,12 @@
@@ -4930,40 +6046,3 @@ new file mode 100644
 +__sysctlbyname:
 +    /* Just jump to the syscall stub */
 +    jmp ___sysctlbyname
-diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/madvise.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/madvise.c
-index 10c412b..8c49bd9 100644
---- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/madvise.c
-+++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/madvise.c
-@@ -9,18 +9,26 @@
- #define MADV_FREE 5
- #define MADV_FREE_REUSABLE 7
- #define MADV_FREE_REUSE 8
-+#define LINUX_MADV_FREE 8
-+#define LINUX_MADV_POPULATE_WRITE 23
- 
- long sys_madvise(void* addr, unsigned long len, int advice)
- {
- 	int ret;
- 
--	if (advice == MADV_FREE_REUSABLE || advice == MADV_FREE_REUSE)
--		advice = MADV_FREE;
--
--	// advice < 0 are identical between OS X and Linux
--	// advice >= 5 are specific to OS X/BSD
--	if (advice >= 5)
-+	if (advice == MADV_FREE || advice == MADV_FREE_REUSABLE) {
-+		// The allocator no longer needs these private anonymous pages. Linux
-+		// may reclaim them without swapping; subsequent writes cancel reclaim.
-+		advice = LINUX_MADV_FREE;
-+	} else if (advice == MADV_FREE_REUSE) {
-+		// Reused pages must stop being lazily discardable. A write-prefault
-+		// cancels MADV_FREE without changing the surviving page contents.
-+		// This operation is available on Linux 5.14 and later.
-+		advice = LINUX_MADV_POPULATE_WRITE;
-+	} else if (advice >= 5) {
-+		// Other OS X/BSD-specific hints do not share Linux's numeric values.
- 		return 0;
-+	}
- 
- 	ret = LINUX_SYSCALL(__NR_madvise, addr, len, advice);
- 

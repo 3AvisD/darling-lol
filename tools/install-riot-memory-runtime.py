@@ -11,6 +11,9 @@ import stat
 import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
+# The optimized relink from tools/build-riot-kqueue-runtime.py is the library the
+# client runtime is supposed to run; the plain CMake build (no -O flag) is not.
+DEFAULT_ARTIFACT = ROOT / "build/riot-libsystem_kernel.dylib"
 
 
 def digest(path):
@@ -73,24 +76,54 @@ def install(binary, destinations, backup_folder):
             "activation": "Exit the game and clients, then restart Darling; an active overlay may still expose the old library."}
 
 
-def main():
+def prefix_destinations(config, binary, artifact):
+    """Destination list for an installation, and a note about the artifact.
+
+    The prefix copies may be replaced from any tested source, but the prepared
+    artifact is never a destination of a different library: a run that does not
+    install the artifact itself leaves it untouched. That is what keeps the
+    optimized relink from being silently replaced by the plain CMake build.
+    """
+    destinations = [
+        Path(config["prefix"]) / config["guest_home"].lstrip("/") / "RuntimeLibraries/libsystem_kernel.dylib",
+        # Keep the per-prefix bootstrap copy consistent; leave the system SDK alone.
+        Path(config["prefix"]) / "usr/lib/system/libsystem_kernel.dylib",
+    ]
+    if not artifact.exists():
+        return destinations, "the prepared artifact " + str(artifact) + " does not exist yet"
+    if Path(binary).resolve() != artifact.resolve():
+        return destinations, ("refusing to overwrite " + str(artifact)
+                              + " with a different library; rebuild it with "
+                                "build/runtime/tools/build-riot-kqueue-runtime.py")
+    destinations.append(artifact)
+    return destinations, None
+
+
+def parse_arguments(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--binary", type=Path, default=ROOT / "build/darling-src/build/src/external/xnu/darling/src/libsystem_kernel/libsystem_kernel.dylib")
+    parser.add_argument("--binary", type=Path, default=DEFAULT_ARTIFACT)
+    parser.add_argument("--artifact", type=Path, default=DEFAULT_ARTIFACT)
     # A previous sudo server install can make build/backups root-owned.
     parser.add_argument("--backup-dir", type=Path, default=ROOT / "build/memory-runtime-backups")
-    args = parser.parse_args()
+    return parser, parser.parse_args(argv)
+
+
+def main():
+    parser, args = parse_arguments()
+    if not args.binary.is_file():
+        parser.exit(1, "The library to install does not exist: " + str(args.binary) + "; build the "
+                       "optimized relink first: python3 build/runtime/tools/build-riot-kqueue-runtime.py\n")
     config = json.loads((ROOT / "build/config.json").read_text())
-    prefix = Path(config["prefix"])
-    destinations = [prefix / config["guest_home"].lstrip("/") / "RuntimeLibraries/libsystem_kernel.dylib"]
-    # Keep the per-prefix bootstrap copy consistent; leave the system SDK alone.
-    destinations.append(prefix / "usr/lib/system/libsystem_kernel.dylib")
-    artifact = ROOT / "build/riot-libsystem_kernel.dylib"
-    if artifact.exists():
-        destinations.append(artifact)
+    destinations, note = prefix_destinations(config, args.binary, args.artifact)
+    if note:
+        print("note:", note)
     try:
         result = install(args.binary, destinations, args.backup_dir)
     except PermissionError as error:
         parser.exit(1, "Cannot write " + str(error.filename) + "; choose a writable --backup-dir or run the installer with sudo.\n")
+    result["artifact"] = str(args.artifact)
+    result["artifact_replaced"] = any(Path(record["path"]).resolve() == args.artifact.resolve()
+                                      for record in result["libraries"] if not record.get("already_current"))
     print(json.dumps(result))
 
 

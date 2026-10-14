@@ -1489,7 +1489,7 @@ index 0feb46e..e0c0e93 100644
  		return nil;
  	}
 diff --git a/src/Metal/MTLRenderCommandEncoder.mm b/src/Metal/MTLRenderCommandEncoder.mm
-index e931b90..e13dc0e 100644
+index e931b90..b2fe0a5 100644
 --- a/src/Metal/MTLRenderCommandEncoder.mm
 +++ b/src/Metal/MTLRenderCommandEncoder.mm
 @@ -1,3 +1,9 @@
@@ -1502,7 +1502,7 @@ index e931b90..e13dc0e 100644
  // SPDX-FileCopyrightText: 2026 Darling Developers
  // SPDX-License-Identifier: MPL-2.0
  
-@@ -9,8 +15,268 @@
+@@ -9,8 +15,408 @@
  #import <Metal/MTLRenderPipelineInternal.h>
  #import <Metal/MTLTypesInternal.h>
  
@@ -1607,7 +1607,7 @@ index e931b90..e13dc0e 100644
 +	}
 +	fclose(log);
 +}
- 
++
 +static void MTLDebugLogDraw(const char* kind, unsigned long count, unsigned long instances, unsigned long indexType, long baseVertex, id<MTLBuffer> indexBuffer, NSUInteger indexOffset)
 +{
 +	if (!MTLDebugEnabled()) {
@@ -1749,6 +1749,146 @@ index e931b90..e13dc0e 100644
 +#endif
 +
 +#if DARLING_METAL_ENABLED
++// Metal's render encoders start with every slot unbound, and a bind only replaces the value its slot
++// holds, so re-binding the identical value at the same slot cannot change what later draws see: the
++// call can be dropped before any of its work (the resource's shared_ptr copy and its atomic refcount,
++// the Indium op, and the first touch of both objects). These records are what the setters compare
++// against.
++//
++// A record holds the *Indium* object's address (`shared_ptr::get()`, see MTLBindKey), never the
++// Objective-C wrapper's address. The wrapper is not a stable identity: the game may release it while
++// the Indium encoder still keeps the resource it wrapped alive, the allocator can then hand the same
++// address to a wrapper around a different resource (transient per-draw buffers do exactly that), and a
++// comparison on the wrapper's address would drop that new resource's bind -- every later draw would
++// keep using the old one (the ABA problem). The Indium encoder holds each resource it was given until
++// the encoder ends -- `FunctionResources::textures/buffers/samplers` store the shared_ptr the setter
++// received (command-encoder.private.hpp), and the pipeline is held by `_privatePSO`/`_pipelineOwners`
++// (render-command-encoder.cpp), on both the deferred and the direct encoder path -- so an Indium
++// address cannot be reused while it is recorded. The depth-stencil state is the one kind Indium does
++// not keep (its setter reads the descriptor and issues the Vulkan commands), so its record retains
++// one itself (`_depthStencilOwner`).
++//
++// `valid` marks the slots a value was recorded for: a slot that was never bound is always forwarded,
++// and setVertexBytes/setFragmentBytes (inline data in the same slot) just clears the mark.
++struct MTLBindObjectSlots {
++	const void* keys[31] = {};
++	uint32_t valid = 0;
++};
++
++struct MTLBindBufferSlots {
++	const void* keys[31] = {};
++	NSUInteger offsets[31] = {};
++	uint32_t valid = 0;
++};
++
++// The key a bind is recorded and compared under: the Indium object's address. Reading it out of the
++// accessor's const shared_ptr reference is one load of the wrapper's payload -- no copy, no atomic.
++template<class T>
++static inline const void* MTLBindKey(const std::shared_ptr<T>& object)
++{
++	return object.get();
++}
++
++// true: the slot already holds this value, so the caller can drop the call; false: forward it, and the
++// value is recorded so the next identical call can be dropped.
++static bool MTLBindObjectSlot(MTLBindObjectSlots& slots, NSUInteger index, const void* key)
++{
++	if (index >= 31) {
++		return false;
++	}
++	const uint32_t bit = 1u << index;
++	if ((slots.valid & bit) && slots.keys[index] == key) {
++		return true;
++	}
++	slots.keys[index] = key;
++	slots.valid |= bit;
++	return false;
++}
++
++static bool MTLBindBufferSlot(MTLBindBufferSlots& slots, NSUInteger index, const void* key, NSUInteger offset)
++{
++	if (index >= 31) {
++		return false;
++	}
++	const uint32_t bit = 1u << index;
++	if ((slots.valid & bit) && slots.keys[index] == key && slots.offsets[index] == offset) {
++		return true;
++	}
++	slots.keys[index] = key;
++	slots.offsets[index] = offset;
++	slots.valid |= bit;
++	return false;
++}
++
++// The offset belongs to the buffer's slot state, so an unchanged one is dropped the same way.
++static bool MTLBindBufferOffset(MTLBindBufferSlots& slots, NSUInteger index, NSUInteger offset)
++{
++	if (index >= 31 || !(slots.valid & (1u << index))) {
++		return false;
++	}
++	if (slots.offsets[index] == offset) {
++		return true;
++	}
++	slots.offsets[index] = offset;
++	return false;
++}
++
++static void MTLBindForgetBufferSlot(MTLBindBufferSlots& slots, NSUInteger index)
++{
++	if (index < 31) {
++		slots.valid &= ~(1u << index);
++	}
++}
++
++// endEncoding: nothing may be bound after it, and the Indium encoder releases the resources it held,
++// so no record -- and no address a record kept meaningful -- survives the pass.
++static void MTLBindForgetAll(MTLBindObjectSlots& slots)
++{
++	slots = MTLBindObjectSlots {};
++}
++
++static void MTLBindForgetAll(MTLBindBufferSlots& slots)
++{
++	slots = MTLBindBufferSlots {};
++}
++
++// Diagnostic (guest flag /tmp/metal-debug-binds, or the full trace flag): count the dropped re-binds.
++// The setters test MTLBindSkipsEnabled() inline first, so a dropped call pays one load and a branch
++// rather than the counter's call frame; MTLBindSkipCount then appends the totals to the trace log on
++// the same 3 s interval as the other counters.
++static bool MTLBindSkipsEnabled()
++{
++	static const bool enabled = MTLDebugEnabled() || access("/tmp/metal-debug-binds", F_OK) == 0;
++	return enabled;
++}
++
++static void MTLBindSkipCount(const char* what)
++{
++	static const bool enabled = MTLDebugEnabled() || access("/tmp/metal-debug-binds", F_OK) == 0;
++	if (!enabled) {
++		return;
++	}
++	static std::mutex lock;
++	static std::map<std::string, unsigned long> counts;
++	static time_t last = 0;
++	std::lock_guard<std::mutex> guard(lock);
++	++counts[what];
++	time_t now = time(nullptr);
++	if (now - last >= 3) {
++		last = now;
++		if (FILE* log = fopen("/tmp/metal-trace.log", "a")) {
++			fprintf(log, "bind-skips@%ld:", (long) now);
++			for (auto& count: counts) {
++				fprintf(log, " %s=%lu", count.first.c_str(), count.second);
++			}
++			fprintf(log, "\n");
++			fclose(log);
++		}
++	}
++}
++#endif
+ 
++#if DARLING_METAL_ENABLED
 +// Live experiments (guest flag files, re-read every few hundred state changes): /tmp/metal-flag-nocull, -flipwind, -nodepth
 +static bool MTLLiveFlag(int which)
 +{
@@ -1771,7 +1911,7 @@ index e931b90..e13dc0e 100644
  @implementation MTLRenderPassAttachmentDescriptor
  
  #if DARLING_METAL_ENABLED
-@@ -96,11 +362,11 @@ MTL_UNSUPPORTED_CLASS
+@@ -96,11 +502,11 @@ MTL_UNSUPPORTED_CLASS
  - (Indium::RenderPassAttachmentDescriptor)asIndiumDescriptor
  {
  	return Indium::RenderPassAttachmentDescriptor {
@@ -1785,7 +1925,7 @@ index e931b90..e13dc0e 100644
  		_resolveLevel,
  		_resolveSlice,
  		_resolveDepthPlane,
-@@ -367,7 +633,11 @@ MTL_UNSUPPORTED_CLASS
+@@ -367,7 +773,11 @@ MTL_UNSUPPORTED_CLASS
  	std::vector<Indium::RenderPassColorAttachmentDescriptor> result;
  
  	for (const auto& [key, value]: tmp2) {
@@ -1798,7 +1938,7 @@ index e931b90..e13dc0e 100644
  	}
  
  	return result;
-@@ -404,6 +674,10 @@ MTL_UNSUPPORTED_CLASS
+@@ -404,6 +814,10 @@ MTL_UNSUPPORTED_CLASS
  - (void)_doInit
  {
  	_colorAttachments = [MTLRenderPassColorAttachmentDescriptorArray new];
@@ -1809,7 +1949,7 @@ index e931b90..e13dc0e 100644
  }
  
  - (void)_doDealloc
-@@ -502,9 +776,9 @@ MTL_UNSUPPORTED_CLASS
+@@ -502,9 +916,9 @@ MTL_UNSUPPORTED_CLASS
  {
  	return Indium::RenderPassDescriptor {
  		[_colorAttachments asContiguousIndiumDescriptors],
@@ -1822,7 +1962,30 @@ index e931b90..e13dc0e 100644
  		_renderTargetArrayLength,
  		_imageblockSampleLength,
  		_threadgroupMemoryLength,
-@@ -538,6 +812,7 @@ MTL_UNSUPPORTED_CLASS
+@@ -527,6 +941,22 @@ MTL_UNSUPPORTED_CLASS
+ 
+ #if DARLING_METAL_ENABLED
+ 
++{
++	// The bindings this encoder has been given, so an identical re-bind can be dropped (see the
++	// tracking helpers above). Every encoder object is new and starts with every slot unbound, and
++	// nothing outside this class changes an encoder's bindings, so the records are per-encoder state.
++	// `_depthStencilOwner` is the strong reference the depth-stencil record needs (see the helpers).
++	MTLBindObjectSlots _vertexTextures;
++	MTLBindObjectSlots _fragmentTextures;
++	MTLBindObjectSlots _vertexSamplers;
++	MTLBindObjectSlots _fragmentSamplers;
++	MTLBindObjectSlots _pipelineState;
++	MTLBindObjectSlots _depthStencilState;
++	MTLBindBufferSlots _vertexBuffers;
++	MTLBindBufferSlots _fragmentBuffers;
++	std::shared_ptr<Indium::DepthStencilState> _depthStencilOwner;
++}
++
+ @synthesize device = _device;
+ @synthesize encoder = _encoder;
+ @synthesize label = _label;
+@@ -538,6 +968,7 @@ MTL_UNSUPPORTED_CLASS
  	if (self != nil) {
  		_encoder = encoder;
  		_device = [device retain];
@@ -1830,30 +1993,43 @@ index e931b90..e13dc0e 100644
  	}
  	return self;
  }
-@@ -553,6 +828,34 @@ MTL_UNSUPPORTED_CLASS
+@@ -553,8 +984,60 @@ MTL_UNSUPPORTED_CLASS
  // overridden methods
  //
  
 +- (void)setVertexTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index {
-+    _encoder->setVertexTexture(MTLTextureGetIndium(texture), index);
++    const std::shared_ptr<Indium::Texture>& indiumTexture = MTLTextureGetIndium(texture);
++    if (MTLBindObjectSlot(_vertexTextures, index, MTLBindKey(indiumTexture))) { if (MTLBindSkipsEnabled()) { MTLBindSkipCount("bindSkipVertexTexture"); } return; }
++    _encoder->setVertexTexture(indiumTexture, index);
 +}
 +- (void)setFragmentTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index {
++    const std::shared_ptr<Indium::Texture>& indiumTexture = MTLTextureGetIndium(texture);
++    if (MTLBindObjectSlot(_fragmentTextures, index, MTLBindKey(indiumTexture))) { if (MTLBindSkipsEnabled()) { MTLBindSkipCount("bindSkipFragmentTexture"); } return; }
 +    if (MTLDrawTracking() && index < 31) debugDrawState.fragmentTextures[index] = texture;
-+    _encoder->setFragmentTexture(MTLTextureGetIndium(texture), index);
++    _encoder->setFragmentTexture(indiumTexture, index);
 +}
 +- (void)setVertexSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index {
-+    _encoder->setVertexSamplerState(MTLSamplerGetIndium(sampler), index);
++    const std::shared_ptr<Indium::SamplerState>& indiumSampler = MTLSamplerGetIndium(sampler);
++    if (MTLBindObjectSlot(_vertexSamplers, index, MTLBindKey(indiumSampler))) { if (MTLBindSkipsEnabled()) { MTLBindSkipCount("bindSkipVertexSamplerState"); } return; }
++    _encoder->setVertexSamplerState(indiumSampler, index);
 +}
 +- (void)setFragmentSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index {
-+    _encoder->setFragmentSamplerState(MTLSamplerGetIndium(sampler), index);
++    const std::shared_ptr<Indium::SamplerState>& indiumSampler = MTLSamplerGetIndium(sampler);
++    if (MTLBindObjectSlot(_fragmentSamplers, index, MTLBindKey(indiumSampler))) { if (MTLBindSkipsEnabled()) { MTLBindSkipCount("bindSkipFragmentSamplerState"); } return; }
++    _encoder->setFragmentSamplerState(indiumSampler, index);
 +}
 +- (void)setDepthBias:(float)depthBias slopeScale:(float)slopeScale clamp:(float)clamp {
 +    _encoder->setDepthBias(depthBias, slopeScale, clamp);
 +}
 +- (void)setDepthStencilState:(id<MTLDepthStencilState>)state {
++	const std::shared_ptr<Indium::DepthStencilState>& indiumState = MTLDepthStencilGetIndium(state);
++	// Indium's setter does not keep the state (it reads the descriptor and issues the Vulkan commands),
++	// so this record holds the reference that keeps the recorded address from being reused instead.
++	if (MTLBindObjectSlot(_depthStencilState, 0, MTLBindKey(indiumState))) { if (MTLBindSkipsEnabled()) { MTLBindSkipCount("bindSkipDepthStencilState"); } return; }
++	_depthStencilOwner = indiumState;
 +	if (MTLDrawTracking()) debugDrawState.depthStencil = state;
 +    if (MTLLiveFlag(2)) return;
-+    _encoder->setDepthStencilState(MTLDepthStencilGetIndium(state));
++    _encoder->setDepthStencilState(indiumState);
 +}
 +- (void)setStencilReferenceValue:(uint32_t)value {
 +    _encoder->setStencilReferenceValue(value);
@@ -1864,15 +2040,31 @@ index e931b90..e13dc0e 100644
 +
  - (void)endEncoding
  {
++	// Nothing may be bound after this, and the Indium encoder releases the resources it held, so the
++	// records must not survive the pass (a later bind must never be compared against them again).
++	MTLBindForgetAll(_vertexTextures);
++	MTLBindForgetAll(_fragmentTextures);
++	MTLBindForgetAll(_vertexSamplers);
++	MTLBindForgetAll(_fragmentSamplers);
++	MTLBindForgetAll(_pipelineState);
++	MTLBindForgetAll(_depthStencilState);
++	MTLBindForgetAll(_vertexBuffers);
++	MTLBindForgetAll(_fragmentBuffers);
++	_depthStencilOwner.reset();
  	_encoder->endEncoding();
-@@ -564,26 +867,34 @@ MTL_UNSUPPORTED_CLASS
+ }
+ 
+@@ -564,26 +1047,37 @@ MTL_UNSUPPORTED_CLASS
  
  - (void)setRenderPipelineState: (id<MTLRenderPipelineState>)pipelineState
  {
 -	_encoder->setRenderPipelineState(((MTLRenderPipelineStateInternal*)pipelineState).state);
++	const std::shared_ptr<Indium::RenderPipelineState>& indiumPipelineState = MTLRenderPipelineGetIndium(pipelineState);
++	// dropped re-binds are not counted as "setPipeline" in the diagnostics, they are not calls
++	if (MTLBindObjectSlot(_pipelineState, 0, MTLBindKey(indiumPipelineState))) { if (MTLBindSkipsEnabled()) { MTLBindSkipCount("bindSkipPipelineState"); } return; }
 +	if (MTLDrawTracking()) debugDrawState.pipeline = pipelineState;
 +	MTLTraceCount(pipelineState ? "setPipeline" : "setPipelineNil");
-+	_encoder->setRenderPipelineState(MTLRenderPipelineGetIndium(pipelineState));
++	_encoder->setRenderPipelineState(indiumPipelineState);
  }
  
  - (void)setTriangleFillMode: (MTLTriangleFillMode)fillMode
@@ -1901,7 +2093,7 @@ index e931b90..e13dc0e 100644
  	_encoder->setViewport(MTLViewportToIndium(viewport));
  }
  
-@@ -599,6 +910,8 @@ MTL_UNSUPPORTED_CLASS
+@@ -599,6 +1093,8 @@ MTL_UNSUPPORTED_CLASS
  
  - (void)setScissorRect: (MTLScissorRect)rect
  {
@@ -1910,11 +2102,13 @@ index e931b90..e13dc0e 100644
  	_encoder->setScissorRect(MTLScissorRectToIndium(rect));
  }
  
-@@ -616,7 +929,25 @@ MTL_UNSUPPORTED_CLASS
+@@ -616,7 +1112,27 @@ MTL_UNSUPPORTED_CLASS
                   offset: (NSUInteger)offset
                  atIndex: (NSUInteger)index
  {
 -	_encoder->setVertexBuffer(((MTLBufferInternal*)buffer).buffer, offset, index);
++	const std::shared_ptr<Indium::Buffer>& indiumBuffer = MTLBufferGetIndium(buffer);
++	if (MTLBindBufferSlot(_vertexBuffers, index, MTLBindKey(indiumBuffer), offset)) { if (MTLBindSkipsEnabled()) { MTLBindSkipCount("bindSkipVertexBuffer"); } return; }
 +	if (MTLDebugEnabled()) {
 +		static unsigned long calls = 0;
 +		static unsigned long unusual = 0;
@@ -1933,11 +2127,11 @@ index e931b90..e13dc0e 100644
 +		}
 +	}
 +	if (MTLDrawTracking() && index < 31) { debugDrawState.vertexBuffers[index] = buffer; debugDrawState.vertexOffsets[index] = offset; debugDrawState.vertexBytesLength[index] = 0; }
-+	_encoder->setVertexBuffer(MTLBufferGetIndium(buffer), offset, index);
++	_encoder->setVertexBuffer(indiumBuffer, offset, index);
  }
  
  - (void)setVertexBuffers: (const id<MTLBuffer>*)buffers
-@@ -626,7 +957,14 @@ MTL_UNSUPPORTED_CLASS
+@@ -626,7 +1142,17 @@ MTL_UNSUPPORTED_CLASS
  	std::vector<std::shared_ptr<Indium::Buffer>> tmp;
  	std::vector<size_t> tmp2(offsets, offsets + range.length);
  	for (size_t i = 0; i < range.length; ++i) {
@@ -1950,13 +2144,17 @@ index e931b90..e13dc0e 100644
 +			debugDrawState.vertexOffsets[range.location + i] = offsets[i];
 +			debugDrawState.vertexBytesLength[range.location + i] = 0;
 +		}
++	}
++	for (NSUInteger i = 0; i < range.length; ++i) {
++		MTLBindBufferSlot(_vertexBuffers, range.location + i, MTLBindKey(tmp[i]), offsets[i]);
  	}
  	_encoder->setVertexBuffers(tmp, tmp2, NSRangeToIndium(range));
  }
-@@ -634,6 +972,16 @@ MTL_UNSUPPORTED_CLASS
+@@ -634,6 +1160,17 @@ MTL_UNSUPPORTED_CLASS
  - (void)setVertexBufferOffset: (NSUInteger)offset
                        atIndex: (NSUInteger)index
  {
++	if (MTLBindBufferOffset(_vertexBuffers, index, offset)) { if (MTLBindSkipsEnabled()) { MTLBindSkipCount("bindSkipVertexBufferOffset"); } return; }
 +	if (MTLDebugEnabled()) {
 +		static unsigned long calls = 0;
 +		if (++calls <= 120) {
@@ -1970,25 +2168,28 @@ index e931b90..e13dc0e 100644
  	_encoder->setVertexBufferOffset(offset, index);
  }
  
-@@ -641,6 +989,7 @@ MTL_UNSUPPORTED_CLASS
+@@ -641,6 +1178,8 @@ MTL_UNSUPPORTED_CLASS
                  length: (NSUInteger)length
                 atIndex: (NSUInteger)index
  {
++	MTLBindForgetBufferSlot(_vertexBuffers, index);
 +	if (MTLDrawTracking() && index < 31) { debugDrawState.vertexBuffers[index] = nil; debugDrawState.vertexBytesLength[index] = length; memcpy(debugDrawState.vertexBytes[index], bytes, std::min<NSUInteger>(64, length)); }
  	_encoder->setVertexBytes(bytes, length, index);
  }
  
-@@ -648,7 +997,8 @@ MTL_UNSUPPORTED_CLASS
+@@ -648,7 +1187,10 @@ MTL_UNSUPPORTED_CLASS
                     offset: (NSUInteger)offset
                    atIndex: (NSUInteger)index
  {
 -	_encoder->setFragmentBuffer(((MTLBufferInternal*)buffer).buffer, offset, index);
++	const std::shared_ptr<Indium::Buffer>& indiumBuffer = MTLBufferGetIndium(buffer);
++	if (MTLBindBufferSlot(_fragmentBuffers, index, MTLBindKey(indiumBuffer), offset)) { if (MTLBindSkipsEnabled()) { MTLBindSkipCount("bindSkipFragmentBuffer"); } return; }
 +	if (MTLDrawTracking() && index < 31) { debugDrawState.fragmentBuffers[index] = buffer; debugDrawState.fragmentOffsets[index] = offset; debugDrawState.fragmentBytesLength[index] = 0; }
-+	_encoder->setFragmentBuffer(MTLBufferGetIndium(buffer), offset, index);
++	_encoder->setFragmentBuffer(indiumBuffer, offset, index);
  }
  
  - (void)setFragmentBuffers: (const id<MTLBuffer>*)buffers
-@@ -658,7 +1008,14 @@ MTL_UNSUPPORTED_CLASS
+@@ -658,7 +1200,17 @@ MTL_UNSUPPORTED_CLASS
  	std::vector<std::shared_ptr<Indium::Buffer>> tmp;
  	std::vector<size_t> tmp2(offsets, offsets + range.length);
  	for (size_t i = 0; i < range.length; ++i) {
@@ -2001,26 +2202,31 @@ index e931b90..e13dc0e 100644
 +			debugDrawState.fragmentOffsets[range.location + i] = offsets[i];
 +			debugDrawState.fragmentBytesLength[range.location + i] = 0;
 +		}
++	}
++	for (NSUInteger i = 0; i < range.length; ++i) {
++		MTLBindBufferSlot(_fragmentBuffers, range.location + i, MTLBindKey(tmp[i]), offsets[i]);
  	}
  	_encoder->setFragmentBuffers(tmp, tmp2, NSRangeToIndium(range));
  }
-@@ -666,6 +1023,7 @@ MTL_UNSUPPORTED_CLASS
+@@ -666,6 +1218,8 @@ MTL_UNSUPPORTED_CLASS
  - (void)setFragmentBufferOffset: (NSUInteger)offset
                          atIndex: (NSUInteger)index
  {
++	if (MTLBindBufferOffset(_fragmentBuffers, index, offset)) { if (MTLBindSkipsEnabled()) { MTLBindSkipCount("bindSkipFragmentBufferOffset"); } return; }
 +	if (MTLDrawTracking() && index < 31) debugDrawState.fragmentOffsets[index] = offset;
  	_encoder->setFragmentBufferOffset(offset, index);
  }
  
-@@ -673,6 +1031,7 @@ MTL_UNSUPPORTED_CLASS
+@@ -673,6 +1227,8 @@ MTL_UNSUPPORTED_CLASS
                    length: (NSUInteger)length
                   atIndex: (NSUInteger)index
  {
++	MTLBindForgetBufferSlot(_fragmentBuffers, index);
 +	if (MTLDrawTracking() && index < 31) { debugDrawState.fragmentBuffers[index] = nil; debugDrawState.fragmentBytesLength[index] = length; memcpy(debugDrawState.fragmentBytes[index], bytes, std::min<NSUInteger>(64, length)); }
  	_encoder->setFragmentBytes(bytes, length, index);
  }
  
-@@ -682,6 +1041,9 @@ MTL_UNSUPPORTED_CLASS
+@@ -682,6 +1238,9 @@ MTL_UNSUPPORTED_CLASS
           instanceCount: (NSUInteger)instanceCount
            baseInstance: (NSUInteger)baseInstance
  {
@@ -2030,7 +2236,7 @@ index e931b90..e13dc0e 100644
  	_encoder->drawPrimitives(static_cast<Indium::PrimitiveType>(primitiveType), vertexStart, vertexCount, instanceCount, baseInstance);
  }
  
-@@ -690,6 +1052,9 @@ MTL_UNSUPPORTED_CLASS
+@@ -690,6 +1249,9 @@ MTL_UNSUPPORTED_CLASS
             vertexCount: (NSUInteger)vertexCount
           instanceCount: (NSUInteger)instanceCount
  {
@@ -2040,7 +2246,7 @@ index e931b90..e13dc0e 100644
  	_encoder->drawPrimitives(static_cast<Indium::PrimitiveType>(primitiveType), vertexStart, vertexCount, instanceCount);
  }
  
-@@ -697,6 +1062,9 @@ MTL_UNSUPPORTED_CLASS
+@@ -697,6 +1259,9 @@ MTL_UNSUPPORTED_CLASS
             vertexStart: (NSUInteger)vertexStart
             vertexCount: (NSUInteger)vertexCount
  {
@@ -2050,7 +2256,7 @@ index e931b90..e13dc0e 100644
  	_encoder->drawPrimitives(static_cast<Indium::PrimitiveType>(primitiveType), vertexStart, vertexCount);
  }
  
-@@ -709,7 +1077,10 @@ MTL_UNSUPPORTED_CLASS
+@@ -709,7 +1274,10 @@ MTL_UNSUPPORTED_CLASS
                     baseVertex: (NSInteger)baseVertex
                   baseInstance: (NSUInteger)baseInstance
  {
@@ -2062,7 +2268,7 @@ index e931b90..e13dc0e 100644
  }
  
  - (void)drawIndexedPrimitives: (MTLPrimitiveType)primitiveType
-@@ -719,7 +1090,10 @@ MTL_UNSUPPORTED_CLASS
+@@ -719,7 +1287,10 @@ MTL_UNSUPPORTED_CLASS
              indexBufferOffset: (NSUInteger)indexBufferOffset
                  instanceCount: (NSUInteger)instanceCount
  {
@@ -2074,7 +2280,7 @@ index e931b90..e13dc0e 100644
  }
  
  - (void)drawIndexedPrimitives: (MTLPrimitiveType)primitiveType
-@@ -728,7 +1102,10 @@ MTL_UNSUPPORTED_CLASS
+@@ -728,7 +1299,10 @@ MTL_UNSUPPORTED_CLASS
                    indexBuffer: (id<MTLBuffer>)indexBuffer
              indexBufferOffset: (NSUInteger)indexBufferOffset
  {
@@ -2433,10 +2639,10 @@ index 37cccb3..79b2350 100644
 -
  @end
 diff --git a/src/Metal/MTLVertexDescriptor.mm b/src/Metal/MTLVertexDescriptor.mm
-index cde968d..fc7d99d 100644
+index cde968d..a3819d0 100644
 --- a/src/Metal/MTLVertexDescriptor.mm
 +++ b/src/Metal/MTLVertexDescriptor.mm
-@@ -1,24 +1,168 @@
+@@ -1,24 +1,205 @@
  // SPDX-FileCopyrightText: 2026 Darling Developers
  // SPDX-License-Identifier: MPL-2.0
  
@@ -2444,6 +2650,11 @@ index cde968d..fc7d99d 100644
 -#import <Foundation/NSMethodSignature.h>
 -#import <Foundation/NSInvocation.h>
 -
+-@implementation MTLVertexDescriptor
+-
+-#if DARLING_METAL_ENABLED
+-
+-- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
 +#import <Metal/MTLVertexDescriptorInternal.h>
 +#import <objc/runtime.h>
 +// The bridge owns these concrete descriptor implementations. Keep their
@@ -2470,21 +2681,77 @@ index cde968d..fc7d99d 100644
 +- (instancetype)init { self = [super init]; if (self) { _stepFunction = MTLVertexStepFunctionPerVertex; _stepRate = 1; } return self; }
 +- (id)copyWithZone:(NSZone*)zone { MTLVertexBufferLayoutDescriptor* copy = [[[self class] allocWithZone:zone] init]; copy.stride = _stride; copy.stepFunction = _stepFunction; copy.stepRate = _stepRate; return copy; }
 +@end
-+@interface MTLVertexBufferLayoutDescriptorArray (Existing)
-+- (MTLVertexBufferLayoutDescriptor*)existingObjectAtIndex:(NSUInteger)index;
-+- (void)resetAll;
-+@end
-+@interface MTLVertexAttributeDescriptorArray (Existing)
-+- (MTLVertexAttributeDescriptor*)existingObjectAtIndex:(NSUInteger)index;
-+- (void)resetAll;
-+@end
-+// The arrays used to be NSMutableDictionaries keyed by boxed NSNumbers, and converting a descriptor created all 31 entries;
-+// under a game that builds vertex descriptors constantly that was ~30% of the render thread. Fixed storage, entries created lazily.
-+@implementation MTLVertexBufferLayoutDescriptorArray {
++// The array storage is visible within this file (same pattern as the item classes above) so that -[MTLVertexDescriptor reset]
++// can run the in-place reset without a message send per array: the game resets a vertex descriptor for every draw. Both arrays
++// are only ever created by -init/-reset/-copyWithZone: below, and the two properties are readonly, so the storage a descriptor
++// holds is always the concrete class declared here.
++@interface MTLVertexBufferLayoutDescriptorArray () {
++@public
 +    MTLVertexBufferLayoutDescriptor* _items[31];
 +    uint32_t _present;   // bit i: _items[i] exists
 +    uint32_t _concrete;  // bit i: _items[i] is exactly MTLVertexBufferLayoutDescriptor (ivars can be written directly)
 +}
++- (MTLVertexBufferLayoutDescriptor*)existingObjectAtIndex:(NSUInteger)index;
++- (void)resetAll;
++@end
++@interface MTLVertexAttributeDescriptorArray () {
++@public
++    MTLVertexAttributeDescriptor* _items[31];
++    uint32_t _present;   // bit i: _items[i] exists
++    uint32_t _concrete;  // bit i: _items[i] is exactly MTLVertexAttributeDescriptor (ivars can be written directly)
++}
++- (MTLVertexAttributeDescriptor*)existingObjectAtIndex:(NSUInteger)index;
++- (void)resetAll;
++@end
++// A present-but-non-concrete entry is a caller-installed subclass instance (see
++// -setObject:atIndexedSubscript:): it keeps its own property setters. Kept out of
++// line so the common all-concrete loop does not carry the selector references and
++// the message-send stub in its preheader.
++__attribute__((noinline)) static void MTLVertexBufferLayoutSetDefaults(MTLVertexBufferLayoutDescriptor* item)
+ {
+-    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++    item.stride = 0; item.stepFunction = MTLVertexStepFunctionPerVertex; item.stepRate = 1;
+ }
+-
+-- (void)forwardInvocation:(NSInvocation *)anInvocation
++__attribute__((noinline)) static void MTLVertexAttributeSetDefaults(MTLVertexAttributeDescriptor* item)
+ {
+-    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++    item.format = MTLVertexFormatInvalid; item.offset = 0; item.bufferIndex = 0;
++}
++// Reset every entry the array has handed out, in place: an object a caller still
++// holds must read back the defaults. Exact-class entries are written through
++// their ivars; the present-but-non-concrete mask is taken once so the loop does
++// not reload it per entry.
++static void MTLVertexBufferLayoutArrayResetItems(MTLVertexBufferLayoutDescriptorArray* array)
++{
++    const uint32_t exotic = array->_present & ~array->_concrete;
++    for (uint32_t bits = array->_present; bits; bits &= bits - 1) {
++        const int i = __builtin_ctz(bits);
++        MTLVertexBufferLayoutDescriptor* item = array->_items[i];
++        if (exotic & (1u << i)) {
++            MTLVertexBufferLayoutSetDefaults(item);
++        } else {
++            item->_stride = 0; item->_stepFunction = MTLVertexStepFunctionPerVertex; item->_stepRate = 1;
++        }
++    }
++}
++static void MTLVertexAttributeArrayResetItems(MTLVertexAttributeDescriptorArray* array)
++{
++    const uint32_t exotic = array->_present & ~array->_concrete;
++    for (uint32_t bits = array->_present; bits; bits &= bits - 1) {
++        const int i = __builtin_ctz(bits);
++        MTLVertexAttributeDescriptor* item = array->_items[i];
++        if (exotic & (1u << i)) {
++            MTLVertexAttributeSetDefaults(item);
++        } else {
++            item->_format = MTLVertexFormatInvalid; item->_offset = 0; item->_bufferIndex = 0;
++        }
++    }
++}
++// The arrays used to be NSMutableDictionaries keyed by boxed NSNumbers, and converting a descriptor created all 31 entries;
++// under a game that builds vertex descriptors constantly that was ~30% of the render thread. Fixed storage, entries created lazily.
++@implementation MTLVertexBufferLayoutDescriptorArray
 +- (void)dealloc { for (int i = 0; i < 31; ++i) [_items[i] release]; [super dealloc]; }
 +- (MTLVertexBufferLayoutDescriptor*)objectAtIndexedSubscript:(NSUInteger)index {
 +    if (index >= 31) [NSException raise:NSRangeException format:@"Vertex descriptor index %lu exceeds 30", (unsigned long)index];
@@ -2493,17 +2760,7 @@ index cde968d..fc7d99d 100644
 +}
 +- (MTLVertexBufferLayoutDescriptor*)existingObjectAtIndex:(NSUInteger)index { return index < 31 ? _items[index] : nil; }
 +// reset in place: the game calls -[MTLVertexDescriptor reset] for every draw and then refills it, so keep the objects
-+- (void)resetAll {
-+    for (uint32_t bits = _present; bits; bits &= bits - 1) {
-+        const int i = __builtin_ctz(bits);
-+        MTLVertexBufferLayoutDescriptor* item = _items[i];
-+        if (_concrete & (1u << i)) {
-+            item->_stride = 0; item->_stepFunction = MTLVertexStepFunctionPerVertex; item->_stepRate = 1;
-+        } else {
-+            item.stride = 0; item.stepFunction = MTLVertexStepFunctionPerVertex; item.stepRate = 1;
-+        }
-+    }
-+}
++- (void)resetAll { MTLVertexBufferLayoutArrayResetItems(self); }
 +- (void)setObject:(MTLVertexBufferLayoutDescriptor*)descriptor atIndexedSubscript:(NSUInteger)index {
 +    if (index >= 31) [NSException raise:NSRangeException format:@"Vertex descriptor index %lu exceeds 30", (unsigned long)index];
 +    id old = _items[index];
@@ -2527,11 +2784,7 @@ index cde968d..fc7d99d 100644
 +@synthesize bufferIndex = _bufferIndex;
 +- (id)copyWithZone:(NSZone*)zone { MTLVertexAttributeDescriptor* copy = [[[self class] allocWithZone:zone] init]; copy.format = _format; copy.offset = _offset; copy.bufferIndex = _bufferIndex; return copy; }
 +@end
-+@implementation MTLVertexAttributeDescriptorArray {
-+    MTLVertexAttributeDescriptor* _items[31];
-+    uint32_t _present;   // bit i: _items[i] exists
-+    uint32_t _concrete;  // bit i: _items[i] is exactly MTLVertexAttributeDescriptor (ivars can be written directly)
-+}
++@implementation MTLVertexAttributeDescriptorArray
 +- (void)dealloc { for (int i = 0; i < 31; ++i) [_items[i] release]; [super dealloc]; }
 +- (MTLVertexAttributeDescriptor*)objectAtIndexedSubscript:(NSUInteger)index {
 +    if (index >= 31) [NSException raise:NSRangeException format:@"Vertex descriptor index %lu exceeds 30", (unsigned long)index];
@@ -2539,17 +2792,7 @@ index cde968d..fc7d99d 100644
 +    return _items[index];
 +}
 +- (MTLVertexAttributeDescriptor*)existingObjectAtIndex:(NSUInteger)index { return index < 31 ? _items[index] : nil; }
-+- (void)resetAll {
-+    for (uint32_t bits = _present; bits; bits &= bits - 1) {
-+        const int i = __builtin_ctz(bits);
-+        MTLVertexAttributeDescriptor* item = _items[i];
-+        if (_concrete & (1u << i)) {
-+            item->_format = MTLVertexFormatInvalid; item->_offset = 0; item->_bufferIndex = 0;
-+        } else {
-+            item.format = MTLVertexFormatInvalid; item.offset = 0; item.bufferIndex = 0;
-+        }
-+    }
-+}
++- (void)resetAll { MTLVertexAttributeArrayResetItems(self); }
 +- (void)setObject:(MTLVertexAttributeDescriptor*)descriptor atIndexedSubscript:(NSUInteger)index {
 +    if (index >= 31) [NSException raise:NSRangeException format:@"Vertex descriptor index %lu exceeds 30", (unsigned long)index];
 +    id old = _items[index];
@@ -2567,28 +2810,27 @@ index cde968d..fc7d99d 100644
 +    return copy;
 +}
 +@end
- @implementation MTLVertexDescriptor
--
--#if DARLING_METAL_ENABLED
--
--- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
--{
--    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++@implementation MTLVertexDescriptor
 +@synthesize layouts = _layouts;
 +@synthesize attributes = _attributes;
 ++ (instancetype)vertexDescriptor { return [[[self alloc] init] autorelease]; }
 +- (instancetype)init { self = [super init]; if (self) [self reset]; return self; }
 +- (void)dealloc { [_layouts release]; [_attributes release]; [super dealloc]; }
 +- (void)reset {
-+    if (_layouts && _attributes) { [_layouts resetAll]; [_attributes resetAll]; return; }
++    if (_layouts && _attributes) {
++        // Direct call instead of [_layouts resetAll]/[_attributes resetAll]: the game
++        // resets a vertex descriptor for every draw. Both arrays are only ever created
++        // by -init/-reset/-copyWithZone: in this file and the two properties are
++        // readonly, so their storage is the concrete class. The per-entry subclass
++        // case below keeps using the property setters through their own message sends.
++        MTLVertexBufferLayoutArrayResetItems(_layouts);
++        MTLVertexAttributeArrayResetItems(_attributes);
++        return;
++    }
 +    [_layouts release]; [_attributes release];
 +    _layouts = [MTLVertexBufferLayoutDescriptorArray new];
 +    _attributes = [MTLVertexAttributeDescriptorArray new];
- }
--
--- (void)forwardInvocation:(NSInvocation *)anInvocation
--{
--    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++}
 +- (id)copyWithZone:(NSZone*)zone {
 +    MTLVertexDescriptor* copy = [[[self class] allocWithZone:zone] init];
 +    [copy->_layouts release]; [copy->_attributes release];
@@ -3079,43 +3321,43 @@ new file mode 100644
 +- (void)endEncoding { _encoder->endEncoding(); }
 +- (void)copyFromBuffer:(id<MTLBuffer>)source sourceOffset:(NSUInteger)sourceOffset toBuffer:(id<MTLBuffer>)destination destinationOffset:(NSUInteger)destinationOffset size:(NSUInteger)size {
 +	MTLTraceCount("blitBufferToBuffer");
-+    _encoder->copy(((MTLBufferInternal*)source).buffer, sourceOffset, ((MTLBufferInternal*)destination).buffer, destinationOffset, size);
++    _encoder->copy(MTLBufferGetIndium(source), sourceOffset, MTLBufferGetIndium(destination), destinationOffset, size);
 +}
 +- (void)copyFromBuffer:(id<MTLBuffer>)source sourceOffset:(NSUInteger)sourceOffset sourceBytesPerRow:(NSUInteger)sourceBytesPerRow sourceBytesPerImage:(NSUInteger)sourceBytesPerImage sourceSize:(MTLSize)sourceSize toTexture:(id<MTLTexture>)destination destinationSlice:(NSUInteger)destinationSlice destinationLevel:(NSUInteger)destinationLevel destinationOrigin:(MTLOrigin)destinationOrigin {
 +	MTLTraceCount("blitBufferToTexture");
 +	MTLDebugUpload(source, sourceOffset, destination, destinationLevel, sourceSize);
-+    _encoder->copy(((MTLBufferInternal*)source).buffer, sourceOffset, sourceBytesPerRow, sourceBytesPerImage, MTLSizeToIndium(sourceSize), ((MTLTextureInternal*)destination).texture, destinationSlice, destinationLevel, (Indium::Origin {destinationOrigin.x, destinationOrigin.y, destinationOrigin.z}));
++    _encoder->copy(MTLBufferGetIndium(source), sourceOffset, sourceBytesPerRow, sourceBytesPerImage, MTLSizeToIndium(sourceSize), MTLTextureGetIndium(destination), destinationSlice, destinationLevel, (Indium::Origin {destinationOrigin.x, destinationOrigin.y, destinationOrigin.z}));
 +}
 +- (void)copyFromTexture:(id<MTLTexture>)source sourceSlice:(NSUInteger)sourceSlice sourceLevel:(NSUInteger)sourceLevel sourceOrigin:(MTLOrigin)sourceOrigin sourceSize:(MTLSize)sourceSize toBuffer:(id<MTLBuffer>)destination destinationOffset:(NSUInteger)destinationOffset destinationBytesPerRow:(NSUInteger)destinationBytesPerRow destinationBytesPerImage:(NSUInteger)destinationBytesPerImage {
 +	MTLTraceCount("blitTextureToBuffer");
-+    _encoder->copy(((MTLTextureInternal*)source).texture, sourceSlice, sourceLevel, (Indium::Origin {sourceOrigin.x, sourceOrigin.y, sourceOrigin.z}), MTLSizeToIndium(sourceSize), ((MTLBufferInternal*)destination).buffer, destinationOffset, destinationBytesPerRow, destinationBytesPerImage);
++    _encoder->copy(MTLTextureGetIndium(source), sourceSlice, sourceLevel, (Indium::Origin {sourceOrigin.x, sourceOrigin.y, sourceOrigin.z}), MTLSizeToIndium(sourceSize), MTLBufferGetIndium(destination), destinationOffset, destinationBytesPerRow, destinationBytesPerImage);
 +}
 +- (void)copyFromTexture:(id<MTLTexture>)source toTexture:(id<MTLTexture>)destination {
 +	MTLTraceCount("blitTextureToTexture");
-+    _encoder->copy(((MTLTextureInternal*)source).texture, ((MTLTextureInternal*)destination).texture);
++    _encoder->copy(MTLTextureGetIndium(source), MTLTextureGetIndium(destination));
 +}
 +- (void)copyFromTexture:(id<MTLTexture>)source sourceSlice:(NSUInteger)sourceSlice sourceLevel:(NSUInteger)sourceLevel toTexture:(id<MTLTexture>)destination destinationSlice:(NSUInteger)destinationSlice destinationLevel:(NSUInteger)destinationLevel sliceCount:(NSUInteger)sliceCount levelCount:(NSUInteger)levelCount {
 +	MTLTraceCount("blitTextureToTexture");
-+    _encoder->copy(((MTLTextureInternal*)source).texture, sourceSlice, sourceLevel, ((MTLTextureInternal*)destination).texture, destinationSlice, destinationLevel, sliceCount, levelCount);
++    _encoder->copy(MTLTextureGetIndium(source), sourceSlice, sourceLevel, MTLTextureGetIndium(destination), destinationSlice, destinationLevel, sliceCount, levelCount);
 +}
 +- (void)copyFromTexture:(id<MTLTexture>)source sourceSlice:(NSUInteger)sourceSlice sourceLevel:(NSUInteger)sourceLevel sourceOrigin:(MTLOrigin)sourceOrigin sourceSize:(MTLSize)sourceSize toTexture:(id<MTLTexture>)destination destinationSlice:(NSUInteger)destinationSlice destinationLevel:(NSUInteger)destinationLevel destinationOrigin:(MTLOrigin)destinationOrigin {
 +	MTLTraceCount("blitTextureToTexture");
-+    _encoder->copy(((MTLTextureInternal*)source).texture, sourceSlice, sourceLevel, (Indium::Origin {sourceOrigin.x, sourceOrigin.y, sourceOrigin.z}), MTLSizeToIndium(sourceSize), ((MTLTextureInternal*)destination).texture, destinationSlice, destinationLevel, (Indium::Origin {destinationOrigin.x, destinationOrigin.y, destinationOrigin.z}));
++    _encoder->copy(MTLTextureGetIndium(source), sourceSlice, sourceLevel, (Indium::Origin {sourceOrigin.x, sourceOrigin.y, sourceOrigin.z}), MTLSizeToIndium(sourceSize), MTLTextureGetIndium(destination), destinationSlice, destinationLevel, (Indium::Origin {destinationOrigin.x, destinationOrigin.y, destinationOrigin.z}));
 +}
 +- (void)fillBuffer:(id<MTLBuffer>)buffer range:(NSRange)range value:(uint8_t)value {
-+    _encoder->fillBuffer(((MTLBufferInternal*)buffer).buffer, NSRangeToIndium(range), value);
++    _encoder->fillBuffer(MTLBufferGetIndium(buffer), NSRangeToIndium(range), value);
 +}
 +- (void)generateMipmapsForTexture:(id<MTLTexture>)texture {
 +	MTLTraceCount("generateMipmaps");
-+    _encoder->generateMipmapsForTexture(((MTLTextureInternal*)texture).texture);
++    _encoder->generateMipmapsForTexture(MTLTextureGetIndium(texture));
 +}
 +- (void)copyFromBuffer:(id<MTLBuffer>)source sourceOffset:(NSUInteger)sourceOffset sourceBytesPerRow:(NSUInteger)sourceBytesPerRow sourceBytesPerImage:(NSUInteger)sourceBytesPerImage sourceSize:(MTLSize)sourceSize toTexture:(id<MTLTexture>)destination destinationSlice:(NSUInteger)destinationSlice destinationLevel:(NSUInteger)destinationLevel destinationOrigin:(MTLOrigin)destinationOrigin options:(MTLBlitOption)options {
 +	MTLTraceCount("blitBufferToTexture");
-+    _encoder->copy(((MTLBufferInternal*)source).buffer, sourceOffset, sourceBytesPerRow, sourceBytesPerImage, MTLSizeToIndium(sourceSize), ((MTLTextureInternal*)destination).texture, destinationSlice, destinationLevel, (Indium::Origin {destinationOrigin.x, destinationOrigin.y, destinationOrigin.z}), static_cast<Indium::BlitOption>(options));
++    _encoder->copy(MTLBufferGetIndium(source), sourceOffset, sourceBytesPerRow, sourceBytesPerImage, MTLSizeToIndium(sourceSize), MTLTextureGetIndium(destination), destinationSlice, destinationLevel, (Indium::Origin {destinationOrigin.x, destinationOrigin.y, destinationOrigin.z}), static_cast<Indium::BlitOption>(options));
 +}
 +- (void)copyFromTexture:(id<MTLTexture>)source sourceSlice:(NSUInteger)sourceSlice sourceLevel:(NSUInteger)sourceLevel sourceOrigin:(MTLOrigin)sourceOrigin sourceSize:(MTLSize)sourceSize toBuffer:(id<MTLBuffer>)destination destinationOffset:(NSUInteger)destinationOffset destinationBytesPerRow:(NSUInteger)destinationBytesPerRow destinationBytesPerImage:(NSUInteger)destinationBytesPerImage options:(MTLBlitOption)options {
 +	MTLTraceCount("blitTextureToBuffer");
-+    _encoder->copy(((MTLTextureInternal*)source).texture, sourceSlice, sourceLevel, (Indium::Origin {sourceOrigin.x, sourceOrigin.y, sourceOrigin.z}), MTLSizeToIndium(sourceSize), ((MTLBufferInternal*)destination).buffer, destinationOffset, destinationBytesPerRow, destinationBytesPerImage, static_cast<Indium::BlitOption>(options));
++    _encoder->copy(MTLTextureGetIndium(source), sourceSlice, sourceLevel, (Indium::Origin {sourceOrigin.x, sourceOrigin.y, sourceOrigin.z}), MTLSizeToIndium(sourceSize), MTLBufferGetIndium(destination), destinationOffset, destinationBytesPerRow, destinationBytesPerImage, static_cast<Indium::BlitOption>(options));
 +}
 +#else
 +@dynamic device, label;

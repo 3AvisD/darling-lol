@@ -29,31 +29,56 @@ syscall_flags=configured_flags(kernel/'libsyscall/CMakeFiles/libsyscall.dir')
 kqueue_flags={**kqueue_flags,'C_FLAGS':[*kqueue_flags['C_FLAGS'],'-O2','-fno-strict-aliasing']}
 kqueue_sources=[value.split('/kqueue.dir/',1)[1][:-2] for value in objects if '/kqueue.dir/' in value and value.endswith('.c.o')]
 assert kqueue_sources, 'Configured kqueue objects missing'
+# The configured emulation target is a plain development build: its flags.make
+# carries no -O flag, so every object recompiled with `emulation_flags` is -O0.
+# These files are on the per-call path of the guest (BSD trap dispatch, read/
+# write, network, kqueue, psynch/ulock, clocks, madvise), so rebuild them
+# optimized. -fno-strict-aliasing matches the other optimized rebuilds in this
+# repository; the sources are old BSD/xnu C.
+repair_flags={**emulation_flags,'C_FLAGS':[*emulation_flags['C_FLAGS'],'-O2','-fno-strict-aliasing']}
+syscall_repair_flags={**syscall_flags,'C_FLAGS':[*syscall_flags['C_FLAGS'],'-O2','-fno-strict-aliasing']}
 repairs=[(source,kqueue_flags,project/'build/darling-src/src/external/libkqueue') for source in kqueue_sources]
-repairs += [('src/xnu_syscall/bsd/bsd_syscall_table.c',emulation_flags,project/'build/darling-src/src/external/xnu/darling/src/libsystem_kernel/emulation')]
-repairs += [('src/common/base.c',emulation_flags,project/'build/darling-src/src/external/xnu/darling/src/libsystem_kernel/emulation')]
+repairs += [('src/xnu_syscall/bsd/bsd_syscall_table.c',repair_flags,project/'build/darling-src/src/external/xnu/darling/src/libsystem_kernel/emulation')]
+repairs += [('src/common/base.c',repair_flags,project/'build/darling-src/src/external/xnu/darling/src/libsystem_kernel/emulation')]
 # Avoid a redundant absolute-time read when the commpage timestamp is unpublished.
-repairs += [('wrappers/__commpage_gettimeofday.c',syscall_flags,project/'build/darling-src/src/external/xnu/libsyscall')]
-repairs += [('src/xnu_syscall/bsd/impl/'+name,emulation_flags,
+repairs += [('wrappers/__commpage_gettimeofday.c',syscall_repair_flags,project/'build/darling-src/src/external/xnu/libsyscall')]
+repairs += [('src/xnu_syscall/bsd/impl/'+name,repair_flags,
     project/'build/darling-src/src/external/xnu/darling/src/libsystem_kernel/emulation')
-    for name in ('bsdthread/bsdthread_register.c','bsdthread/pthread_canceled.c','kqueue/kevent_qos.c','bsdthread/workq_kernreturn.c','psynch/psynch_cvwait.c','psynch/psynch_mutexwait.c','psynch/psynch_mutexdrop.c','psynch/ulock_wait.c',
-                 # select busy-loop trace (opt-in) and the recvfrom flag conversion
-                 'select/select.c','network/recvfrom.c','network/recvmsg.c','unistd/read.c','unistd/close.c','process/fork.c')]
+    for name in ('bsdthread/pthread_canceled.c','kqueue/kevent_qos.c','bsdthread/workq_kernreturn.c','psynch/psynch_cvwait.c','psynch/psynch_mutexwait.c','psynch/psynch_mutexdrop.c','psynch/ulock_wait.c',
+                 # the remaining psynch/ulock traps stay RPCs but are still per-wait
+                 'psynch/psynch_cvbroad.c','psynch/psynch_cvclrprepost.c','psynch/psynch_cvsignal.c',
+                 'psynch/psynch_rw_rdlock.c','psynch/psynch_rw_unlock.c','psynch/psynch_rw_wrlock.c','psynch/ulock_wake.c',
+                 # select busy-loop trace (opt-in) and the network flag conversions
+                 'select/select.c','network/recvfrom.c','network/recvmsg.c','network/sendto.c','network/sendmsg.c','unistd/read.c','unistd/close.c','process/fork.c',
+                 # the allocator's reclamation hint
+                 'mman/madvise.c')]
 # RPC guards use the full native signal mask. Rebuild both users of the
 # configured forced-include header, without changing unrelated kernel objects.
 emulation_root=project/'build/darling-src/src/external/xnu/darling/src/libsystem_kernel/emulation'
 rpc_flags={**emulation_flags,'C_FLAGS':[*emulation_flags['C_FLAGS'],'-O2','-fno-omit-frame-pointer']}
-# The fault reporter also writes /tmp/lolsig.log (return addresses and module map)
+# bsdthread_register.c keeps emulation_flags (-O0): its pthread/wqueue entry
+# wrappers jump into _thread_start/_start_wqthread through inline assembly that
+# sets %rsp from the thread argument, i.e. it depends on the stack layout.
+# Signal entry with stack-layout-dependent frame walking stays unoptimized on
+# purpose (emulation_flags): it runs on the fault/suspend signal stacks.
+repairs += [('src/xnu_syscall/bsd/impl/bsdthread/bsdthread_register.c',emulation_flags,emulation_root)]
 repairs += [('src/linux_premigration/signal/sigexc.c',emulation_flags,emulation_root)]
 repairs += [('src/xnu_syscall/mach/impl/mach_traps.c',rpc_flags,emulation_root)]
 # User-space clock (per-CPU TSC calibration), its gettimeofday entry and the cached kern.boottime.
 repairs += [('src/linux_premigration/ext/clock_gettime.c',rpc_flags,emulation_root)]
 repairs += [('src/xnu_syscall/bsd/impl/time/gettimeofday.c',rpc_flags,emulation_root)]
+repairs += [('src/other/mach/lkm.c',rpc_flags,emulation_root)]
 # sysctl_kern.c takes the emulated OS identity from per-source definitions (emulation/CMakeLists.txt)
 identity=['-DEMULATED_SYSNAME="Darwin"','-DEMULATED_RELEASE="23.6.0"',
     '-DEMULATED_VERSION="Darwin Kernel Version 23.6.0: Mon Jul 29 21:14:30 PDT 2024; root:xnu-10063.141.2~1/RELEASE_X86_64"',
     '-DEMULATED_OSVERSION="23H124"','-DEMULATED_OSPRODUCTVERSION="14.7"']
 repairs += [('src/xnu_syscall/bsd/helper/misc/sysctl_kern.c',{**emulation_flags,'C_FLAGS':[*emulation_flags['C_FLAGS'],*identity]},emulation_root)]
+# The hw.*/machdep.cpu.* sysctls are not on the per-call path: recompile them
+# with the configured flags only because these sources changed (the same way
+# bsdthread_register.c keeps -O0). sysctl_hw.c now reports the host's real CPU
+# topology; sysctl_machdep.c shares its probe for core_count/thread_count.
+repairs += [('src/xnu_syscall/bsd/helper/misc/sysctl_hw.c',emulation_flags,emulation_root)]
+repairs += [('src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c',emulation_flags,emulation_root)]
 repairs += [('src/linux_premigration/resources/dserver-rpc-defs.c',rpc_flags,emulation_root)]
 forced_rpc_flags={**rpc_flags,'C_FLAGS':[*rpc_flags['C_FLAGS'],'-include',str(emulation_root/'include/linux_premigration/resources/dserver-rpc-defs.h')]}
 repairs += [('src/rpc.c',forced_rpc_flags,build/'src/external/darlingserver')]

@@ -310,6 +310,95 @@ index 0000000..1741d59
 +	}
 +	free(fp);
 +}
+diff --git a/duct-tape/src/host.c b/duct-tape/src/host.c
+index a841dfd..9fe8bb4 100644
+--- a/duct-tape/src/host.c
++++ b/duct-tape/src/host.c
+@@ -28,6 +28,64 @@ long sysconf(int name);
+ #define _SC_NPROCESSORS_CONF 83
+ #define _SC_NPROCESSORS_ONLN 84
+ 
++// Linux file access for the SMT topology read (manual prototypes, as for sysconf above)
++int open(const char* pathname, int flags, ...);
++long read(int fd, void* buf, unsigned long count);
++int close(int fd);
++
++// darling-lol: host_info used to report physical_cpu == logical_cpu, which
++// tells the guest there is no SMT. Read the sibling count of cpu0 from sysfs
++// and divide; on any failure keep the logical count. The per-CPU package/core
++// scan in the guest-side sysctl_hw.c is more precise, but host_info has no
++// other source for the physical count.
++static uint32_t host_smt_siblings(void) {
++	static uint32_t cached;
++	char buf[64];
++	uint32_t count = 0;
++	long n;
++
++	if (cached != 0) {
++		return cached;
++	}
++
++	int fd = open("/sys/devices/system/cpu/cpu0/topology/thread_siblings_list", 0 /* O_RDONLY */);
++	if (fd < 0) {
++		return 1;
++	}
++	n = read(fd, buf, sizeof(buf) - 1);
++	close(fd);
++	if (n <= 0) {
++		return 1;
++	}
++	buf[n] = 0;
++
++	// a list like "0,6" or "0-3": count one CPU per element, ranges as ranges
++	const char* s = buf;
++	while (*s >= '0' && *s <= '9') {
++		unsigned long first = 0, last;
++		while (*s >= '0' && *s <= '9') {
++			first = first * 10 + (unsigned long)(*s++ - '0');
++		}
++		last = first;
++		if (*s == '-') {
++			++s;
++			last = 0;
++			while (*s >= '0' && *s <= '9') {
++				last = last * 10 + (unsigned long)(*s++ - '0');
++			}
++		}
++		if (last >= first && last - first < 4096) {
++			count += (uint32_t)(last - first + 1);
++		}
++		if (*s == ',') {
++			++s;
++		}
++	}
++
++	cached = (count != 0) ? count : 1;
++	return cached;
++}
++
+ static void cache_sysinfo(void* context) {
+ 	struct sysinfo* cached_sysinfo = context;
+ 
+@@ -73,11 +131,16 @@ kern_return_t host_info(host_t host, host_flavor_t flavor, host_info_t info, mac
+ 
+ 			// if there's room for the modern structure, fill in some additional info
+ 			if (*count >= HOST_BASIC_INFO_COUNT) {
+-				// TODO: properly differentiate physical vs. logical cores
++				uint32_t siblings = host_smt_siblings();
+ 				dtape_stub_safe("modern HOST_BASIC_INFO");
+ 				basic_info->cpu_threadtype = CPU_THREADTYPE_NONE;
+-				basic_info->physical_cpu = basic_info->avail_cpus;
+-				basic_info->physical_cpu_max = basic_info->max_cpus;
++				// darling-lol: physical cores, not logical CPUs (the guest
++				// sizes worker pools off physical_cpu and libmalloc derives
++				// its SMT sharing from the commpage's physical/logical pair).
++				basic_info->physical_cpu = (siblings != 0 && basic_info->avail_cpus % siblings == 0)
++					? basic_info->avail_cpus / siblings : basic_info->avail_cpus;
++				basic_info->physical_cpu_max = (siblings != 0 && basic_info->max_cpus % siblings == 0)
++					? basic_info->max_cpus / siblings : basic_info->max_cpus;
+ 				basic_info->logical_cpu = basic_info->avail_cpus;
+ 				basic_info->logical_cpu_max = basic_info->max_cpus;
+ 
 diff --git a/duct-tape/src/kqchan.c b/duct-tape/src/kqchan.c
 index 458e659..2e33f20 100644
 --- a/duct-tape/src/kqchan.c
@@ -1273,7 +1362,7 @@ index d46bdb4..9a58727 100644
  		};
  	};
 diff --git a/internal-include/darlingserver/message.hpp b/internal-include/darlingserver/message.hpp
-index 708f3f3..e68cd28 100644
+index 708f3f3..fd46ab8 100644
 --- a/internal-include/darlingserver/message.hpp
 +++ b/internal-include/darlingserver/message.hpp
 @@ -28,6 +28,7 @@
@@ -1296,7 +1385,7 @@ index 708f3f3..e68cd28 100644
  		/**
  		 * Default-initializes a Message.
  		 *
-@@ -161,6 +167,8 @@ namespace DarlingServer {
+@@ -161,13 +167,30 @@ namespace DarlingServer {
  	class MessageQueue {
  	private:
  		std::deque<Message> _messages;
@@ -1305,6 +1394,28 @@ index 708f3f3..e68cd28 100644
  		mutable std::mutex _lock;
  		std::function<void()> _messageArrivalNotificationCallback = nullptr;
  
++		void _notifyMessageArrival();
++
+ 	public:
+ 		void setMessageArrivalNotificationCallback(std::function<void()> messageArrivalNotificationCallback);
+ 
+ 		void push(Message&& message);
++
++		/**
++		 * Pushes a message and immediately tries to send as much of the queue as
++		 * possible through the given socket from the calling thread.
++		 *
++		 * This avoids the event loop hop for messages that can be sent right away.
++		 * Sending always starts at the head of the queue, so a direct send can
++		 * never overtake messages queued by an earlier EAGAIN. When the socket
++		 * would block, the message-arrival notification callback fires (once) so
++		 * the receiving loop retries once the socket is writable again.
++		 */
++		void pushAndSend(Message&& message, int socket);
++
+ 		std::optional<Message> pop();
+ 
+ 		bool sendMany(int socket);
 diff --git a/internal-include/darlingserver/process.hpp b/internal-include/darlingserver/process.hpp
 index c97be30..31772dc 100644
 --- a/internal-include/darlingserver/process.hpp
@@ -1323,6 +1434,20 @@ index c97be30..31772dc 100644
  		bool _startSuspended = false;
  		bool _pendingReplacement = false;
  		std::unordered_map<uintptr_t, std::shared_ptr<Kqchan>> _kqchannels;
+diff --git a/internal-include/darlingserver/server.hpp b/internal-include/darlingserver/server.hpp
+index b960f17..5f0e621 100644
+--- a/internal-include/darlingserver/server.hpp
++++ b/internal-include/darlingserver/server.hpp
+@@ -46,6 +46,9 @@ namespace DarlingServer {
+ 		WorkQueue<std::shared_ptr<Thread>> _workQueue;
+ 		bool _canRead = false;
+ 		bool _canWrite = true;
++		/* darling-lol: producers send their own replies (see sendMessage) unless
++		 * DSERVER_DIRECT_REPLY=0 restored the old outbox wakeup hand-off. */
++		bool _directReply = true;
+ 		int _wakeupFD;
+ 		int _timerFD;
+ 		uint64_t _currentTimerDeadline = 0;
 diff --git a/scripts/generate-rpc-wrappers.py b/scripts/generate-rpc-wrappers.py
 index e35221c..1068426 100755
 --- a/scripts/generate-rpc-wrappers.py
@@ -1871,7 +1996,7 @@ index 7b8000f..dbaf832 100644
  	}
  
 diff --git a/src/message.cpp b/src/message.cpp
-index 414c1d6..06b3f67 100644
+index 414c1d6..a7f5a94 100644
 --- a/src/message.cpp
 +++ b/src/message.cpp
 @@ -24,6 +24,25 @@
@@ -1942,7 +2067,7 @@ index 414c1d6..06b3f67 100644
  	memcpy(CMSG_DATA(credHeader), &creds, sizeof(struct ucred));
  };
  
-@@ -496,13 +509,47 @@ std::optional<DarlingServer::Message> DarlingServer::MessageQueue::pop() {
+@@ -496,13 +509,52 @@ std::optional<DarlingServer::Message> DarlingServer::MessageQueue::pop() {
  	}
  };
  
@@ -1959,6 +2084,11 @@ index 414c1d6..06b3f67 100644
 +	if (*(const int*) data != 33) {
 +		return;
 +	}
++	/* darling-lol: replies from workers and receives on the main loop can now
++	 * reach this logging helper concurrently; serialize the lazy open and the
++	 * shared counter. */
++	static std::mutex m58akLogLock;
++	std::scoped_lock m58akLock(m58akLogLock);
 +	static FILE* f = nullptr;
 +	static unsigned long n = 0;
 +	if (!f) {
@@ -1991,7 +2121,16 @@ index 414c1d6..06b3f67 100644
  	while (ret >= 0) {
  		len = 0;
  		for (size_t i = 0; i < _messages.size() && i < sizeof(mmsgs) / sizeof(*mmsgs); ++i) {
-@@ -549,6 +596,7 @@ bool DarlingServer::MessageQueue::sendMany(int socket) {
+@@ -538,7 +590,7 @@ bool DarlingServer::MessageQueue::sendMany(int socket) {
+ 				break;
+ 			} else if (errno == EINTR) {
+ 				ret = 0;
+-			} else if (errno == EPIPE || errno == ECONNREFUSED) {
++			} else if (errno == EPIPE || errno == ECONNREFUSED || errno == ENOENT) {
+ 				// this means that peer of the first message we tried to send has died.
+ 				// we'll just drop that message and try the others.
+ 				_messages.pop_front();
+@@ -549,6 +601,7 @@ bool DarlingServer::MessageQueue::sendMany(int socket) {
  		}
  
  		for (size_t i = 0; i < ret; ++i) {
@@ -1999,7 +2138,7 @@ index 414c1d6..06b3f67 100644
  			auto cb = _messages.front().sendNotificationCallback();
  			_messages.pop_front();
  			if (cb) {
-@@ -567,10 +615,11 @@ bool DarlingServer::MessageQueue::receiveMany(int socket) {
+@@ -567,10 +620,11 @@ bool DarlingServer::MessageQueue::receiveMany(int socket) {
  	int ret = 0;
  
  	while (ret >= 0) {
@@ -2015,7 +2154,7 @@ index 414c1d6..06b3f67 100644
  			mmsgs[i].msg_len = 0;
  		}
  
-@@ -587,11 +636,25 @@ bool DarlingServer::MessageQueue::receiveMany(int socket) {
+@@ -587,11 +641,25 @@ bool DarlingServer::MessageQueue::receiveMany(int socket) {
  			}
  		}
  
@@ -2046,6 +2185,50 @@ index 414c1d6..06b3f67 100644
  		}
  	}
  
+@@ -615,3 +683,43 @@ bool DarlingServer::MessageQueue::empty() const {
+ 	std::unique_lock lock(_lock);
+ 	return _messages.empty();
+ };
++
++void DarlingServer::MessageQueue::_notifyMessageArrival() {
++	std::function<void()> callback;
++
++	{
++		std::scoped_lock lock(_lock);
++		if (_messages.empty()) {
++			return;
++		}
++		callback = _messageArrivalNotificationCallback;
++	}
++
++	if (callback) {
++		callback();
++	}
++};
++
++void DarlingServer::MessageQueue::pushAndSend(Message&& message, int socket) {
++	{
++		std::scoped_lock lock(_lock);
++		_messages.push_back(std::move(message));
++	}
++
++	bool canSendMore = true;
++
++	try {
++		// send from this thread, but only by draining the queue in order, so that
++		// a direct send can never overtake messages queued by an earlier EAGAIN
++		canSendMore = sendMany(socket);
++	} catch (...) {
++		// the messages remain queued; the receiving loop retries and reports the error
++		_notifyMessageArrival();
++		throw;
++	}
++
++	if (!canSendMore) {
++		// the socket is full; the receiving loop has to retry once it is writable
++		_notifyMessageArrival();
++	}
++};
 diff --git a/src/process.cpp b/src/process.cpp
 index 9cd7b81..180f372 100644
 --- a/src/process.cpp
@@ -2329,7 +2512,7 @@ index 9cd7b81..180f372 100644
  			continue;
  		}
 diff --git a/src/server.cpp b/src/server.cpp
-index e502e28..e225510 100644
+index e502e28..8d1cf2b 100644
 --- a/src/server.cpp
 +++ b/src/server.cpp
 @@ -28,6 +28,8 @@
@@ -2482,7 +2665,21 @@ index e502e28..e225510 100644
  		.get_load_info = dtape_hook_get_load_info,
  
  		.thread_suspend = dtape_hook_thread_suspend,
-@@ -540,6 +634,7 @@ void DarlingServer::Server::start() {
+@@ -445,6 +539,13 @@ DarlingServer::Server::Server(std::string prefix):
+ {
+ 	sharedInstancePointer = this;
+ 
++	/* darling-lol: producers send their own replies by default; DSERVER_DIRECT_REPLY=0
++	 * restores the old path (every reply wakes the main loop out of epoll_wait). */
++	_directReply = []() {
++		const char* value = std::getenv("DSERVER_DIRECT_REPLY");
++		return !(value && value[0] == '0' && value[1] == '\0');
++	}();
++
+ 	// remove the old socket (if it exists)
+ 	unlink(_socketPath.c_str());
+ 
+@@ -540,6 +641,7 @@ void DarlingServer::Server::start() {
  				// TODO: this could be done concurrently
  				auto call = DarlingServer::Call::callFromMessage(std::move(*msg));
  				if (call) {
@@ -2490,7 +2687,25 @@ index e502e28..e225510 100644
  					_workQueue.push(call->thread());
  				}
  			}
-@@ -604,6 +699,25 @@ void DarlingServer::Server::start() {
+@@ -549,13 +651,15 @@ void DarlingServer::Server::start() {
+ 		eventfd_t value;
+ 		eventfd_read(_wakeupFD, &value);
+ 
+-		if (_canWrite) {
++		if (_canWrite || !_outbox.empty()) {
+ 			_canWrite = _outbox.sendMany(_listenerSocket);
+ 		}
+ 
+ 		struct epoll_event settings;
+ 		settings.data.ptr = &_wakeupFD;
+-		settings.events = (_canWrite) ? (EPOLLIN | EPOLLONESHOT) : 0;
++		// keep the wakeup armed while replies may still be waiting for the socket
++		// to become writable again, so a producer's failed direct send is retried
++		settings.events = (_canWrite || !_outbox.empty()) ? (EPOLLIN | EPOLLONESHOT) : 0;
+ 
+ 		if (epoll_ctl(_epollFD, EPOLL_CTL_MOD, _wakeupFD, &settings) < 0) {
+ 			throw std::system_error(errno, std::generic_category(), "Failed to modify eventfd in epoll context");
+@@ -604,6 +708,25 @@ void DarlingServer::Server::start() {
  					continue;
  				}
  
@@ -2516,7 +2731,7 @@ index e502e28..e225510 100644
  				// we're done handling the timerfd;
  				// we don't need to lock anymore (and the following call might need to arm the timer again)
  				lock.unlock();
-@@ -681,6 +795,7 @@ std::string DarlingServer::Server::prefix() const {
+@@ -681,6 +804,7 @@ std::string DarlingServer::Server::prefix() const {
  };
  
  void DarlingServer::Server::_worker(std::shared_ptr<Thread> thread) {
@@ -2524,3 +2739,25 @@ index e502e28..e225510 100644
  	thread->doWork();
  };
  
+@@ -815,5 +939,20 @@ std::shared_ptr<DarlingServer::FD> DarlingServer::Monitor::fd() const {
+ };
+ 
+ void DarlingServer::Server::sendMessage(Message&& message) {
+-	_outbox.push(std::move(message));
++	if (!_directReply) {
++		_outbox.push(std::move(message));
++		return;
++	}
++
++	/* darling-lol: the thread that produced the message usually sends it itself,
++	 * instead of waking the main loop for a second pass through its event loop.
++	 * pushAndSend only ever sends from the head of the outbox, so ordering is the
++	 * same as the main loop's, and it wakes the main loop when the socket is full. */
++	try {
++		_outbox.pushAndSend(std::move(message), _listenerSocket);
++	} catch (const std::system_error&) {
++		/* pushAndSend has already left the message queued and woken the main loop,
++		 * where unexpected send errors have always been reported; a worker
++		 * microthread must not throw. */
++	}
+ };
