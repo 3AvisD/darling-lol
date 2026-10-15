@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build the paired Iridium shader translator and Indium runtime overrides."""
 from pathlib import Path
+import os
 import shlex
 import subprocess
 import sys
@@ -17,7 +18,8 @@ for line in (folder / 'CMakeFiles/iridium.dir/flags.make').read_text().splitline
         key, value = line.split(' = ', 1)
         iridium_flags[key] = shlex.split(value)
 iridium_flags['CXX_INCLUDES'] = current_includes(iridium_flags['CXX_INCLUDES'])
-if (pinned_llvm / 'lib/libLLVM-22.so').exists():
+# RIOT_IRIDIUM_SYSTEM_LLVM=1 ignores the pin and builds against the host LLVM, as a fresh checkout does.
+if (pinned_llvm / 'lib/libLLVM-22.so').exists() and os.environ.get('RIOT_IRIDIUM_SYSTEM_LLVM') != '1':
     iridium_flags['CXX_INCLUDES'].insert(0, '-I' + str(pinned_llvm / 'include'))
     iridium_flags['CXX_DEFINES'] = [value for value in iridium_flags['CXX_DEFINES'] if not value.startswith('-DHOST_LLVM_LIBNAME=')]
     iridium_flags['CXX_DEFINES'].append('-DHOST_LLVM_LIBNAME="' + str(pinned_llvm / 'lib/libLLVM-22.so') + '"')
