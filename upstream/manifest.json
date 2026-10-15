@@ -124,7 +124,7 @@
       "revision": "5549ac4cd2db923c256f016a1381b3bfb716730a",
       "repository": "https://github.com/darlinghq/darling-iokitd.git",
       "patch": "patches/iokitd.patch",
-      "modified_files": 7,
+      "modified_files": 8,
       "new_files": [
         "src/PowerSources.mm",
         "src/IOPlatformExpertDevice.h",

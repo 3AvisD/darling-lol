@@ -103,6 +103,29 @@ index 50c10fe..bd501cf 100644
 +	CFRelease(data);
 +	return kr;
 +}
+diff --git a/src/IOSurfaceRoot.mm b/src/IOSurfaceRoot.mm
+index d7e6fab..d860582 100644
+--- a/src/IOSurfaceRoot.mm
++++ b/src/IOSurfaceRoot.mm
+@@ -21,13 +21,17 @@
+ #include "iokitd.h"
+ #include "IOSurface.h"
+ #include "IODisplayConnectX11.h"
++#include <EGL/eglext.h>
+ #include <IOKit/IOCFUnserialize.h>
+ #include <stdexcept>
+ #include <iostream>
+ 
+ IOSurfaceRoot::IOSurfaceRoot()
+ {
+-	m_display = eglGetDisplay(IODisplayConnectX11::getDisplay());
++	// The native display is an Xlib Display. eglGetDisplay() would let Mesa
++	// guess the platform from EGL_PLATFORM, which Wayland sessions often set
++	// to "wayland"; Mesa then treats the Display as a wl_display and crashes.
++	m_display = eglGetPlatformDisplay(EGL_PLATFORM_X11_KHR, IODisplayConnectX11::getDisplay(), NULL);
+ 
+     if (m_display == EGL_NO_DISPLAY)
+         return;
 diff --git a/src/PowerSources.mm b/src/PowerSources.mm
 new file mode 100644
 index 0000000..70ca9bd
