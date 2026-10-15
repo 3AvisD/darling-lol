@@ -11,7 +11,10 @@ python3 scripts/prepare.py --check-only
 python3 tools/riot-launcher-offline-check.py
 python3 tools/riot-memory-installer-offline-check.py
 python3 tools/riot-foundation-installer-offline-check.py
+python3 tools/riot-llvm-version-offline-check.py
 ```
+
+The LLVM version check compiles Iridium's actual dynamic loader against small stub libraries. It verifies that a matching major initializes, older/newer majors produce a version mismatch, and a missing library fails initialization. It does not start Darling. The native AIR translator (`python3 tools/build-riot-air-check.py --native`) selects both headers and the shared library from the same `llvm-config`; its build prints those paths so shader results can be attributed to the tested LLVM installation.
 
 The patch check uses temporary base indexes and does not reset or modify the source checkout. The launcher check uses stub commands and never starts or contacts Riot or Darling. It checks installed-client and first-time-installer launches, strips inherited `DYLD_INSERT_LIBRARIES` even with the old VPX opt-in set, and preserves Darling runtime library/framework paths. The memory-installer check imports the installer and exercises its policy (default source is the prepared artifact; the artifact is never a destination of a different library) in temporary directories. The Foundation-installer check does the same for the overlay installer: it seeds a temporary framework from a stub SDK, replaces `Versions/C/Foundation`, keeps the standard symlinks, stages a backup, treats a re-run as current and refuses a non-Mach-O source. The installer handoff mock covers 28 scenarios, including HTTP 409, interrupted verification and preserving active downloads.
 
