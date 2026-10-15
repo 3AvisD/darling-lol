@@ -76,12 +76,18 @@ prefix=${DPREFIX:-$HOME/.darling}
 # hands off through LaunchServices, which does not start it under Darling. Link
 # the installed client where the normal launch expects it.
 client="$prefix/Applications/Riot Client.app"
+shared="$prefix/Users/Shared/Riot Games/Riot Client.app"
 if [ -z "${RIOT_LAUNCHER_HOST:-}" ] && [ ! -e "$client" ]; then
- if [ -d "$prefix/Users/Shared/Riot Games/Riot Client.app" ] && [ ! -L "$client" ]; then
-  ln -s "../Users/Shared/Riot Games/Riot Client.app" "$client"
- else
+ if [ ! -d "$shared" ]; then
   echo "Riot Client is not installed in $prefix; run scripts/installer.sh first" >&2
   exit 1
+ fi
+ if [ -L "$client" ]; then
+  # An absolute link (/Users/Shared/...) resolves only inside the guest; the
+  # guest still uses it for --app-root, but start the client by its real path.
+  client=$shared
+ else
+  ln -s "../Users/Shared/Riot Games/Riot Client.app" "$client"
  fi
 fi
 A=${RIOT_LAUNCHER_HOST:-"$client/Contents/MacOS/RiotClientServices"}
