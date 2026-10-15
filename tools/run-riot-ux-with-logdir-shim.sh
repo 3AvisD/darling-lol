@@ -71,7 +71,20 @@ fi
 if [ "${RCLOL_NATIVE_VPX:-$native_vpx_default}" = 1 ]; then
  RIOT_INSERT_LIBRARIES="$RIOT_INSERT_LIBRARIES:@GUEST_HOME@/libRiotNativeVpx.dylib"
 fi
-A=${RIOT_LAUNCHER_HOST:-"$HOME/.darling/Applications/Riot Client.app/Contents/MacOS/RiotClientServices"}
+prefix=${DPREFIX:-$HOME/.darling}
+# The first-time installer puts the client in /Users/Shared/Riot Games and then
+# hands off through LaunchServices, which does not start it under Darling. Link
+# the installed client where the normal launch expects it.
+client="$prefix/Applications/Riot Client.app"
+if [ -z "${RIOT_LAUNCHER_HOST:-}" ] && [ ! -e "$client" ]; then
+ if [ -d "$prefix/Users/Shared/Riot Games/Riot Client.app" ] && [ ! -L "$client" ]; then
+  ln -s "../Users/Shared/Riot Games/Riot Client.app" "$client"
+ else
+  echo "Riot Client is not installed in $prefix; run scripts/installer.sh first" >&2
+  exit 1
+ fi
+fi
+A=${RIOT_LAUNCHER_HOST:-"$client/Contents/MacOS/RiotClientServices"}
 # External XIM (for example Fcitx) consumes keys before Darling forwards them.
 # Use Xlib's local input method; allow explicit testing of another modifier.
 # Linux C.UTF-8 is not a supported codecvt locale in the macOS client.

@@ -43,6 +43,8 @@ Build/install the kernel library using [the incremental update steps](SETUP.md#u
 
 Use `sh scripts/installer.sh euw` (or your supported region). The first-time launcher must omit the installed client's `--app-root` and pass `--skip-to-install`; the normal wrapper now does this. It also selects `league_of_legends` so the product installation UI appears after login.
 
+The installer window closing on its own, followed by `subprocess exit`, is usually a successful install: Riot's installer puts the client in `/Users/Shared/Riot Games/Riot Client.app` and exits, and its LaunchServices hand-off to that client does not start it under Darling. `scripts/installer.sh` now launches the installed client itself, and the runner links it to `/Applications/Riot Client.app` when that link is missing. If the client was not installed, the wrapper prints the installer's log directory; check the end of the newest `Launcher` log there.
+
 If logs report guest `/private/tmp` permission errors, the default prefix needs its own temporary directory. The corrected full runtime installer creates it. To repair just this default-prefix directory as your ordinary user:
 
 ```sh
