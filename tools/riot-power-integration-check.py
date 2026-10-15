@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--open-workaround", type=Path,
                     help="development-only guest interposer for testing with an older server")
-args = parser.parse_args()
+args = argparse.Namespace(open_workaround=None)
 
 
 def wait_for(predicate, description, timeout=15):
@@ -34,18 +34,46 @@ def wait_for(predicate, description, timeout=15):
     raise RuntimeError("timed out: " + description)
 
 
+def stop_fixture_prefix(env):
+    """Stop only this fixture's prefix and wait out Darling's asynchronous kill."""
+    pid_file = Path(env["DPREFIX"]) / ".init.pid"
+    try:
+        pid_text = pid_file.read_text().strip()
+        pid = int(pid_text)
+    except (OSError, ValueError):
+        pid_text, pid = None, None
+    subprocess.run(["darling", "shutdown"], env=env, stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL, timeout=10)
+    if pid is not None:
+        def exited():
+            try:
+                return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z"
+            except FileNotFoundError:
+                return True
+        wait_for(exited, "fixture Darling shutdown", timeout=10)
+        # getInitProcess treats a zombie PID as live, although its mount namespace
+        # is already gone. Forget that exited PID before the next fixture launch.
+        try:
+            if pid_file.read_text().strip() == pid_text:
+                pid_file.unlink()
+        except FileNotFoundError:
+            pass
+
+
 class Guest:
-    def __init__(self, env, delay):
+    def __init__(self, env, delay=None, *, executable=None, arguments=()):
         master, slave = pty.openpty()
         self.master = master
-        self.anchor = delay is None
+        self.anchor = delay is None and executable is None
         self.output = ""
         self.log_path = Path(env["DPREFIX"]).parent / f"guest-{time.monotonic_ns()}.log"
         command = ["darling", "shell"]
         if args.open_workaround:
             command += ["env", "DYLD_INSERT_LIBRARIES=/Volumes/SystemRoot" +
                         str(args.open_workaround.resolve())]
-        if delay is None:
+        if executable is not None:
+            command += ["/Volumes/SystemRoot" + str(Path(executable).resolve()), *arguments]
+        elif delay is None:
             command += ["sh", "-c", "printf 'ANCHOR_READY\\n'; exec sleep 120"]
         else:
             command += ["/Volumes/SystemRoot" + str(ROOT / "build/riot-power-notify-check"), str(delay), "30"]
@@ -105,6 +133,8 @@ class Guest:
 # Darling creates a root-owned overlay workdir. Keep fixture files as diagnostics;
 # recursive deletion without root would mask the actual test result.
 def main():
+    global args
+    args = parser.parse_args()
     directory = Path(tempfile.mkdtemp(prefix="power-integration-", dir=ROOT / "build"))
     temp = str(directory)
     print("Fixture:", directory, flush=True)
@@ -130,8 +160,7 @@ def main():
         # Let the launcher initialize the empty prefix before adding overrides.
         subprocess.run(["darling", "shell", "true"], cwd="/tmp", env=env,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=45, check=True)
-        subprocess.run(["darling", "shutdown"], env=env, stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL, timeout=10, check=True)
+        stop_fixture_prefix(env)
         (prefix / "usr/sbin").mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / "build/darling-src/build/src/external/iokitd/iokitd", prefix / "usr/sbin/iokitd")
 
@@ -211,8 +240,7 @@ def main():
         print("POWER_INTEGRATION no_clients=PASS", flush=True)
         print("POWER_INTEGRATION PASS" + (" (empty-OOL test workaround enabled)" if args.open_workaround else ""))
     finally:
-        subprocess.run(["darling", "shutdown"], env=env, stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL, timeout=10)
+        stop_fixture_prefix(env)
         for guest in guests:
             guest.close()
         if (directory / "control").exists():

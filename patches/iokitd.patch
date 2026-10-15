@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 84161fd..3f7fd2b 100644
+index 84161fd..5b23944 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -17,6 +17,8 @@ include_directories(
@@ -11,7 +11,7 @@ index 84161fd..3f7fd2b 100644
  
  mig(iokitmig.defs)
  mig(powermanagement.defs)
-@@ -36,7 +38,12 @@ set(iokitd_sources
+@@ -36,7 +38,13 @@ set(iokitd_sources
  	src/IODisplayConnect.mm
  	src/IODisplayConnectX11.mm
  	src/PowerAssertions.mm
@@ -21,6 +21,7 @@ index 84161fd..3f7fd2b 100644
 +	src/IOPMrootDomain.mm
 +	src/IOInterestNotification.mm
 +	src/LogindSleep.c
++	src/HostPowerInhibit.c
  	src/IOSurfaceRoot.mm
  	src/IOSurface.mm
  	src/IOUserClient.mm
@@ -449,10 +450,36 @@ index 37ce9b8..e23aea0 100644
 +	IOPMrootDomain::registerSelf(registry);
  }
 diff --git a/src/stubs-powermanagement.c b/src/stubs-powermanagement.c
-index a568ecc..929746c 100644
+index a568ecc..c2d4063 100644
 --- a/src/stubs-powermanagement.c
 +++ b/src/stubs-powermanagement.c
-@@ -368,22 +368,6 @@ kern_return_t _io_ps_release_pspowersource
+@@ -131,25 +131,6 @@ kern_return_t _io_pm_last_wake_time
+ }
+ 
+ 
+-/* Routine io_pm_assertion_set_properties */
+-
+-kern_return_t _io_pm_assertion_set_properties
+-(
+-	mach_port_t server,
+-	audit_token_t token,
+-	int assertion_id,
+-	vm_offset_t props,
+-	mach_msg_type_number_t propsCnt,
+-	int *disableAppSleep,
+-	int *enableAppSleep,
+-	int *enTrIntensity,
+-	int *return_code
+-)
+-{
+-    STUB();
+-    return KERN_NOT_SUPPORTED;
+-}
+-
+ /* Routine io_pm_assertion_copy_details */
+ 
+ kern_return_t _io_pm_assertion_copy_details
+@@ -368,22 +349,6 @@ kern_return_t _io_ps_release_pspowersource
  }
  
  
@@ -1261,10 +1288,10 @@ index 0000000..9f9fc95
 +#endif
 diff --git a/src/IOPMrootDomain.mm b/src/IOPMrootDomain.mm
 new file mode 100644
-index 0000000..268e2f5
+index 0000000..9b6d30b
 --- /dev/null
 +++ b/src/IOPMrootDomain.mm
-@@ -0,0 +1,333 @@
+@@ -0,0 +1,342 @@
 +/*
 + This file is part of Darling.
 +
@@ -1516,6 +1543,15 @@ index 0000000..268e2f5
 +	return false;
 +}
 +
++const struct iokitd_logind_api* iokitd_host_power_api(void)
++{
++	static struct iokitd_logind_api api;
++	static bool available;
++	static dispatch_once_t once;
++	dispatch_once(&once, ^{ available = loadLogindApi(&api); });
++	return available ? &api : nullptr;
++}
++
 +static void logindWillSleep(void* context, uint64_t cycle)
 +{
 +	dispatch_async(dispatch_get_main_queue(), ^{
@@ -1534,17 +1570,17 @@ index 0000000..268e2f5
 +{
 +	// Connecting and taking the inhibitor are blocking D-Bus calls.
 +	dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-+		static struct iokitd_logind_api api;
++		const struct iokitd_logind_api* api = iokitd_host_power_api();
 +		static const struct iokitd_logind_callbacks callbacks = { logindWillSleep, logindDidWake };
 +		struct iokitd_logind* logind = nullptr;
 +
-+		if (!loadLogindApi(&api))
++		if (!api)
 +		{
 +			os_log(OS_LOG_DEFAULT, "iokitd: host libsystemd not available, no sleep/wake notifications");
 +			return;
 +		}
 +
-+		int r = iokitd_logind_start(&api, &callbacks, nullptr, &logind);
++		int r = iokitd_logind_start(api, &callbacks, nullptr, &logind);
 +		if (r < 0)
 +		{
 +			os_log(OS_LOG_DEFAULT, "iokitd: logind sleep monitor not started (%d), no sleep/wake notifications", r);
@@ -2224,10 +2260,10 @@ index 0000000..1d6aa79
 +}
 diff --git a/src/LogindSleep.h b/src/LogindSleep.h
 new file mode 100644
-index 0000000..49dac3c
+index 0000000..a161a68
 --- /dev/null
 +++ b/src/LogindSleep.h
-@@ -0,0 +1,145 @@
+@@ -0,0 +1,148 @@
 +/*
 + This file is part of Darling.
 +
@@ -2336,6 +2372,9 @@ index 0000000..49dac3c
 +	uint64_t ack_timeout_usec;
 +};
 +
++/* Shared host symbol table. Only implemented in the guest iokitd bridge. */
++const struct iokitd_logind_api* iokitd_host_power_api(void);
++
 +struct iokitd_logind_callbacks
 +{
 +	/* Suspend is imminent. Call iokitd_logind_sleep_ready(cycle) once clients agreed. */
@@ -2373,3 +2412,665 @@ index 0000000..49dac3c
 +#endif
 +
 +#endif
+diff --git a/src/HostPowerInhibit.c b/src/HostPowerInhibit.c
+new file mode 100644
+index 0000000..cdcb933
+--- /dev/null
++++ b/src/HostPowerInhibit.c
+@@ -0,0 +1,118 @@
++/* Host power-save inhibitors. GPL-3.0-or-later, like iokitd. */
++#include "HostPowerInhibit.h"
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++
++struct iokitd_power_inhibit {
++    struct iokitd_logind_api api;
++    int idle_fd;
++    void* screen_bus;
++    uint32_t screen_cookie;
++    int screen_held;
++};
++
++static int connect_bus(const struct iokitd_logind_api* api, const char* address, void** bus)
++{
++    int r = api->sd_bus_new(bus);
++    if (r >= 0) r = api->sd_bus_set_address(*bus, address);
++    if (r >= 0) r = api->sd_bus_set_bus_client(*bus, 1);
++    /* Assertions are synchronous MIG calls; do not stall the IOKit queue for
++     * sd-bus's default 25-second service timeout. */
++    if (r >= 0) r = api->sd_bus_set_method_call_timeout(*bus, 500000);
++    if (r >= 0) r = api->sd_bus_start(*bus);
++    return r;
++}
++
++static int take_idle_lock(struct iokitd_power_inhibit* inhibitor)
++{
++    const struct iokitd_logind_api* api = &inhibitor->api;
++    const char* address = api->getenv("DBUS_SYSTEM_BUS_ADDRESS");
++    struct iokitd_bus_error error = {0};
++    void *bus = NULL, *reply = NULL;
++    int fd = -1;
++    if (!address || !address[0]) address = IOKITD_LOGIND_DEFAULT_SYSTEM_BUS;
++    int r = connect_bus(api, address, &bus);
++    if (r >= 0)
++        r = api->sd_bus_call_method(bus, "org.freedesktop.login1", "/org/freedesktop/login1",
++                "org.freedesktop.login1.Manager", "Inhibit", &error, &reply, "ssss",
++                "idle", "Darling", "macOS application prevents automatic idle sleep", "block");
++    if (r >= 0) r = api->sd_bus_message_read(reply, "h", &fd);
++    if (r >= 0) {
++        inhibitor->idle_fd = api->fcntl(fd, IOKITD_LINUX_F_DUPFD_CLOEXEC, 3);
++        if (inhibitor->idle_fd < 0) r = -IOKITD_LINUX_ENOMEM;
++    }
++    if (reply) api->sd_bus_message_unref(reply);
++    api->sd_bus_error_free(&error);
++    if (bus) api->sd_bus_flush_close_unref(bus);
++    return r;
++}
++
++static int take_screen_lock(struct iokitd_power_inhibit* inhibitor)
++{
++    const struct iokitd_logind_api* api = &inhibitor->api;
++    const char* address = api->getenv("DBUS_SESSION_BUS_ADDRESS");
++    char fallback[512];
++    if (!address || !address[0]) {
++        const char* runtime = api->getenv("XDG_RUNTIME_DIR");
++        int length = runtime && runtime[0]
++            ? snprintf(fallback, sizeof(fallback), "unix:path=%s/bus", runtime)
++            : snprintf(fallback, sizeof(fallback), "unix:path=/run/user/%u/bus", (unsigned)getuid());
++        if (length < 0 || (size_t)length >= sizeof(fallback)) return -IOKITD_LINUX_EINVAL;
++        address = fallback;
++    }
++    struct iokitd_bus_error error = {0};
++    void* reply = NULL;
++    int r = connect_bus(api, address, &inhibitor->screen_bus);
++    if (r >= 0)
++        r = api->sd_bus_call_method(inhibitor->screen_bus, "org.freedesktop.ScreenSaver",
++                "/org/freedesktop/ScreenSaver", "org.freedesktop.ScreenSaver", "Inhibit",
++                &error, &reply, "ss", "Darling", "macOS application prevents display sleep");
++    if (r >= 0) r = api->sd_bus_message_read(reply, "u", &inhibitor->screen_cookie);
++    if (r >= 0) inhibitor->screen_held = 1;
++    if (reply) api->sd_bus_message_unref(reply);
++    api->sd_bus_error_free(&error);
++    return r;
++}
++
++int iokitd_power_inhibit_create(const struct iokitd_logind_api* api, int display,
++                              struct iokitd_power_inhibit** result)
++{
++    *result = NULL;
++    if (!api || !api->sd_bus_new || !api->sd_bus_set_address || !api->sd_bus_set_bus_client ||
++        !api->sd_bus_set_method_call_timeout || !api->sd_bus_start || !api->sd_bus_call_method ||
++        !api->sd_bus_message_read || !api->sd_bus_message_unref || !api->sd_bus_error_free ||
++        !api->sd_bus_flush_close_unref || !api->fcntl || !api->close || !api->getenv)
++        return -IOKITD_LINUX_ENOSYS;
++    struct iokitd_power_inhibit* inhibitor = calloc(1, sizeof(*inhibitor));
++    if (!inhibitor) return -IOKITD_LINUX_ENOMEM;
++    inhibitor->api = *api;
++    inhibitor->idle_fd = -1;
++    int r = take_idle_lock(inhibitor);
++    if (r >= 0 && display) r = take_screen_lock(inhibitor);
++    if (r < 0) {
++        iokitd_power_inhibit_destroy(inhibitor);
++        return r;
++    }
++    *result = inhibitor;
++    return 0;
++}
++
++void iokitd_power_inhibit_destroy(struct iokitd_power_inhibit* inhibitor)
++{
++    if (!inhibitor) return;
++    const struct iokitd_logind_api* api = &inhibitor->api;
++    if (inhibitor->screen_held) {
++        struct iokitd_bus_error error = {0};
++        void* reply = NULL;
++        api->sd_bus_call_method(inhibitor->screen_bus, "org.freedesktop.ScreenSaver",
++                "/org/freedesktop/ScreenSaver", "org.freedesktop.ScreenSaver", "UnInhibit",
++                &error, &reply, "u", inhibitor->screen_cookie);
++        if (reply) api->sd_bus_message_unref(reply);
++        api->sd_bus_error_free(&error);
++    }
++    if (inhibitor->screen_bus) api->sd_bus_flush_close_unref(inhibitor->screen_bus);
++    if (inhibitor->idle_fd >= 0) api->close(inhibitor->idle_fd);
++    free(inhibitor);
++}
+diff --git a/src/HostPowerInhibit.h b/src/HostPowerInhibit.h
+new file mode 100644
+index 0000000..fed7fbe
+--- /dev/null
++++ b/src/HostPowerInhibit.h
+@@ -0,0 +1,18 @@
++/* Host power-save inhibitors. GPL-3.0-or-later, like iokitd. */
++#ifndef IOKITD_HOST_POWER_INHIBIT_H
++#define IOKITD_HOST_POWER_INHIBIT_H
++#include "LogindSleep.h"
++#ifdef __cplusplus
++extern "C" {
++#endif
++struct iokitd_power_inhibit;
++/* display=0 prevents automatic system idle sleep through logind. display=1
++ * additionally inhibits the desktop ScreenSaver; it fails if that service is
++ * unavailable, allowing the caller to try a real X11 display backend. */
++int iokitd_power_inhibit_create(const struct iokitd_logind_api* api, int display,
++                              struct iokitd_power_inhibit** result);
++void iokitd_power_inhibit_destroy(struct iokitd_power_inhibit* inhibitor);
++#ifdef __cplusplus
++}
++#endif
++#endif
+diff --git a/src/PowerAssertions.h b/src/PowerAssertions.h
+index 1e4a975..3b0d416 100644
+--- a/src/PowerAssertions.h
++++ b/src/PowerAssertions.h
+@@ -28,11 +28,11 @@ void initPM();
+ class PowerAssertion
+ {
+ public:
+-	// How many AppAssertions instances reference this assertion (*not* a sum of references within all these AppAssertions instances)
+-	void addRef();
++	// One backend hold per enabled assertion; retaining an ID does not add holds.
++	IOReturn addRef();
+ 	void delRef();
+ protected:
+-	virtual void activate() = 0;
++	virtual IOReturn activate() = 0;
+ 	virtual void deactivate() = 0;
+ private:
+ 	int m_numHoldingApps = 0;
+@@ -44,15 +44,17 @@ private:
+ 	AppAssertions(int pid);
+ 	~AppAssertions();
+ public:
+-	static AppAssertions* get(int pid);
++	static AppAssertions* get(int pid, bool create = true);
+ 
+ 	struct HeldAssertion
+ 	{
+ 		int refcount;
+ 		PowerAssertion* assertion;
++		bool enabled;
+ 	};
+ 	HeldAssertion* getAssertion(int assertionId);
+-	int createAssertion(PowerAssertion* which);
++	IOReturn createAssertion(PowerAssertion* which, bool enabled, int* assertionId);
++	IOReturn setEnabled(HeldAssertion* assertion, bool enabled);
+ 	void killAssertion(int assertionId);
+ private:
+ 	std::unordered_map<int, HeldAssertion> m_heldAssertions;
+diff --git a/src/PowerAssertions.mm b/src/PowerAssertions.mm
+index fa55d2f..810fe04 100644
+--- a/src/PowerAssertions.mm
++++ b/src/PowerAssertions.mm
+@@ -19,9 +19,11 @@
+ 
+ #include "PowerAssertions.h"
+ #include "PowerAssertionsX11.h"
++#include "HostPowerInhibit.h"
+ #include <stdexcept>
+ #include <iostream>
+ #include <string>
++#include <climits>
+ #include <CoreFoundation/CoreFoundation.h>
+ #include <bsm/libbsm.h>
+ #import <Foundation/NSString.h>
+@@ -30,34 +32,52 @@ extern "C" {
+ #include "powermanagementServer.h"
+ }
+ 
++class PowerAssertionPreventIdleSleep : public PowerAssertion
++{
++	struct iokitd_power_inhibit* m_host = nullptr;
++	IOReturn activate() override
++	{
++		const auto* api = iokitd_host_power_api();
++		return api && iokitd_power_inhibit_create(api, 0, &m_host) == 0
++			? kIOReturnSuccess : kIOReturnNotReady;
++	}
++	void deactivate() override
++	{
++		iokitd_power_inhibit_destroy(m_host);
++		m_host = nullptr;
++	}
++};
++
+ std::unordered_map<int, AppAssertions*> AppAssertions::m_instances;
+ static std::unordered_map<std::string, PowerAssertion*> g_assertionKinds;
+ 
+ void initPM()
+ {
+-	NSString* str = (NSString*) kIOPMAssertPreventUserIdleDisplaySleep;
+-	g_assertionKinds.insert(std::make_pair([str UTF8String], new PowerAssertionPreventDisplaySleep));
++	// Legacy and modern spellings share one backend and one hold count.
++	static PowerAssertionPreventIdleSleep idle;
++	static PowerAssertionPreventDisplaySleep display;
++	g_assertionKinds = {
++		{[(NSString*)kIOPMAssertionTypeNoIdleSleep UTF8String], &idle},
++		{[(NSString*)kIOPMAssertPreventUserIdleSystemSleep UTF8String], &idle},
++		{[(NSString*)kIOPMAssertionTypeNoDisplaySleep UTF8String], &display},
++		{[(NSString*)kIOPMAssertPreventUserIdleDisplaySleep UTF8String], &display},
++	};
+ }
+ 
+-static PowerAssertion* getByType(NSString* type)
+-{
+-	auto it = g_assertionKinds.find([type UTF8String]);
+-	if (it != g_assertionKinds.end())
+-		return it->second;
+-	return nullptr;
+-}
+-
+-void PowerAssertion::addRef()
++IOReturn PowerAssertion::addRef()
+ {
+ 	if (m_numHoldingApps == 0)
+-		activate();
++	{
++		IOReturn result = activate();
++		if (result != kIOReturnSuccess) return result;
++	}
+ 	m_numHoldingApps++;
++	return kIOReturnSuccess;
+ }
+ 
+ void PowerAssertion::delRef()
+ {
+-	m_numHoldingApps--;
+-	if (m_numHoldingApps == 0)
++	if (m_numHoldingApps > 0 && --m_numHoldingApps == 0)
+ 		deactivate();
+ }
+ 
+@@ -66,37 +86,31 @@ AppAssertions::AppAssertions(int pid)
+ 	m_processSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_PROC, pid, DISPATCH_PROC_EXIT, dispatch_get_main_queue());
+ 	if (!m_processSource)
+ 		throw std::runtime_error("dispatch_source_create(DISPATCH_SOURCE_TYPE_PROC) failed");
+-
+-	if (m_processSource)
+-	{
+-		dispatch_source_set_event_handler(m_processSource, ^{
+-			m_instances.erase(pid);
+-			delete this;
+-		});
+-		dispatch_resume(m_processSource);
+-	}
++	dispatch_source_set_event_handler(m_processSource, ^{
++		m_instances.erase(pid);
++		delete this;
++	});
++	dispatch_resume(m_processSource);
+ }
+ 
+ AppAssertions::~AppAssertions()
+ {
+-	for (auto& [assertionId, ha] : m_heldAssertions)
+-		ha.assertion->delRef();
+-		
+-	if (m_processSource != nullptr)
+-		dispatch_release(m_processSource);
++	for (auto& item : m_heldAssertions)
++		if (item.second.enabled) item.second.assertion->delRef();
++	dispatch_source_cancel(m_processSource);
++	dispatch_release(m_processSource);
+ }
+ 
+-AppAssertions* AppAssertions::get(int pid)
++AppAssertions* AppAssertions::get(int pid, bool create)
+ {
+ 	auto it = m_instances.find(pid);
+-	if (it != m_instances.end())
+-		return it->second;
+-	
++	if (it != m_instances.end()) return it->second;
++	if (!create) return nullptr;
+ 	try
+ 	{
+-		AppAssertions* aa = new AppAssertions(pid);
+-		m_instances.insert(std::make_pair(pid, aa));
+-		return aa;
++		AppAssertions* app = new AppAssertions(pid);
++		m_instances.emplace(pid, app);
++		return app;
+ 	}
+ 	catch (const std::exception& e)
+ 	{
+@@ -108,126 +122,168 @@ AppAssertions* AppAssertions::get(int pid)
+ AppAssertions::HeldAssertion* AppAssertions::getAssertion(int assertionId)
+ {
+ 	auto it = m_heldAssertions.find(assertionId);
+-	if (it != m_heldAssertions.end())
+-		return &it->second;
+-	return nullptr;
++	return it == m_heldAssertions.end() ? nullptr : &it->second;
+ }
+ 
+-int AppAssertions::createAssertion(PowerAssertion* which)
++IOReturn AppAssertions::createAssertion(PowerAssertion* which, bool enabled, int* assertionId)
+ {
++	if (m_nextAssertionNumber == INT_MAX) return kIOReturnNoResources;
++	if (enabled)
++	{
++		IOReturn result = which->addRef();
++		if (result != kIOReturnSuccess) return result;
++	}
+ 	int number = m_nextAssertionNumber++;
+-	HeldAssertion held = { 1, which };
+-	m_heldAssertions.insert(std::make_pair(number, held));
+-	which->addRef();
+-	return number;
++	try { m_heldAssertions.emplace(number, HeldAssertion{1, which, enabled}); }
++	catch (...)
++	{
++		if (enabled) which->delRef();
++		return kIOReturnNoMemory;
++	}
++	*assertionId = number;
++	return kIOReturnSuccess;
++}
++
++IOReturn AppAssertions::setEnabled(HeldAssertion* held, bool enabled)
++{
++	if (held->enabled == enabled) return kIOReturnSuccess;
++	if (enabled)
++	{
++		IOReturn result = held->assertion->addRef();
++		if (result != kIOReturnSuccess) return result;
++	}
++	else held->assertion->delRef();
++	held->enabled = enabled;
++	return kIOReturnSuccess;
+ }
+ 
+ void AppAssertions::killAssertion(int assertionId)
+ {
+ 	auto it = m_heldAssertions.find(assertionId);
+-	if (it == m_heldAssertions.end())
+-		return;
+-
+-	it->second.assertion->delRef();
++	if (it == m_heldAssertions.end()) return;
++	if (it->second.enabled) it->second.assertion->delRef();
+ 	m_heldAssertions.erase(it);
+ }
+ 
+-kern_return_t _io_pm_assertion_create
+-(
+-	mach_port_t server,
+-	audit_token_t token,
+-	vm_offset_t props,
+-	mach_msg_type_number_t propsCnt,
+-	int *assertion_id,
+-	int *disableAppSleep,
+-	int *enTrIntensity,
+-	int *return_code
+-)
++// These MIG routines return their IOReturn in return_code and KERN_SUCCESS for
++// transport. Consequently they own (and consume) the request's OOL data even
++// when validation fails; dispatch_mig_server must not destroy it a second time.
++static CFDictionaryRef copyProperties(vm_offset_t props, mach_msg_type_number_t count)
+ {
+-	if (!props)
+-		return KERN_INVALID_ARGUMENT;
+-
+-	CFDataRef data = CFDataCreateWithBytesNoCopy(nullptr, (const UInt8*) props, propsCnt, kCFAllocatorNull);
+-	CFDictionaryRef properties = (CFDictionaryRef) CFPropertyListCreateWithData(nullptr, data, kCFPropertyListImmutable, nullptr, nullptr);
+-
+-	CFRelease(data);
+-
+-	vm_deallocate(mach_task_self(), props, propsCnt);
+-
+-	if (!properties)
+-		return KERN_INVALID_ARGUMENT;
+-	
+-	if (CFGetTypeID(properties) != CFDictionaryGetTypeID())
++	CFDictionaryRef result = nullptr;
++	if (props && count)
+ 	{
+-		std::cerr << "Unexpected properties data type\n";
+-		CFRelease(properties);
+-		return KERN_INVALID_ARGUMENT;
++		CFDataRef data = CFDataCreateWithBytesNoCopy(nullptr, (const UInt8*)props, count, kCFAllocatorNull);
++		if (data)
++		{
++			result = (CFDictionaryRef)CFPropertyListCreateWithData(nullptr, data, kCFPropertyListImmutable, nullptr, nullptr);
++			CFRelease(data);
++		}
+ 	}
+-
+-	CFStringRef cftype = (CFStringRef) CFDictionaryGetValue(properties, kIOPMAssertionTypeKey);
+-
+-	if (!cftype || CFStringGetTypeID() != CFGetTypeID(cftype))
++	if (props) vm_deallocate(mach_task_self(), props, count);
++	if (result && CFGetTypeID(result) != CFDictionaryGetTypeID())
+ 	{
+-		std::cerr << "kIOPMAssertionTypeKey is not a string\n";
+-		CFRelease(properties);
+-		return KERN_INVALID_ARGUMENT;
++		CFRelease(result);
++		result = nullptr;
+ 	}
++	return result;
++}
++
++static bool assertionLevel(CFDictionaryRef properties, bool* enabled)
++{
++	CFTypeRef number = CFDictionaryGetValue(properties, kIOPMAssertionLevelKey);
++	if (!number) return true;
++	int level;
++	if (CFGetTypeID(number) != CFNumberGetTypeID() ||
++		!CFNumberGetValue((CFNumberRef)number, kCFNumberIntType, &level) ||
++		(level != kIOPMAssertionLevelOff && level != kIOPMAssertionLevelOn)) return false;
++	*enabled = level == kIOPMAssertionLevelOn;
++	return true;
++}
+ 
+-	PowerAssertion* pa = getByType((NSString*) cftype);
+-	if (pa == nullptr)
++kern_return_t _io_pm_assertion_create(mach_port_t server, audit_token_t token,
++	vm_offset_t props, mach_msg_type_number_t propsCnt, int* assertion_id,
++	int* disableAppSleep, int* enTrIntensity, int* return_code)
++{
++	*assertion_id = kIOPMNullAssertionID;
++	*disableAppSleep = 0;
++	*enTrIntensity = -1;
++	*return_code = kIOReturnBadArgument;
++	CFDictionaryRef properties = copyProperties(props, propsCnt);
++	if (!properties) return KERN_SUCCESS;
++	CFTypeRef type = CFDictionaryGetValue(properties, kIOPMAssertionTypeKey);
++	bool enabled = true;
++	CFTypeRef timeout = CFDictionaryGetValue(properties, kIOPMAssertionTimeoutKey);
++	double seconds = 0;
++	if (timeout && (CFGetTypeID(timeout) != CFNumberGetTypeID() ||
++		!CFNumberGetValue((CFNumberRef)timeout, kCFNumberDoubleType, &seconds)))
++		*return_code = kIOReturnBadArgument;
++	else if (seconds != 0)
++		// Timed assertions need expiration scheduling. Do not silently turn
++		// a timed request into an indefinite host inhibition.
++		*return_code = kIOReturnUnsupported;
++	else if (type && CFGetTypeID(type) == CFStringGetTypeID() && assertionLevel(properties, &enabled))
+ 	{
+-		std::cerr << "Unsupported assertion type\n";
+-		CFRelease(properties);
+-		return KERN_INVALID_ARGUMENT;
++		auto it = g_assertionKinds.find([(NSString*)type UTF8String]);
++		if (it == g_assertionKinds.end()) *return_code = kIOReturnUnsupported;
++		else
++		{
++			pid_t callerPid;
++			audit_token_to_au32(token, nullptr, nullptr, nullptr, nullptr, nullptr, &callerPid, nullptr, nullptr);
++			AppAssertions* app = AppAssertions::get(callerPid);
++			*return_code = app ? app->createAssertion(it->second, enabled, assertion_id) : kIOReturnNoResources;
++		}
+ 	}
++	CFRelease(properties);
++	return KERN_SUCCESS;
++}
+ 
+-	pid_t callerPid;
+-	audit_token_to_au32(token, nullptr, nullptr, nullptr, nullptr, nullptr, &callerPid, nullptr, nullptr);
+-
+-	// std::cout << "Creating assertion for PID " << callerPid << std::endl;
+-	*assertion_id = AppAssertions::get(callerPid)->createAssertion(pa);
+-	*return_code = 0;
+-	
+-    return KERN_SUCCESS;
+-}
+-
+-kern_return_t _io_pm_assertion_retain_release
+-(
+-	mach_port_t server,
+-	audit_token_t token,
+-	int assertion_id,
+-	int action,
+-	int *retainCnt,
+-	int *disableAppSleep,
+-	int *enableAppSleep,
+-	int *return_code
+-)
++kern_return_t _io_pm_assertion_retain_release(mach_port_t server, audit_token_t token,
++	int assertion_id, int action, int* retainCnt, int* disableAppSleep,
++	int* enableAppSleep, int* return_code)
+ {
++	*retainCnt = *disableAppSleep = *enableAppSleep = 0;
++	*return_code = kIOReturnNotFound;
+ 	pid_t callerPid;
+ 	audit_token_to_au32(token, nullptr, nullptr, nullptr, nullptr, nullptr, &callerPid, nullptr, nullptr);
+-
+-	AppAssertions* appAssertions = AppAssertions::get(callerPid);
+-	AppAssertions::HeldAssertion* ha = appAssertions->getAssertion(assertion_id);
+-
+-	if (!ha)
+-	{
+-		std::cerr << "_io_pm_assertion_retain_release() cannot find assertion " << assertion_id << std::endl;
+-		return KERN_INVALID_ARGUMENT;
+-	}
+-
+-	*return_code = 0;
++	AppAssertions* app = AppAssertions::get(callerPid, false);
++	auto* held = app ? app->getAssertion(assertion_id) : nullptr;
++	if (!held) return KERN_SUCCESS;
+ 	if (action == kIOPMAssertionMIGDoRetain)
+ 	{
+-		*retainCnt = ++ha->refcount;
++		if (held->refcount == INT_MAX) { *return_code = kIOReturnNoResources; return KERN_SUCCESS; }
++		*retainCnt = ++held->refcount;
+ 	}
+ 	else if (action == kIOPMAssertionMIGDoRelease)
+ 	{
+-		*retainCnt = --ha->refcount;
+-		if (ha->refcount == 0)
+-			appAssertions->killAssertion(assertion_id);
++		*retainCnt = --held->refcount;
++		if (!held->refcount) app->killAssertion(assertion_id);
+ 	}
+-	else
+-		return KERN_INVALID_ARGUMENT;
++	else { *return_code = kIOReturnBadArgument; return KERN_SUCCESS; }
++	*return_code = kIOReturnSuccess;
++	return KERN_SUCCESS;
++}
+ 
+-    return KERN_NOT_SUPPORTED;
++kern_return_t _io_pm_assertion_set_properties(mach_port_t server, audit_token_t token,
++	int assertion_id, vm_offset_t props, mach_msg_type_number_t propsCnt,
++	int* disableAppSleep, int* enableAppSleep, int* enTrIntensity, int* return_code)
++{
++	*disableAppSleep = *enableAppSleep = 0;
++	*enTrIntensity = -1;
++	*return_code = kIOReturnBadArgument;
++	CFDictionaryRef properties = copyProperties(props, propsCnt);
++	if (!properties) return KERN_SUCCESS;
++	bool enabled = true;
++	if (CFDictionaryGetCount(properties) != 1 || !CFDictionaryContainsKey(properties, kIOPMAssertionLevelKey))
++		*return_code = kIOReturnUnsupported;
++	else if (assertionLevel(properties, &enabled))
++	{
++		pid_t callerPid;
++		audit_token_to_au32(token, nullptr, nullptr, nullptr, nullptr, nullptr, &callerPid, nullptr, nullptr);
++		AppAssertions* app = AppAssertions::get(callerPid, false);
++		auto* held = app ? app->getAssertion(assertion_id) : nullptr;
++		*return_code = held ? app->setEnabled(held, enabled) : kIOReturnNotFound;
++	}
++	CFRelease(properties);
++	return KERN_SUCCESS;
+ }
+diff --git a/src/PowerAssertionsX11.h b/src/PowerAssertionsX11.h
+index 2905edd..3b4ea10 100644
+--- a/src/PowerAssertionsX11.h
++++ b/src/PowerAssertionsX11.h
+@@ -20,12 +20,16 @@
+ #ifndef POWERASSERTIONSX11_H
+ #define POWERASSERTIONSX11_H
+ #include "PowerAssertions.h"
++#include "HostPowerInhibit.h"
+ 
+ class PowerAssertionPreventDisplaySleep : public PowerAssertion
+ {
+ protected:
+-	void activate() override;
++	IOReturn activate() override;
+ 	void deactivate() override;
++private:
++	struct iokitd_power_inhibit* m_host = nullptr;
++	bool m_changedDPMS = false;
+ };
+ 
+ #endif
+diff --git a/src/PowerAssertionsX11.mm b/src/PowerAssertionsX11.mm
+index 7a6fcfa..26a7d68 100644
+--- a/src/PowerAssertionsX11.mm
++++ b/src/PowerAssertionsX11.mm
+@@ -26,28 +26,37 @@
+ #include <X11/extensions/dpms.h>
+ #undef BOOL
+ 
+-void PowerAssertionPreventDisplaySleep::activate()
++IOReturn PowerAssertionPreventDisplaySleep::activate()
+ {
+-	Display* display = IODisplayConnectX11::getDisplay();
+-	if (!display)
+-		return;
++	const auto* api = iokitd_host_power_api();
++	if (api && iokitd_power_inhibit_create(api, 1, &m_host) == 0)
++		return kIOReturnSuccess;
+ 
++	// Desktop inhibition is preferred on Wayland; retain the real X11
++	// fallback when no ScreenSaver service is available.
++	Display* display = IODisplayConnectX11::getDisplay();
+ 	int eventBase, errorBase;
+-	if (DPMSQueryExtension(display, &eventBase, &errorBase))
+-	{
+-		DPMSDisable(display);
+-	}
++	CARD16 power;
++	unsigned char enabled;
++	if (!display || !DPMSQueryExtension(display, &eventBase, &errorBase) ||
++		!DPMSCapable(display) || !DPMSInfo(display, &power, &enabled))
++		return kIOReturnNotReady;
++	if (api)
++		iokitd_power_inhibit_create(api, 0, &m_host);
++	m_changedDPMS = enabled;
++	if (m_changedDPMS) DPMSDisable(display);
++	XFlush(display);
++	return kIOReturnSuccess;
+ }
+ 
+ void PowerAssertionPreventDisplaySleep::deactivate()
+ {
+-	Display* display = IODisplayConnectX11::getDisplay();
+-	if (!display)
+-		return;
+-
+-	int eventBase, errorBase;
+-	if (DPMSQueryExtension(display, &eventBase, &errorBase))
++	iokitd_power_inhibit_destroy(m_host);
++	m_host = nullptr;
++	if (m_changedDPMS)
+ 	{
+-		DPMSEnable(display);
++		Display* display = IODisplayConnectX11::getDisplay();
++		if (display) { DPMSEnable(display); XFlush(display); }
++		m_changedDPMS = false;
+ 	}
+ }

@@ -20,6 +20,7 @@
  */
 #define _GNU_SOURCE
 #include "LogindSleep.h"
+#include "HostPowerInhibit.h"
 #include <systemd/sd-bus.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -61,6 +62,8 @@ static FILE *record_file;
 static int lock_fds[MAX_LOCKS], lock_ids[MAX_LOCKS], lock_count, next_lock_id = 1;
 static uint64_t sleep_started_ms;
 static int fake_sleeping;
+static int next_screen_cookie = 1, screen_denied;
+static int screen_cookies[MAX_LOCKS];
 
 static void record(const char *format, ...) __attribute__((format(printf, 1, 2)));
 static void record(const char *format, ...) {
@@ -88,6 +91,27 @@ static int logind_handler(sd_bus_message *m, void *userdata, sd_bus_error *error
         int r = sd_bus_reply_method_return(m, "h", p[1]);
         close(p[1]);   /* the reply carried its own copy */
         return r;
+    }
+    if (sd_bus_message_is_method_call(m, "org.freedesktop.ScreenSaver", "Inhibit")) {
+        const char *app, *reason;
+        if (screen_denied) {
+            record("ScreenDenied");
+            return sd_bus_reply_method_errorf(m, SD_BUS_ERROR_ACCESS_DENIED, "inhibition denied");
+        }
+        if (sd_bus_message_read(m, "ss", &app, &reason) < 0 || next_screen_cookie >= MAX_LOCKS)
+            return sd_bus_reply_method_errorf(m, SD_BUS_ERROR_INVALID_ARGS, "bad screen inhibit");
+        int cookie = next_screen_cookie++;
+        screen_cookies[cookie] = 1;
+        record("ScreenInhibit\t%d\t%s\t%s", cookie, app, reason);
+        return sd_bus_reply_method_return(m, "u", (uint32_t)cookie);
+    }
+    if (sd_bus_message_is_method_call(m, "org.freedesktop.ScreenSaver", "UnInhibit")) {
+        uint32_t cookie;
+        if (sd_bus_message_read(m, "u", &cookie) < 0 || cookie >= MAX_LOCKS || !screen_cookies[cookie])
+            return sd_bus_reply_method_errorf(m, SD_BUS_ERROR_INVALID_ARGS, "unknown screen cookie");
+        screen_cookies[cookie] = 0;
+        record("ScreenRelease\t%u", cookie);
+        return sd_bus_reply_method_return(m, "");
     }
     if (sd_bus_message_is_method_call(m, "org.freedesktop.DBus.Properties", "Get")) {
         const char *iface, *name;
@@ -121,6 +145,9 @@ static void run_fake(int control_fd, int ready_fd) {
         sd_bus_set_bus_client(bus, 1) < 0 || sd_bus_start(bus) < 0)
         _exit(3);
     sd_bus_add_object(bus, NULL, "/org/freedesktop/login1", logind_handler, NULL);
+    sd_bus_add_object(bus, NULL, "/org/freedesktop/ScreenSaver", logind_handler, NULL);
+    if (sd_bus_request_name(bus, "org.freedesktop.ScreenSaver", 0) < 0)
+        _exit(4);
     if (sd_bus_request_name(bus, "org.freedesktop.login1", 0) < 0)
         _exit(4);
     if (write(ready_fd, "R", 1) != 1)
@@ -148,6 +175,7 @@ static void run_fake(int control_fd, int ready_fd) {
                 break;
             if (c == 'S' || c == 'W')
                 emit_prepare(bus, c == 'S');
+            if (c == 'D' || c == 'A') { screen_denied = c == 'D'; record("ScreenDeny\t%d", screen_denied); }
         }
         for (int i = 0; i < lock_count; i++) {
             if (!(fds[2 + i].revents & (POLLHUP | POLLERR)))
@@ -392,7 +420,8 @@ int main(int argc, char **argv) {
     if (argc == 3 && !strcmp(argv[1], "--fake-logind"))
         return serve(argv[2]);
 
-    snprintf(tmpdir, sizeof(tmpdir), "/tmp/riot-logind-sleep-XXXXXX");
+    const char *temporary = getenv("TMPDIR");
+    snprintf(tmpdir, sizeof(tmpdir), "%s/riot-logind-sleep-XXXXXX", temporary ? temporary : "/tmp");
     if (!mkdtemp(tmpdir)) { perror("mkdtemp"); return 2; }
     snprintf(records, sizeof(records), "%s/records", tmpdir);
     fclose(fopen(records, "w"));
@@ -590,6 +619,57 @@ int main(int argc, char **argv) {
     CHECK(wait_prefix("Inhibit\t", expected_locks + 2, 2000), "bus restart: no lock after wake");
     iokitd_logind_stop(l);
     l = NULL;
+
+    /* Blocking assertions use idle/block, independently from sleep/delay. */
+    setenv("DBUS_SYSTEM_BUS_ADDRESS", bus_address, 1);
+    setenv("DBUS_SESSION_BUS_ADDRESS", bus_address, 1);
+    api = native_api(0);
+    struct iokitd_power_inhibit *inhibit = NULL;
+    int lock_count_before = count_prefix("Inhibit\t");
+    int release_count_before = count_prefix("Released\t");
+    r = iokitd_power_inhibit_create(&api, 0, &inhibit);
+    CHECK(r == 0 && inhibit, "idle inhibit: create %d", r);
+    CHECK(wait_prefix("Inhibit\t", lock_count_before + 1, 1000), "idle inhibit: not called");
+    CHECK(strstr(read_records(), "\tidle\tDarling\tmacOS application prevents automatic idle sleep\tblock") != NULL,
+          "idle inhibit: wrong arguments");
+    iokitd_power_inhibit_destroy(inhibit);
+    inhibit = NULL;
+    CHECK(wait_prefix("Released\t", release_count_before + 1, 1000), "idle inhibit: not released");
+
+    lock_count_before = count_prefix("Inhibit\t");
+    release_count_before = count_prefix("Released\t");
+    r = iokitd_power_inhibit_create(&api, 1, &inhibit);
+    CHECK(r == 0 && inhibit, "display inhibit: create %d", r);
+    CHECK(wait_prefix("ScreenInhibit\t", 1, 1000), "display inhibit: screen not inhibited");
+    CHECK(wait_prefix("Inhibit\t", lock_count_before + 1, 1000), "display inhibit: idle not inhibited");
+    iokitd_power_inhibit_destroy(inhibit);
+    inhibit = NULL;
+    CHECK(wait_prefix("ScreenRelease\t", 1, 1000), "display inhibit: cookie not released");
+    CHECK(wait_prefix("Released\t", release_count_before + 1, 1000), "display inhibit: idle not released");
+
+    command(control[1], 'D');
+    CHECK(wait_prefix("ScreenDeny\t1", 1, 1000), "display denial: fake not ready");
+    release_count_before = count_prefix("Released\t");
+    r = iokitd_power_inhibit_create(&api, 1, &inhibit);
+    CHECK(r < 0 && !inhibit, "display denial: returned success");
+    CHECK(wait_prefix("Released\t", release_count_before + 1, 1000), "display denial: leaked idle lock");
+    command(control[1], 'A');
+
+    char missing_bus[400];
+    snprintf(missing_bus, sizeof(missing_bus), "unix:path=%s/missing", tmpdir);
+    setenv("DBUS_SYSTEM_BUS_ADDRESS", missing_bus, 1);
+    r = iokitd_power_inhibit_create(&api, 0, &inhibit);
+    CHECK(r < 0 && !inhibit, "missing system bus: returned success");
+    setenv("DBUS_SYSTEM_BUS_ADDRESS", bus_address, 1);
+    setenv("DBUS_SESSION_BUS_ADDRESS", missing_bus, 1);
+    release_count_before = count_prefix("Released\t");
+    r = iokitd_power_inhibit_create(&api, 1, &inhibit);
+    CHECK(r < 0 && !inhibit, "missing session bus: returned success");
+    CHECK(wait_prefix("Released\t", release_count_before + 1, 1000), "missing session bus: leaked idle lock");
+    api.close = NULL;
+    r = iokitd_power_inhibit_create(&api, 0, &inhibit);
+    CHECK(r == -ENOSYS && !inhibit, "incomplete inhibitor api: %d", r);
+    iokitd_power_inhibit_destroy(NULL);
 
     command(control[1], 'Q');
     close(control[1]);

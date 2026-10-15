@@ -82,6 +82,7 @@ cc -Wall -Wextra -Werror -pthread \
   -I build/darling-src/src/external/iokitd/src \
   tools/riot-logind-sleep-check.c \
   build/darling-src/src/external/iokitd/src/LogindSleep.c \
+  build/darling-src/src/external/iokitd/src/HostPowerInhibit.c \
   $(pkg-config --cflags --libs libsystemd) -o build/riot-logind-sleep-check
 build/riot-logind-sleep-check
 ```
@@ -90,7 +91,7 @@ The host check uses a private D-Bus daemon and fake logind. It covers absent
 services, delay-lock ownership, acknowledgement deadlines, stale
 acknowledgements, repeated sleep/wake, a logind restart, a full system-bus
 restart and a sleep signal during startup timeout discovery. Expected:
-`LOGIND_SLEEP PASS checks=57 failures=0`. It also runs with
+`LOGIND_SLEEP PASS checks=73 failures=0`. It also runs with
 `-fsanitize=address,undefined`.
 
 `IOServiceOpen` sends an empty out-of-line descriptor. Older Darling servers
@@ -116,6 +117,47 @@ interposer. Its bootstrap run can also acquire an inhibitor, so readiness
 requires a new lock from the persistent launcher plus confirmation that its
 shell has started. Lock numbering is relative to that launcher, rather than
 assuming that the first recorded lock belongs to the test clients.
+
+## Power-save assertions
+
+Chromium uses the legacy names `NoIdleSleepAssertion` and
+`NoDisplaySleepAssertion` with `IOPMAssertionCreateWithName`. These share
+backends with the modern `PreventUserIdleSystemSleep` and
+`PreventUserIdleDisplaySleep` names. System-idle prevention uses a logind
+`idle/block` inhibitor; display prevention additionally holds a desktop
+`org.freedesktop.ScreenSaver.Inhibit` cookie. The existing X11 DPMS backend is
+a fallback when desktop inhibition is unavailable, and restores the prior
+DPMS enabled state. These assertions do not take a logind `sleep/block` lock.
+
+Create, retain, release, level On/Off and process-exit cleanup are supported.
+The last enabled assertion releases the backend; retaining an assertion ID
+does not add another backend hold. Unsupported types and nonzero assertion
+timeouts return `kIOReturnUnsupported`, rather than silently creating an
+indefinite inhibitor. Host-backend failures are returned to the caller.
+
+After the builds above:
+
+```sh
+python3 tools/build-riot-power-assertion-check.py
+python3 tools/riot-power-assertion-integration-check.py
+```
+
+Expected: `POWER_ASSERTION_INTEGRATION PASS`. The fixture uses private fake
+logind and ScreenSaver services for both D-Bus addresses and a separate Darling
+prefix. It checks legacy/modern aliases, multiple clients, retain/final release,
+level changes, failed requests and cleanup of assertions left held by an exiting
+process. It never contacts the real desktop's inhibitor services or launches
+Riot. The native check above additionally verifies backend-denial and missing-bus
+cleanup, and passes under AddressSanitizer/UndefinedBehaviorSanitizer.
+
+The assertion integration fails against the previously installed `iokitd` with
+the reported `0xe00002c9` create error, and passes with the rebuilt service.
+Only `iokitd` needs reinstalling for this follow-up, with Darling stopped:
+
+```sh
+sudo install -m755 build/darling-src/build/src/external/iokitd/iokitd \
+  /usr/local/libexec/darling/usr/sbin/iokitd
+```
 
 ## Host URL hand-off regression
 

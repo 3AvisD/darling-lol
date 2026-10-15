@@ -124,7 +124,7 @@
       "revision": "5549ac4cd2db923c256f016a1381b3bfb716730a",
       "repository": "https://github.com/darlinghq/darling-iokitd.git",
       "patch": "patches/iokitd.patch",
-      "modified_files": 12,
+      "modified_files": 16,
       "new_files": [
         "src/IOInterestNotification.h",
         "src/IOInterestNotification.mm",
@@ -134,7 +134,9 @@
         "src/IOPlatformExpertDevice.mm",
         "src/LogindSleep.c",
         "src/LogindSleep.h",
-        "src/PowerSources.mm"
+        "src/PowerSources.mm",
+        "src/HostPowerInhibit.c",
+        "src/HostPowerInhibit.h"
       ]
     },
     {
