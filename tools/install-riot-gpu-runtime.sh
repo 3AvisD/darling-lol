@@ -29,11 +29,8 @@ cc -shared -fPIC -O2 -Wall -Wextra -Wl,-soname,"$project_dir/build/libdarling-xs
 python3 tools/stop-darling-runtime.py
 # Host fileports own SCM_RIGHTS descriptors and must die with their last sender.
 sudo make -C "$project_dir/build/darling-src/build/src/external/darlingserver" install -j12
-if [ -f "$HOME/.darling/Applications/Riot Client.app/Contents/Frameworks/Riot Client.app/Contents/Frameworks/Electron Framework.framework/Versions/A/Electron Framework" ]; then
- python3 tools/patch-riot-electron-visibility.py
-else
- echo 'Riot is not installed yet; apply the guarded Electron visibility fix after installation.'
-fi
+# Electron's window-visibility correction lives in the AppKit overlay
+# (NSWindow -occlusionState, cocotron.patch); no Riot binary is modified here.
 for name in IOSurface OpenGL QuartzCore CoreVideo CoreAudio AudioToolbox CoreGraphics CoreFoundation Metal; do
  framework="$guest_home/RuntimeFrameworks/$name.framework"
  if [ ! -d "$framework" ]; then cp -a "@DARLING_SDK@/System/Library/Frameworks/$name.framework" "$framework"; fi

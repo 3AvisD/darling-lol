@@ -54,7 +54,7 @@ Sign in and install League through Riot's own UI. For subsequent launches:
 ./scripts/run.sh
 ```
 
-First installation and future Riot updates can still encounter compatibility gaps. An accepted Install action can fail native LaunchAgent registration and leave the download idle. The archived inspector-based workaround and Electron visibility binary patch are excluded from the manual workflow. See [troubleshooting](docs/TROUBLESHOOTING.md) for the known limitation and fixes that are in the runtime.
+First installation and future Riot updates can still encounter compatibility gaps. An accepted Install action can fail native LaunchAgent registration and leave the download idle. The archived inspector-based workaround is excluded from the manual workflow; the client window-visibility correction is part of the installed runtime (Darling's AppKit overlay), not a patch to Riot's binaries. See [troubleshooting](docs/TROUBLESHOOTING.md) for the known limitation and fixes that are in the runtime.
 
 For another region, set `RCLOL_REGION` and `RCLOL_LOCALE` before launch. For example `RCLOL_REGION=NA RCLOL_LOCALE=en_US ./scripts/run.sh`. Linux display selection follows `$DISPLAY`; the legacy launcher fallback is `:1`.
 
