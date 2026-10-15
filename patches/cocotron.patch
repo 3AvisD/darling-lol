@@ -7105,10 +7105,122 @@ index 5ad375f8..c8e83814 100644
 +- (BOOL) _treeHasAnimations;
  @end
 diff --git a/QuartzCore/CAMetalDrawable.mm b/QuartzCore/CAMetalDrawable.mm
-index d6f86b31..81a4ac10 100644
+index d6f86b31..4d08ce26 100644
 --- a/QuartzCore/CAMetalDrawable.mm
 +++ b/QuartzCore/CAMetalDrawable.mm
-@@ -401,6 +401,10 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
+@@ -31,6 +31,12 @@
+ #include <OpenGL/glext.h>
+ #include <indium/indium.private.hpp>
+ 
++#include <cstdio>
++#include <cstring>
++#include <mutex>
++#include <string>
++#include <unistd.h>
++
+ namespace DynamicVK = Indium::DynamicVK;
+ 
+ static void reportGLErrors(void) {
+@@ -50,8 +56,86 @@ static void reportGLErrors(void) {
+ namespace Indium::DynamicVK {
+ 	static DynamicFunction<PFN_vkGetSemaphoreFdKHR> vkGetSemaphoreFdKHR("vkGetSemaphoreFdKHR");
+ 	static DynamicFunction<PFN_vkGetMemoryFdKHR> vkGetMemoryFdKHR("vkGetMemoryFdKHR");
++	static DynamicFunction<PFN_vkGetPhysicalDeviceProperties2> vkGetPhysicalDeviceProperties2Local("vkGetPhysicalDeviceProperties2");
+ };
+ 
++//
++// GPU selection diagnostics
++//
++
++// The drawable's memory and semaphores are exported as OPAQUE_FD and imported into
++// this layer's OpenGL context. That only works when Vulkan and OpenGL run on the
++// same physical device/driver, and until now nothing checked it: a mismatch would
++// silently break. Record which GL renderer actually presents and whether its
++// device UUID matches the Vulkan device's, once per process, in
++// /tmp/metal-device.log (alongside the device list Indium logs at startup).
++static std::string darlingUuidString(const GLubyte* uuid) {
++	static const char* digits = "0123456789abcdef";
++	std::string out;
++	out.reserve(32);
++	for (int i = 0; i < GL_UUID_SIZE_EXT; ++i) {
++		out += digits[(uuid[i] >> 4) & 0xf];
++		out += digits[uuid[i] & 0xf];
++	}
++	return out;
++}
++
++static void reportGpuDeviceMatch(std::shared_ptr<Indium::PrivateDevice> device) {
++	if (!device) {
++		return;
++	}
++	static std::once_flag once;
++	std::call_once(once, [device]() {
++		const GLubyte* renderer = glGetString(GL_RENDERER);
++		const GLubyte* vendor = glGetString(GL_VENDOR);
++
++		GLubyte glDeviceUUID[GL_UUID_SIZE_EXT] = {0};
++		GLubyte glDriverUUID[GL_UUID_SIZE_EXT] = {0};
++		GLint uuidCount = 0;
++		glGetIntegerv(GL_NUM_DEVICE_UUIDS_EXT, &uuidCount);
++		if (uuidCount > 0) {
++			glGetUnsignedBytei_vEXT(GL_DEVICE_UUID_EXT, 0, glDeviceUUID);
++			glGetUnsignedBytevEXT(GL_DRIVER_UUID_EXT, glDriverUUID);
++		}
++
++		// Queried here rather than through a new libindium export, so this QuartzCore
++		// still loads against a libindium built before the device log.
++		VkPhysicalDeviceIDProperties idProperties {};
++		idProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
++		VkPhysicalDeviceProperties2 properties2 {};
++		properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
++		properties2.pNext = &idProperties;
++		bool haveVkUUID = false;
++		if (DynamicVK::vkGetPhysicalDeviceProperties2Local) {
++			DynamicVK::vkGetPhysicalDeviceProperties2Local(device->physicalDevice(), &properties2);
++			haveVkUUID = true;
++		}
++		const uint8_t* vkDeviceUUID = idProperties.deviceUUID;
++		const uint8_t* vkDriverUUID = idProperties.driverUUID;
++
++		std::string line = "presenting GL renderer=\"" + std::string(renderer ? reinterpret_cast<const char*>(renderer) : "(null)") + "\""
++			+ " vendor=\"" + std::string(vendor ? reinterpret_cast<const char*>(vendor) : "(null)") + "\""
++			+ " glDeviceUUID=" + (uuidCount > 0 ? darlingUuidString(glDeviceUUID) : std::string("none"))
++			+ " glDriverUUID=" + (uuidCount > 0 ? darlingUuidString(glDriverUUID) : std::string("none"))
++			+ " vulkanDeviceUUID=" + (haveVkUUID ? darlingUuidString(vkDeviceUUID) : std::string("none"))
++			+ " vulkanDriverUUID=" + (haveVkUUID ? darlingUuidString(vkDriverUUID) : std::string("none"));
++
++		if (uuidCount > 0 && haveVkUUID && memcmp(glDeviceUUID, vkDeviceUUID, GL_UUID_SIZE_EXT) != 0) {
++			line += " MISMATCH: OpenGL and Vulkan are on different GPUs; the opaque-FD import cannot work."
++				" Run the launcher under prime-run so both use the same GPU.";
++		} else if (uuidCount > 0 && haveVkUUID) {
++			line += " match=yes";
++		} else {
++			line += " match=unknown";
++		}
++
++		if (FILE* log = fopen("/tmp/metal-device.log", "a")) {
++			fprintf(log, "[MetalDevice] pid=%d %s\n", getpid(), line.c_str());
++			fclose(log);
++		}
++	});
++}
++
+ //
+ // helper classes
+ //
+@@ -161,6 +245,11 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
+ 	_pixelFormat(pixelFormat),
+ 	_framebufferOnly(framebufferOnly)
+ {
++	// The layer's GL context is current here (recreateDrawables / _setContext set
++	// it), so this is the first point where the presenting GL device can be
++	// compared with the Vulkan device. Logged once per process.
++	reportGpuDeviceMatch(privateDevice);
++
+ 	//
+ 	// create the images
+ 	//
+@@ -401,6 +490,10 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
  	glTextureParameteri(_textureID, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
  	glTextureParameteri(_textureID, GL_TEXTURE_WRAP_S, GL_REPEAT);
  	glTextureParameteri(_textureID, GL_TEXTURE_WRAP_T, GL_REPEAT);
@@ -7119,7 +7231,7 @@ index d6f86b31..81a4ac10 100644
  	reportGLErrors();
  
  	glTextureStorageMem2DEXT(_textureID, 1, GL_RGBA8, _size.width, _size.height, _memoryObject, 0);
-@@ -605,35 +609,16 @@ void CAMetalDrawableActual::present() {
+@@ -605,35 +698,16 @@ void CAMetalDrawableActual::present() {
  			return;
  		}
  
@@ -7161,7 +7273,7 @@ index d6f86b31..81a4ac10 100644
  	}
  }
  
-@@ -702,9 +687,24 @@ void CAMetalDrawableActual::reset() {
+@@ -702,9 +776,24 @@ void CAMetalDrawableActual::reset() {
  };
  
  void CAMetalDrawableActual::synchronizeRender() {
