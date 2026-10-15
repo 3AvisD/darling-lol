@@ -1,5 +1,5 @@
 diff --git a/src/CoreAudio/AudioToolbox/AUComponent.cpp b/src/CoreAudio/AudioToolbox/AUComponent.cpp
-index d48eec1ef..c86959d55 100644
+index d48eec1ef..1deb304e9 100644
 --- a/src/CoreAudio/AudioToolbox/AUComponent.cpp
 +++ b/src/CoreAudio/AudioToolbox/AUComponent.cpp
 @@ -22,13 +22,16 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
@@ -85,6 +85,38 @@ index d48eec1ef..c86959d55 100644
 -    return dispatchCall(inUnit, kAudioUnitAddRenderNotifySelect, inProc, inProcUserData);
 +    OSStatus status = dispatchCall(inUnit, kAudioUnitAddRenderNotifySelect, inProc, inProcUserData);
 +    rclolAudioTrace("UNIT_ADD_RENDER_NOTIFY unit=%p status=%d\n", (void*) inUnit, (int) status);
++    return status;
+ }
+ 
+ OSStatus
+@@ -121,7 +148,14 @@ AudioUnitGetParameter(AudioUnit inUnit,
+          AudioUnitElement inElement,
+          AudioUnitParameterValue * outValue)
+ {
+-    return dispatchCall(inUnit, kAudioUnitGetParameterSelect, inID, inScope, inElement, outValue);
++    OSStatus status = dispatchCall(inUnit, kAudioUnitGetParameterSelect, inID, inScope, inElement, outValue);
++    {
++        static unsigned count = 0;
++        if (rclolAudioTraceEnabled() && (count++ < 200 || count % 500 == 0))
++            rclolAudioTrace("UNIT_GET_PARAM unit=%p id=%u scope=%u elem=%u value=%g status=%d\n", (void*) inUnit,
++                (unsigned) inID, (unsigned) inScope, (unsigned) inElement, (outValue && !status) ? (double) *outValue : 0.0, (int) status);
++    }
++    return status;
+ }
+ 
+ OSStatus
+@@ -132,7 +166,14 @@ AudioUnitSetParameter(AudioUnit inUnit,
+          AudioUnitParameterValue inValue,
+          UInt32 inBufferOffsetInFrames)
+ {
+-    return dispatchCall(inUnit, kAudioUnitSetParameterSelect, inID, inScope, inElement, inValue, inBufferOffsetInFrames);
++    OSStatus status = dispatchCall(inUnit, kAudioUnitSetParameterSelect, inID, inScope, inElement, inValue, inBufferOffsetInFrames);
++    {
++        static unsigned count = 0;
++        if (rclolAudioTraceEnabled() && (count++ < 200 || count % 500 == 0))
++            rclolAudioTrace("UNIT_SET_PARAM unit=%p id=%u scope=%u elem=%u value=%g offset=%u status=%d\n", (void*) inUnit,
++                (unsigned) inID, (unsigned) inScope, (unsigned) inElement, (double) inValue, (unsigned) inBufferOffsetInFrames, (int) status);
++    }
 +    return status;
  }
  
@@ -643,7 +675,7 @@ index ca20b90df..e90b37163 100644
 +	return status;
 +}
 diff --git a/src/CoreAudio/AudioToolbox/AudioComponentManager.mm b/src/CoreAudio/AudioToolbox/AudioComponentManager.mm
-index 5fa33817d..4c1f25a33 100644
+index 5fa33817d..8588e69d8 100644
 --- a/src/CoreAudio/AudioToolbox/AudioComponentManager.mm
 +++ b/src/CoreAudio/AudioToolbox/AudioComponentManager.mm
 @@ -1,3 +1,4 @@
@@ -677,7 +709,7 @@ index 5fa33817d..4c1f25a33 100644
  
  	RegisteredComponent& regd = it->second;
 +    static unsigned traceCount=0;
-+    if(getenv("RCLOL_AUDIO_TRACE") && traceCount++<16)
++    if(rclolAudioTraceEnabled() && traceCount++<16)
 +        rclolAudioTrace("AUDIO_COMPONENT version=%u subtype=%08x user_override=%d\n",
 +            regd.version,regd.desc.componentSubType,
 +            regd.bundlePath.find("DarlingRiotAudio.component")!=std::string::npos);
@@ -685,10 +717,14 @@ index 5fa33817d..4c1f25a33 100644
  	{
  		// Load the bundle
 diff --git a/src/CoreAudio/AudioToolbox/AudioConverter.cpp b/src/CoreAudio/AudioToolbox/AudioConverter.cpp
-index 202121cd9..c40ba22c2 100644
+index 202121cd9..5672fcba1 100644
 --- a/src/CoreAudio/AudioToolbox/AudioConverter.cpp
 +++ b/src/CoreAudio/AudioToolbox/AudioConverter.cpp
-@@ -22,13 +22,35 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+@@ -19,16 +19,39 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+ 
+ #include "AudioConverter.h"
+ #include "AudioConverterImpl.h"
++#include "../AudioTrace.h"
  #include <CarbonCore/MacErrors.h>
  #include <stdexcept>
  #include <cstring>
@@ -702,7 +738,7 @@ index 202121cd9..c40ba22c2 100644
 +static std::unordered_set<AudioConverterRef> liveConverters;
 +
 +static bool audioTrace() {
-+    static const bool enabled = std::getenv("RCLOL_AUDIO_TRACE") != nullptr;
++    static const bool enabled = rclolAudioTraceEnabled();
 +    return enabled;
 +}
 +
@@ -726,7 +762,7 @@ index 202121cd9..c40ba22c2 100644
  {
  	// FIXME
  	return AudioConverterNew(inSourceFormat, inDestinationFormat, outAudioConverter);
-@@ -47,6 +69,15 @@ OSStatus AudioConverterReset(AudioConverterRef inAudioConverter)
+@@ -47,6 +70,15 @@ OSStatus AudioConverterReset(AudioConverterRef inAudioConverter)
  
  OSStatus AudioConverterDispose(AudioConverterRef inAudioConverter)
  {
@@ -881,7 +917,7 @@ index 000000000..6e85e8230
 +    return noErr;
 +}
 diff --git a/src/CoreAudio/CoreAudio/AudioHardware.cpp b/src/CoreAudio/CoreAudio/AudioHardware.cpp
-index 7243e6a62..fb48486c6 100644
+index 7243e6a62..647c8aff7 100644
 --- a/src/CoreAudio/CoreAudio/AudioHardware.cpp
 +++ b/src/CoreAudio/CoreAudio/AudioHardware.cpp
 @@ -1,3 +1,4 @@
@@ -944,25 +980,59 @@ index 7243e6a62..fb48486c6 100644
  void AudioObjectShow(AudioObjectID inObjectID)
  {
  	AudioHardwareImpl* obj = GetObject(inObjectID);
-@@ -68,6 +101,9 @@ void AudioObjectShow(AudioObjectID inObjectID)
+@@ -68,45 +101,94 @@ void AudioObjectShow(AudioObjectID inObjectID)
  Boolean AudioObjectHasProperty(AudioObjectID inObjectID,
  		const AudioObjectPropertyAddress* inAddress)
  {
 +    if((inObjectID&0xffff0000u)==0x44410000u) {
-+        UInt32 size=0;return GetStreamPropertyData(inObjectID,inAddress,&size,nullptr)==noErr;
++        UInt32 size=0;bool has=GetStreamPropertyData(inObjectID,inAddress,&size,nullptr)==noErr;
++        rclolAudioTrace("HAS stream=%08x selector=%08x scope=%08x has=%d\n",inObjectID,inAddress->mSelector,inAddress->mScope,has);
++        return has;
 +    }
  	AudioHardwareImpl* obj = GetObject(inObjectID);
- 	if (!obj)
+-	if (!obj)
++	if (!obj) {
++		rclolAudioTrace("HAS object=%u selector=%08x BADOBJECT\n",inObjectID,inAddress->mSelector);
  		return 0;
-@@ -89,24 +125,50 @@ OSStatus AudioObjectGetPropertyDataSize(AudioObjectID inObjectID,
++	}
+ 	
+-	return obj->hasProperty(inAddress);
++	bool has=obj->hasProperty(inAddress);
++	rclolAudioTrace("HAS object=%u selector=%08x scope=%08x elem=%u has=%d\n",inObjectID,inAddress->mSelector,inAddress->mScope,inAddress->mElement,has);
++	return has;
+ }
+ 
+ OSStatus AudioObjectIsPropertySettable(AudioObjectID inObjectID,
+ 		const AudioObjectPropertyAddress* inAddress, Boolean* outIsSettable)
+ {
+ 	AudioHardwareImpl* obj = GetObject(inObjectID);
+-	if (!obj)
++	if (!obj) {
++		rclolAudioTrace("SETTABLE object=%08x selector=%08x BADOBJECT\n",inObjectID,inAddress->mSelector);
+ 		return kAudioHardwareBadObjectError;
++	}
+ 	
+-	return obj->isPropertySettable(inAddress, outIsSettable);
++	OSStatus status=obj->isPropertySettable(inAddress, outIsSettable);
++	rclolAudioTrace("SETTABLE object=%u selector=%08x scope=%08x elem=%u status=%d settable=%d\n",inObjectID,inAddress->mSelector,inAddress->mScope,inAddress->mElement,status,status?0:*outIsSettable);
++	return status;
+ }
+ 
+ OSStatus AudioObjectGetPropertyDataSize(AudioObjectID inObjectID,
  		const AudioObjectPropertyAddress* inAddress, UInt32 inQualifierDataSize,
  		const void* inQualifierData, UInt32* outDataSize)
  {
-+    if((inObjectID&0xffff0000u)==0x44410000u)
-+        return GetStreamPropertyData(inObjectID,inAddress,outDataSize,nullptr);
++    if((inObjectID&0xffff0000u)==0x44410000u) {
++        OSStatus status=GetStreamPropertyData(inObjectID,inAddress,outDataSize,nullptr);
++        rclolAudioTrace("SIZE stream=%08x selector=%08x scope=%08x status=%d\n",inObjectID,inAddress->mSelector,inAddress->mScope,status);
++        return status;
++    }
  	AudioHardwareImpl* obj = GetObject(inObjectID);
- 	if (!obj)
+-	if (!obj)
++	if (!obj) {
++		rclolAudioTrace("SIZE object=%08x selector=%08x BADOBJECT\n",inObjectID,inAddress->mSelector);
  		return kAudioHardwareBadObjectError;
++	}
  	
 -	return obj->getPropertyDataSize(inAddress, inQualifierDataSize,
 -			inQualifierData, outDataSize);
@@ -992,36 +1062,49 @@ index 7243e6a62..fb48486c6 100644
 +        *static_cast<AudioDeviceID*>(value->mOutputData)=found;
 +        value->mOutputDataSize=sizeof(found);*ioDataSize=sizeof(*value);return noErr;
 +    }
-+    if((inObjectID&0xffff0000u)==0x44410000u)
-+        return GetStreamPropertyData(inObjectID,inAddress,ioDataSize,outData);
++    if((inObjectID&0xffff0000u)==0x44410000u) {
++        OSStatus status=GetStreamPropertyData(inObjectID,inAddress,ioDataSize,outData);
++        rclolAudioTrace("GET stream=%08x selector=%08x scope=%08x status=%d\n",inObjectID,inAddress->mSelector,inAddress->mScope,status);
++        return status;
++    }
  	AudioHardwareImpl* obj = GetObject(inObjectID);
- 	if (!obj)
+-	if (!obj)
++	if (!obj) {
++		rclolAudioTrace("GET object=%08x selector=%08x BADOBJECT\n",inObjectID,inAddress->mSelector);
  		return kAudioHardwareBadObjectError;
++	}
  	
 -	return obj->getPropertyData(inAddress, inQualifierDataSize, inQualifierData,
 -			ioDataSize, outData);
 +    static unsigned traceCount=0;
-+    if(getenv("RCLOL_AUDIO_TRACE") && traceCount++<100)
++    if(rclolAudioTraceEnabled() && traceCount++<100)
 +        fprintf(stderr,"AUDIO_HARDWARE_GET object=%u property=%08x scope=%08x\n",inObjectID,inAddress->mSelector,inAddress->mScope);
 +	OSStatus status=obj->getPropertyData(inAddress,inQualifierDataSize,inQualifierData,ioDataSize,outData);
-+    rclolAudioTrace("GET object=%u selector=%08x scope=%08x status=%d size=%u\n",inObjectID,inAddress->mSelector,inAddress->mScope,status,status?0:*ioDataSize);
++    rclolAudioTrace("GET object=%u selector=%08x scope=%08x elem=%u status=%d size=%u\n",inObjectID,inAddress->mSelector,inAddress->mScope,inAddress->mElement,status,status?0:*ioDataSize);
 +    return status;
  }
  
  OSStatus AudioObjectSetPropertyData(AudioObjectID inObjectID,
-@@ -117,8 +179,9 @@ OSStatus AudioObjectSetPropertyData(AudioObjectID inObjectID,
- 	if (!obj)
+@@ -114,11 +196,15 @@ OSStatus AudioObjectSetPropertyData(AudioObjectID inObjectID,
+ 		const void* inQualifierData, UInt32 inDataSize, const void* inData)
+ {
+ 	AudioHardwareImpl* obj = GetObject(inObjectID);
+-	if (!obj)
++	if (!obj) {
++		rclolAudioTrace("SET object=%08x selector=%08x scope=%08x elem=%u BADOBJECT\n",inObjectID,inAddress->mSelector,inAddress->mScope,inAddress->mElement);
  		return kAudioHardwareBadObjectError;
++	}
  	
 -	return obj->setPropertyData(inAddress, inQualifierDataSize, inQualifierData,
 -			inDataSize, inData);
 +	OSStatus status=obj->setPropertyData(inAddress,inQualifierDataSize,inQualifierData,inDataSize,inData);
-+    rclolAudioTrace("SET object=%u selector=%08x scope=%08x status=%d\n",inObjectID,inAddress->mSelector,inAddress->mScope,status);
++    rclolAudioTrace("SET object=%u selector=%08x scope=%08x elem=%u size=%u value=%g status=%d\n",inObjectID,inAddress->mSelector,inAddress->mScope,inAddress->mElement,inDataSize,
++        (inData && inDataSize==sizeof(Float32))?(double)*(const Float32*)inData:0.0,status);
 +    return status;
  }
  
  OSStatus AudioObjectAddPropertyListener(AudioObjectID inObjectID,
-@@ -129,7 +192,9 @@ OSStatus AudioObjectAddPropertyListener(AudioObjectID inObjectID,
+@@ -129,7 +215,9 @@ OSStatus AudioObjectAddPropertyListener(AudioObjectID inObjectID,
  	if (!obj)
  		return kAudioHardwareBadObjectError;
  	
@@ -1455,19 +1538,20 @@ index 85315086f..c43382686 100644
  
  pa_sample_spec AudioHardwareImplPA::paSampleSpecForASBD(const AudioStreamBasicDescription& asbd, bool* convertSignedUnsigned)
 diff --git a/src/CoreAudio/CoreAudio/pulse/AudioHardwareImplPA.h b/src/CoreAudio/CoreAudio/pulse/AudioHardwareImplPA.h
-index 8421491cd..3fe1c4e2c 100644
+index 8421491cd..03a530bfd 100644
 --- a/src/CoreAudio/CoreAudio/pulse/AudioHardwareImplPA.h
 +++ b/src/CoreAudio/CoreAudio/pulse/AudioHardwareImplPA.h
-@@ -38,6 +38,8 @@ public:
+@@ -38,6 +38,9 @@ public:
  		const void* inQualifierData, UInt32 inDataSize, const void* inData) override;
  	
  	void getPAContext(void (^cb)(pa_context*));
 +	void syncPA(void (^block)(void));
++	dispatch_queue_t paQueue() const { return m_loop ? m_loop->queue() : nullptr; }
 +	OSStatus stop(AudioDeviceIOProcID inProcID) override;
  	static pa_sample_spec paSampleSpecForASBD(const AudioStreamBasicDescription& asbd, bool* convertSignedUnsigned = nullptr);
  protected:
  	AudioHardwareStream* createStream(AudioDeviceIOProc callback, void* clientData) override;
-@@ -49,4 +51,3 @@ private:
+@@ -49,4 +52,3 @@ private:
  };
  
  #endif
@@ -1586,14 +1670,54 @@ index d6825f1d5..739b70011 100644
  
  		if (status != noErr)
 diff --git a/src/CoreAudio/CoreAudio/pulse/AudioHardwareStreamPAOutput.cpp b/src/CoreAudio/CoreAudio/pulse/AudioHardwareStreamPAOutput.cpp
-index 278630f02..00db02f9c 100644
+index 278630f02..54b463c2f 100644
 --- a/src/CoreAudio/CoreAudio/pulse/AudioHardwareStreamPAOutput.cpp
 +++ b/src/CoreAudio/CoreAudio/pulse/AudioHardwareStreamPAOutput.cpp
-@@ -21,16 +21,17 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+@@ -21,71 +21,318 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
  #include "AudioHardwareImplPA.h"
  #include <iostream>
  #include <algorithm>
 +#include <mach/mach_time.h>
++#include "../../AudioTrace.h"
++
++// Real CoreAudio calls an output IOProc once per IO cycle: evenly spaced at the buffer
++// period, with inOutputTime.mHostTime advancing by one buffer duration per call. Clients
++// such as Chromium's AUHALStream rely on that (they read the previous renderer buffer and
++// request the next one on every call), so PulseAudio's bursty write requests must not
++// drive the IOProc directly. Instead a dispatch timer on the PA queue ticks at the block
++// period and renders at most one block per tick (plus bounded catch-up after a late wakeup).
++
++static const unsigned kPrefillBlocks = 8;    // == tlength
++static const unsigned kMaxCatchUpBlocks = 2; // extra blocks after a late wakeup
++static const unsigned kServoWindowTicks = 32;
++
++static bool rateLimited(unsigned& counter, unsigned head, unsigned every) {
++	if (!rclolAudioTraceEnabled()) return false;
++	unsigned n = counter++;
++	return n < head || n % every == 0;
++}
++static unsigned g_wcbEvents = 0, g_iopEvents = 0, g_tickEvents = 0, g_paceEvents = 0;
++static bool wcbShouldTrace() { return rateLimited(g_wcbEvents, 50, 1000); }
++static bool iopShouldTrace() { return rateLimited(g_iopEvents, 200, 500); }
++static bool tickShouldTrace() { return rateLimited(g_tickEvents, 200, 500); }
++static bool paceShouldTrace() { return rateLimited(g_paceEvents, 100, 100); }
++
++static const mach_timebase_info_data_t& timebase() {
++	static mach_timebase_info_data_t tb = [] {
++		mach_timebase_info_data_t t = {0, 0};
++		mach_timebase_info(&t);
++		if (!t.numer || !t.denom) t.numer = t.denom = 1;
++		return t;
++	}();
++	return tb;
++}
++static uint64_t hostToNs(uint64_t host) {
++	return uint64_t((unsigned __int128) host * timebase().numer / timebase().denom);
++}
++static uint64_t nsToHost(uint64_t ns) {
++	return uint64_t((unsigned __int128) ns * timebase().denom / timebase().numer);
++}
++static uint64_t nowNs() { return hostToNs(mach_absolute_time()); }
  
  AudioHardwareStreamPAOutput::AudioHardwareStreamPAOutput(AudioHardwareImplPA* hw, AudioDeviceIOProc callback, void* clientData)
  : AudioHardwareStreamPA(hw, callback, clientData)
@@ -1601,65 +1725,420 @@ index 278630f02..00db02f9c 100644
 +    initialize();
  }
  
- void AudioHardwareStreamPAOutput::paStreamWriteCB(pa_stream* s, size_t length, void* self)
+-void AudioHardwareStreamPAOutput::paStreamWriteCB(pa_stream* s, size_t length, void* self)
++AudioHardwareStreamPAOutput::~AudioHardwareStreamPAOutput()
  {
- 	AudioHardwareStreamPAOutput* This = static_cast<AudioHardwareStreamPAOutput*>(self);
+-	AudioHardwareStreamPAOutput* This = static_cast<AudioHardwareStreamPAOutput*>(self);
 -	std::unique_lock<std::mutex> l(This->m_stopMutex);
++	// Normally already done by stop(); the timer must never outlive this object.
++	static_cast<AudioHardwareImplPA*>(m_hw)->syncPA(^{ m_running = false; cancelTimer(); });
++}
  
- 	if (!This->m_running)
+-	if (!This->m_running)
++void AudioHardwareStreamPAOutput::stop()
++{
++	// Runs on (or synchronously with) the PA queue, so no tick is in flight unless stop()
++	// was called from inside the IOProc, which renderBlock() handles via m_running.
++	// Cancellation guarantees the timer handler is never invoked again.
++	static_cast<AudioHardwareImplPA*>(m_hw)->syncPA(^{ m_running = false; cancelTimer(); });
++	AudioHardwareStreamPA::stop();
++}
++
++void AudioHardwareStreamPAOutput::cancelTimer()
++{
++	if (m_timer)
  	{
-@@ -55,17 +56,26 @@ void AudioHardwareStreamPAOutput::paStreamWriteCB(pa_stream* s, size_t length, v
- 
- 		// std::cout << "AudioHardwareStreamPAOutput() length req=" << length << ", done=" << done << std::endl;
- 		size_t rqsize = std::min<UInt32>(This->m_bufferSize, length-done);
--		pa_stream_begin_write(This->m_stream, (void**) &abl->mBuffers[0].mData, &rqsize);
-+        if(pa_stream_begin_write(This->m_stream,(void**)&abl->mBuffers[0].mData,&rqsize)<0 || !rqsize) break;
- 
- 		abl->mBuffers[0].mDataByteSize = rqsize;
-+        fake.mHostTime=mach_absolute_time();
-+        fake.mSampleTime=This->m_frames;
-+        fake.mFlags=kAudioTimeStampHostTimeValid|kAudioTimeStampSampleTimeValid;
- 
- 		// Call the client for more data
- 		OSStatus status = This->m_callback(This->m_hw->id(), &fake, nullptr, nullptr, abl, &fake, This->m_clientData);
-+        if (!This->m_running) {
-+            // The client stopped/disconnected the stream during its IOProc.
-+            pa_stream_cancel_write(s);
-+            return;
-+        }
- 		if (status != noErr || !abl->mBuffers[0].mDataByteSize)
- 		{
- 			// std::cerr << "AudioDeviceIOProc returned " << status << ", corking...\n";
- 
- 			pa_stream_cork(This->m_stream, true, [](pa_stream*, int, void*) {}, nullptr);
-+			pa_stream_cancel_write(This->m_stream);
- 			break;
- 		}
- 		else
-@@ -85,6 +95,7 @@ void AudioHardwareStreamPAOutput::paStreamWriteCB(pa_stream* s, size_t length, v
- 		}
- 
- 		done += abl->mBuffers[0].mDataByteSize;
-+        if(This->m_hw->asbd().mBytesPerFrame) This->m_frames+=abl->mBuffers[0].mDataByteSize/This->m_hw->asbd().mBytesPerFrame;
+-		pa_stream_cork(This->m_stream, true, [](pa_stream*, int, void*) {}, nullptr);
+-		return;
++		dispatch_source_cancel(m_timer);
++		dispatch_release(m_timer);
++		m_timer = nullptr;
++	}
++}
++
++uint64_t AudioHardwareStreamPAOutput::outputLatencyNs(size_t writable, bool* fromPA)
++{
++	pa_usec_t usec = 0;
++	int negative = 0;
++	if (pa_stream_get_latency(m_stream, &usec, &negative) == 0)
++	{
++		*fromPA = true;
++		return negative ? 0 : uint64_t(usec) * 1000;
  	}
++	// No timing info yet: at least account for what is queued in the PA buffer.
++	*fromPA = false;
++	const pa_buffer_attr* attr = pa_stream_get_buffer_attr(m_stream);
++	const pa_sample_spec* spec = pa_stream_get_sample_spec(m_stream);
++	if (!attr || !spec || writable == size_t(-1) || attr->tlength <= writable)
++		return 0;
++	return uint64_t(pa_bytes_to_usec(attr->tlength - writable, spec)) * 1000;
++}
++
++AudioHardwareStreamPAOutput::RenderResult AudioHardwareStreamPAOutput::renderBlock(bool trace)
++{
++	if (!m_running || m_corked || !m_stream || !m_blockBytes)
++		return RenderResult::Stopped;
+ 
+-	// std::cout << "AudioHardwareStreamPAOutput::paStreamWriteCB()\n";
++	const size_t writable = pa_stream_writable_size(m_stream);
++	if (writable == size_t(-1) || writable < m_blockBytes)
++		return RenderResult::NoSpace;
+ 
+-	AudioTimeStamp fake = {0};
+ 	AudioBufferList* abl = static_cast<AudioBufferList*>(alloca(sizeof(AudioBufferList) + sizeof(AudioBuffer)));
++	// Non-interleaved (planar) audio would have multiple buffers, but PA doesn't even support that AFAIK
++	abl->mNumberBuffers = 1;
++	abl->mBuffers[0].mNumberChannels = m_hw->asbd().mChannelsPerFrame;
++
++	size_t rqsize = m_blockBytes;
++	if (pa_stream_begin_write(m_stream, (void**)&abl->mBuffers[0].mData, &rqsize) < 0 || !rqsize)
++	{
++		if (paceShouldTrace()) rclolAudioTrace("PA_OUT begin_write failed rqsize=%zu\n", rqsize);
++		return RenderResult::NoSpace;
++	}
++	if (rqsize < m_blockBytes)
++	{
++		// Never hand the client a partial block (real HALs use a fixed frame count).
++		if (paceShouldTrace()) rclolAudioTrace("PA_OUT granted rqsize=%zu < block=%zu: cancel\n", rqsize, m_blockBytes);
++		pa_stream_cancel_write(m_stream);
++		return RenderResult::NoSpace;
++	}
++	abl->mBuffers[0].mDataByteSize = m_blockBytes;
++
++	bool latencyFromPA = false;
++	const uint64_t latencyNs = outputLatencyNs(writable, &latencyFromPA);
++	const double rate = m_hw->asbd().mSampleRate;
++	const double latencyFrames = rate > 0 ? double(latencyNs) * rate / 1e9 : 0;
++	const uint64_t nowHost = mach_absolute_time();
+ 
+-	size_t done = 0;
++	AudioTimeStamp now = {0};
++	now.mHostTime = nowHost;
++	// Device position currently being played: the block about to be rendered starts
++	// latencyFrames after it, matching the host-time difference below.
++	now.mSampleTime = std::max(0.0, double(m_frames) - latencyFrames);
++	now.mRateScalar = 1.0;
++	now.mFlags = kAudioTimeStampHostTimeValid | kAudioTimeStampSampleTimeValid | kAudioTimeStampRateScalarValid;
+ 
+-	while (done < length && This->m_running)
++	AudioTimeStamp output = now;
++	output.mHostTime = nowHost + nsToHost(latencyNs);
++	output.mSampleTime = double(m_frames);
++
++	const double dHostMs = m_lastIOProcHost ? double(hostToNs(nowHost - m_lastIOProcHost)) / 1e6 : 0;
++	m_lastIOProcHost = nowHost;
++
++	OSStatus status = m_callback(m_hw->id(), &now, nullptr, nullptr, abl, &output, m_clientData);
++	if (trace)
++		rclolAudioTrace("PA_OUT iop dHostMs=%.3f writable=%zu latencyMs=%.2f(%s) frames=%llu status=%d size=%u\n",
++			dHostMs, writable, double(latencyNs) / 1e6, latencyFromPA ? "pa" : "est",
++			(unsigned long long) m_frames, (int) status, (unsigned) abl->mBuffers[0].mDataByteSize);
++
++	if (!m_running)
+ 	{
+-		// Non-interleaved (planar) audio would have multiple buffers, but PA doesn't even support that AFAIK
+-		abl->mNumberBuffers = 1;
++		// The client stopped/disconnected the stream during its IOProc.
++		pa_stream_cancel_write(m_stream);
++		return RenderResult::Stopped;
++	}
++	if (status != noErr || !abl->mBuffers[0].mDataByteSize)
++	{
++		if (paceShouldTrace()) rclolAudioTrace("PA_OUT IOProc failed/empty status=%d size=%u: CORK\n", (int) status,
++			(unsigned) abl->mBuffers[0].mDataByteSize);
++		pa_stream_cancel_write(m_stream);
++		pa_stream_cork(m_stream, true, [](pa_stream*, int, void*) {}, nullptr);
++		m_corked = true;
++		return RenderResult::Stopped;
++	}
+ 
+-		abl->mBuffers[0].mNumberChannels = 2;
+-		// abl->mBuffers[0].mData = This->m_buffer;
++	if (m_convertSignedUnsigned)
++		transformSignedUnsigned(abl);
+ 
+-		// std::cout << "AudioHardwareStreamPAOutput() length req=" << length << ", done=" << done << std::endl;
+-		size_t rqsize = std::min<UInt32>(This->m_bufferSize, length-done);
+-		pa_stream_begin_write(This->m_stream, (void**) &abl->mBuffers[0].mData, &rqsize);
++	// Always submit exactly one block so the sample clock stays block-aligned.
++	int rv = pa_stream_write(m_stream, abl->mBuffers[0].mData, m_blockBytes, nullptr, 0, PA_SEEK_RELATIVE);
++	if (rv != 0)
++	{
++		if (paceShouldTrace()) rclolAudioTrace("PA_OUT pa_stream_write rv=%d\n", rv);
++		return RenderResult::NoSpace;
++	}
++	m_frames += m_blockFrames;
++	return RenderResult::Written;
++}
+ 
+-		abl->mBuffers[0].mDataByteSize = rqsize;
++uint64_t AudioHardwareStreamPAOutput::deadlineNs() const
++{
++	return m_anchorNs + uint64_t(std::max(0.0, double(m_tickIndex) * m_periodNs - m_advanceNs));
++}
+ 
+-		// Call the client for more data
+-		OSStatus status = This->m_callback(This->m_hw->id(), &fake, nullptr, nullptr, abl, &fake, This->m_clientData);
+-		if (status != noErr || !abl->mBuffers[0].mDataByteSize)
+-		{
+-			// std::cerr << "AudioDeviceIOProc returned " << status << ", corking...\n";
++void AudioHardwareStreamPAOutput::armTimer(uint64_t now)
++{
++	if (!m_timer)
++		return;
++	const uint64_t deadline = deadlineNs();
++	const int64_t delta = deadline > now ? int64_t(deadline - now) : 0;
++	dispatch_source_set_timer(m_timer, dispatch_time(DISPATCH_TIME_NOW, delta), DISPATCH_TIME_FOREVER, 100 * NSEC_PER_USEC);
++}
+ 
+-			pa_stream_cork(This->m_stream, true, [](pa_stream*, int, void*) {}, nullptr);
+-			break;
+-		}
+-		else
+-		{
+-			if (This->m_convertSignedUnsigned)
+-				This->transformSignedUnsigned(abl);
+-				
+-			// std::cout << "AudioHardwareStreamPAOutput::paStreamWriteCB(): got " << abl->mBuffers[0].mDataByteSize << " bytes\n";
+-			int rv = pa_stream_write(This->m_stream, abl->mBuffers[0].mData, abl->mBuffers[0].mDataByteSize, nullptr, 0, PA_SEEK_RELATIVE);
+-			if (rv != 0)
+-			{
+-				// std::cerr << "pa_stream_write() failed\n";
+-				break;
+-			}
+-			//else
+-			//	std::cout << "pa_stream_write() OK\n";
+-		}
++void AudioHardwareStreamPAOutput::prefill()
++{
++	if (!m_running || m_corked || m_primed || !m_stream || pa_stream_get_state(m_stream) != PA_STREAM_READY)
++		return;
++
++	// The only burst: fill the target buffer once at start.
++	unsigned blocks = 0;
++	RenderResult r = RenderResult::Written;
++	while (blocks < kPrefillBlocks && (r = renderBlock(iopShouldTrace())) == RenderResult::Written)
++		++blocks;
++	if (rclolAudioTraceEnabled())
++		rclolAudioTrace("PA_OUT prefill blocks=%u result=%d periodMs=%.3f blockFrames=%u\n", blocks, (int) r,
++			m_periodNs / 1e6, m_blockFrames);
++	if (r == RenderResult::Stopped || !blocks)
++		return;
++
++	m_primed = true;
++	m_anchorNs = nowNs();
++	m_tickIndex = 1;
++	m_advanceNs = 0;
++	armTimer(m_anchorNs);
++}
++
++void AudioHardwareStreamPAOutput::tick()
++{
++	if (!m_running || m_corked || !m_timer)
++		return;
++	if (!m_primed)
++	{
++		prefill();
++		return;
++	}
++
++	uint64_t now = nowNs();
++	uint64_t deadline = deadlineNs();
++	if (now < deadline)
++	{
++		// Early wakeup (leeway); wait for the real deadline.
++		armTimer(now);
++		return;
++	}
++
++	const bool trace = tickShouldTrace();
++	const size_t writable = pa_stream_writable_size(m_stream);
++	if (writable != size_t(-1))
++		m_windowMinWritable = std::min(m_windowMinWritable, writable);
++
++	const uint64_t behind = uint64_t(double(now - deadline) / m_periodNs);
++	unsigned toRender = 1;
++	if (behind > kMaxCatchUpBlocks)
++	{
++		// Far behind (stalled queue, suspended process): don't burst, restart the clock.
++		if (paceShouldTrace())
++			rclolAudioTrace("PA_OUT reanchor lateMs=%.3f behindBlocks=%llu\n", double(now - deadline) / 1e6,
++				(unsigned long long) behind);
++		m_anchorNs = now;
++		m_tickIndex = 0;
++		m_advanceNs = 0;
++	}
++	else if (behind)
++	{
++		toRender += unsigned(behind);
++		if (paceShouldTrace())
++			rclolAudioTrace("PA_OUT catchup lateMs=%.3f blocks=%u\n", double(now - deadline) / 1e6, toRender);
++	}
++
++	if (trace)
++		rclolAudioTrace("PA_OUT tick lateMs=%.3f writable=%zu render=%u\n", double(now - deadline) / 1e6, writable, toRender);
++
++	for (unsigned i = 0; i < toRender; i++)
++	{
++		RenderResult r = renderBlock(iopShouldTrace());
++		if (r == RenderResult::Stopped)
++			return; // also covers stop() from inside the IOProc (timer already cancelled)
++		if (r == RenderResult::NoSpace && paceShouldTrace())
++			rclolAudioTrace("PA_OUT skip: writable=%zu < block=%zu\n", pa_stream_writable_size(m_stream), m_blockBytes);
++		// The IO cycle elapses either way; a skipped cycle means PA is consuming slower than us.
++		++m_tickIndex;
++	}
+ 
+-		done += abl->mBuffers[0].mDataByteSize;
++	// Drift servo: the PA sink clock isn't our clock. If the buffer stayed under-filled for a
++	// whole window (min writable >= 2 blocks), run ~6% faster for the next window. Each tick
++	// stays a single, evenly spaced IOProc call.
++	if (++m_windowTicks >= kServoWindowTicks)
++	{
++		const bool low = m_windowMinWritable != SIZE_MAX && m_windowMinWritable >= 2 * m_blockBytes;
++		const double step = low ? m_periodNs / 16 : 0;
++		if (step != m_servoStepNs && paceShouldTrace())
++			rclolAudioTrace("PA_OUT servo minWritable=%zu step=%s\n", m_windowMinWritable, low ? "fast" : "off");
++		m_servoStepNs = step;
++		m_windowMinWritable = SIZE_MAX;
++		m_windowTicks = 0;
+ 	}
++	m_advanceNs += m_servoStepNs;
++
++	armTimer(nowNs());
++}
++
++void AudioHardwareStreamPAOutput::paStreamWriteCB(pa_stream* s, size_t length, void* self)
++{
++	AudioHardwareStreamPAOutput* This = static_cast<AudioHardwareStreamPAOutput*>(self);
++
++	if (!This->m_running)
++	{
++		if (wcbShouldTrace()) rclolAudioTrace("PA_WRITE_CB length=%zu not-running: corking\n", length);
++		pa_stream_cork(This->m_stream, true, [](pa_stream*, int, void*) {}, nullptr);
++		return;
++	}
++
++	// Rendering is paced by the IO timer; the write request only triggers the initial prefill.
++	if (wcbShouldTrace())
++		rclolAudioTrace("PA_WRITE_CB length=%zu writable=%zu primed=%d corked=%d\n", length,
++			pa_stream_writable_size(s), This->m_primed, This->m_corked);
++	if (!This->m_timer)
++	{
++		// No pacing timer could be created: fall back to rendering whole blocks on demand.
++		while (This->renderBlock(iopShouldTrace()) == RenderResult::Written) {}
++		return;
++	}
++	if (!This->m_primed)
++		This->prefill();
  }
  
-@@ -108,4 +119,3 @@ void AudioHardwareStreamPAOutput::start()
- 	// pa_stream_cork(m_stream, false, [](pa_stream*, int, void*) {}, nullptr);
+ void AudioHardwareStreamPAOutput::start()
+@@ -93,10 +340,44 @@ void AudioHardwareStreamPAOutput::start()
+ 	struct pa_buffer_attr battr;
+ 
+ 	battr.fragsize = uint32_t(-1);
+-	battr.maxlength = uint32_t(m_bufferSize);
+-	battr.minreq = uint32_t(-1);
+-	battr.prebuf = battr.maxlength;
+-	battr.tlength = uint32_t(-1);
++	// Size the server buffer in whole IOProc blocks so every IO cycle can supply one.
++	uint32_t bpf = m_hw->asbd().mBytesPerFrame;
++	uint32_t block = bpf ? (m_hw->bufferSize() / bpf) * bpf : m_bufferSize;
++	if (!block)
++		block = m_bufferSize;
++	// ~46 ms target at 256 frames/44.1 kHz: a 2-block target underran, since each
++	// block waits on a cross-process round trip to the client's renderer.
++	battr.maxlength = block * 16;
++	battr.minreq = block;
++	battr.prebuf = block * 2;
++	battr.tlength = block * kPrefillBlocks;
++
++	// Real HALs always call the IOProc with the same frame count (kAudioDevicePropertyBufferFrameSize).
++	m_blockFrames = bpf ? m_hw->bufferSize() / bpf : 0;
++	m_blockBytes = size_t(m_blockFrames) * bpf;
++	const double rate = m_hw->asbd().mSampleRate;
++	m_periodNs = rate > 0 ? double(m_blockFrames) * 1e9 / rate : 0;
++
++	// start() runs on the PA queue, so the timer shares its serialization with all pa_* calls.
++	// Disabled: Darling's dispatch timers fire 3-35 ms late (one stalled 30 s), which starved
++	// PA into silence. Render on PA's write requests instead; the output timestamps still
++	// come from PA's latency, so blocks within one request get correctly spaced play times.
++	static const bool kUsePacingTimer = false;
++	dispatch_queue_t queue = static_cast<AudioHardwareImplPA*>(m_hw)->paQueue();
++	if (kUsePacingTimer && queue && m_blockBytes && m_periodNs > 0)
++	{
++		m_timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, queue);
++		if (m_timer)
++		{
++			dispatch_source_set_event_handler(m_timer, ^{ tick(); });
++			// Resumed immediately (a suspended source can't be released); armed after prefill.
++			dispatch_source_set_timer(m_timer, DISPATCH_TIME_FOREVER, DISPATCH_TIME_FOREVER, 0);
++			dispatch_resume(m_timer);
++		}
++	}
++	if (rclolAudioTraceEnabled())
++		rclolAudioTrace("PA_OUT start block=%zu frames=%u periodMs=%.3f timer=%d\n", m_blockBytes, m_blockFrames,
++			m_periodNs / 1e6, m_timer != nullptr);
+ 
+ 	pa_stream_set_write_callback(m_stream, paStreamWriteCB, this);
+ 
+@@ -105,7 +386,5 @@ void AudioHardwareStreamPAOutput::start()
+                                  |PA_STREAM_AUTO_TIMING_UPDATE) /* PA_STREAM_START_CORKED */,
+ 			nullptr, nullptr);
+ 
+-	// pa_stream_cork(m_stream, false, [](pa_stream*, int, void*) {}, nullptr);
  	AudioHardwareStreamPA::start();
  }
 -
 diff --git a/src/CoreAudio/CoreAudio/pulse/AudioHardwareStreamPAOutput.h b/src/CoreAudio/CoreAudio/pulse/AudioHardwareStreamPAOutput.h
-index 735474128..a92e64cd5 100644
+index 735474128..8d73f9902 100644
 --- a/src/CoreAudio/CoreAudio/pulse/AudioHardwareStreamPAOutput.h
 +++ b/src/CoreAudio/CoreAudio/pulse/AudioHardwareStreamPAOutput.h
-@@ -26,9 +26,9 @@ class AudioHardwareStreamPAOutput : public AudioHardwareStreamPA
+@@ -20,15 +20,46 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+ #ifndef AUDIOHARDWARESTREAMPAOUTPUT_H
+ #define AUDIOHARDWARESTREAMPAOUTPUT_H
+ #include "AudioHardwareStreamPA.h"
++#include <dispatch/dispatch.h>
++#include <cstdint>
+ 
+ class AudioHardwareStreamPAOutput : public AudioHardwareStreamPA
+ {
  public:
  	AudioHardwareStreamPAOutput(AudioHardwareImplPA* hw, AudioDeviceIOProc callback, void* clientData);
++	~AudioHardwareStreamPAOutput();
++	void stop() override;
  private:
++	enum class RenderResult { Written, NoSpace, Stopped };
++
 +	uint64_t m_frames = 0;
  	void start() override;
  	static void paStreamWriteCB(pa_stream* s, size_t length, void* self);
++
++	// IO cycle pacing; everything below is only touched on the PA queue.
++	void cancelTimer();
++	void prefill();
++	void tick();
++	void armTimer(uint64_t nowNs);
++	uint64_t deadlineNs() const;
++	RenderResult renderBlock(bool trace);
++	uint64_t outputLatencyNs(size_t writable, bool* fromPA);
++
++	dispatch_source_t m_timer = nullptr;
++	size_t m_blockBytes = 0;
++	uint32_t m_blockFrames = 0;
++	double m_periodNs = 0;
++	bool m_primed = false;
++	bool m_corked = false;
++	// Deadline k is m_anchorNs + k * m_periodNs - m_advanceNs.
++	uint64_t m_anchorNs = 0;
++	uint64_t m_tickIndex = 0;
++	double m_advanceNs = 0;
++	// Drift servo: smallest writable size seen over the current window of ticks.
++	size_t m_windowMinWritable = SIZE_MAX;
++	unsigned m_windowTicks = 0;
++	double m_servoStepNs = 0;
++	uint64_t m_lastIOProcHost = 0;
  };
  
  #endif /* AUDIOHARDWARESTREAMPA_H */
@@ -1886,10 +2365,10 @@ index 63f3545e2..4a2d8ed62 100644
  	});
  }
 diff --git a/src/CoreAudio/CoreAudio/pulse/PADispatchMainLoop.h b/src/CoreAudio/CoreAudio/pulse/PADispatchMainLoop.h
-index ff83d1e15..0d84a2e0d 100644
+index ff83d1e15..1e86f9e99 100644
 --- a/src/CoreAudio/CoreAudio/pulse/PADispatchMainLoop.h
 +++ b/src/CoreAudio/CoreAudio/pulse/PADispatchMainLoop.h
-@@ -30,6 +30,8 @@ public:
+@@ -30,8 +30,12 @@ public:
  
  	void suspend();
  	void resume();
@@ -1897,8 +2376,12 @@ index ff83d1e15..0d84a2e0d 100644
 +	void async(void (^block)(void));
  	
  	pa_mainloop_api* getAPI();
++	// The serial queue all pa_* calls and callbacks run on.
++	dispatch_queue_t queue() const { return m_queue; }
  private:
-@@ -50,6 +52,7 @@ private:
+ 	static pa_io_event* io_new(pa_mainloop_api *a, int fd, pa_io_event_flags_t events, pa_io_event_cb_t cb, void *userdata);
+ 	static void io_enable(pa_io_event *e, pa_io_event_flags_t events);
+@@ -50,6 +54,7 @@ private:
  	static void defer_event_fire(void* context);
  private:
  	dispatch_queue_t m_queue;
@@ -1907,7 +2390,7 @@ index ff83d1e15..0d84a2e0d 100644
  	bool m_suspended = true;
  };
 diff --git a/src/CoreAudio/CoreAudioComponent/AUHAL.cpp b/src/CoreAudio/CoreAudioComponent/AUHAL.cpp
-index fe4d1eaa1..172f751ba 100644
+index fe4d1eaa1..9321edcdf 100644
 --- a/src/CoreAudio/CoreAudioComponent/AUHAL.cpp
 +++ b/src/CoreAudio/CoreAudioComponent/AUHAL.cpp
 @@ -1,3 +1,4 @@
@@ -1915,7 +2398,7 @@ index fe4d1eaa1..172f751ba 100644
  /*
  This file is part of Darling.
  
-@@ -19,6 +20,11 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+@@ -19,6 +20,15 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
  
  #include "AUHAL.h"
  #include <iostream>
@@ -1924,10 +2407,14 @@ index fe4d1eaa1..172f751ba 100644
 +#include <cstdio>
 +#include <cstdlib>
 +#include <pthread.h>
++#include <atomic>
++#include <cmath>
++#include <algorithm>
++#include <mach/mach_time.h>
  
  #pragma GCC visibility push(default)
  AUDIOCOMPONENT_ENTRY(AUOutputBaseFactory, AUHAL);
-@@ -42,6 +48,37 @@ AUHAL::~AUHAL()
+@@ -42,6 +52,37 @@ AUHAL::~AUHAL()
  	Stop();
  }
  
@@ -1965,7 +2452,7 @@ index fe4d1eaa1..172f751ba 100644
  bool AUHAL::CanScheduleParameters() const
  {
  	return true;
-@@ -49,7 +86,7 @@ bool AUHAL::CanScheduleParameters() const
+@@ -49,7 +90,7 @@ bool AUHAL::CanScheduleParameters() const
  
  bool AUHAL::StreamFormatWritable(AudioUnitScope scope, AudioUnitElement element)
  {
@@ -1974,11 +2461,11 @@ index fe4d1eaa1..172f751ba 100644
  }
  
  OSStatus AUHAL::Version()
-@@ -76,19 +113,26 @@ OSStatus AUHAL::Render(AudioUnitRenderActionFlags& ioActionFlags, const AudioTim
+@@ -76,19 +117,26 @@ OSStatus AUHAL::Render(AudioUnitRenderActionFlags& ioActionFlags, const AudioTim
  
  OSStatus AUHAL::Start()
  {
-+    if(getenv("RCLOL_AUDIO_TRACE")) rclolAudioTrace("AUDIO_UNIT_NATIVE_START output=%d input=%d\n",m_enableOutput,m_enableInput);
++    if(rclolAudioTraceEnabled()) rclolAudioTrace("AUDIO_UNIT_NATIVE_START output=%d input=%d\n",m_enableOutput,m_enableInput);
  	if (m_running)
  		return noErr;
  
@@ -2004,7 +2491,7 @@ index fe4d1eaa1..172f751ba 100644
  	}
  	if (m_enableInput)
  	{
-@@ -111,13 +155,15 @@ OSStatus AUHAL::Stop()
+@@ -111,20 +159,42 @@ OSStatus AUHAL::Stop()
  	{
  		AudioDeviceStop(m_outputDevice, m_outputProcID);
  		AudioDeviceDestroyIOProcID(m_outputDevice, m_outputProcID);
@@ -2021,8 +2508,24 @@ index fe4d1eaa1..172f751ba 100644
  	return noErr;
  }
  
-@@ -125,6 +171,10 @@ OSStatus AUHAL::SetProperty(AudioUnitPropertyID inID, AudioUnitScope inScope, Au
++// Volume/mute/gain related property selectors (HAL device properties and AUHAL parameters).
++static bool rclolVolumeRelated(UInt32 id)
++{
++	switch (id)
++	{
++		case 'volm': case 'vold': case 'vdb#': case 'mute': case 'thru':
++		case 'pvol': case 'pvod': case 'mvol': case 'mbal': case 'span':
++		case 'svlm': case 'smut': case 'v2db': case 'db2v':
++			return true;
++	}
++	return false;
++}
++
+ OSStatus AUHAL::SetProperty(AudioUnitPropertyID inID, AudioUnitScope inScope, AudioUnitElement inElement, const void* inData, UInt32 inDataSize)
  {
++	if (rclolAudioTraceEnabled() && rclolVolumeRelated(inID))
++		rclolAudioTrace("AUHAL_SET_VOLPROP property=%08x scope=%u element=%u size=%u value=%g\n",inID,inScope,inElement,inDataSize,
++			(inData && inDataSize==sizeof(Float32))?(double)*(const Float32*)inData:0.0);
  	switch (inID)
  	{
 +        case kAudioDevicePropertyBufferFrameSize: {
@@ -2032,21 +2535,24 @@ index fe4d1eaa1..172f751ba 100644
  		case kAudioOutputUnitProperty_SetInputCallback:
  		{
  			ca_require(inDataSize == sizeof(AURenderCallbackStruct), InvalidPropertyValue);
-@@ -176,7 +226,11 @@ OSStatus AUHAL::SetProperty(AudioUnitPropertyID inID, AudioUnitScope inScope, Au
+@@ -176,15 +246,23 @@ OSStatus AUHAL::SetProperty(AudioUnitPropertyID inID, AudioUnitScope inScope, Au
  			return noErr;
  		}
  	}
 -	return AUBase::SetProperty(inID, inScope, inElement, inData, inDataSize);
 +    {
 +    OSStatus status=AUBase::SetProperty(inID,inScope,inElement,inData,inDataSize);
-+    if(status && getenv("RCLOL_AUDIO_TRACE")) rclolAudioTrace("AUDIO_UNIT_SET property=%u scope=%u element=%u status=%d\n",inID,inScope,inElement,status);
++    if(status && rclolAudioTraceEnabled()) rclolAudioTrace("AUDIO_UNIT_SET property=%u scope=%u element=%u status=%d\n",inID,inScope,inElement,status);
 +    return status;
 +    }
  InvalidPropertyValue:
  	return kAudioUnitErr_InvalidPropertyValue;
  }
-@@ -185,6 +239,8 @@ OSStatus AUHAL::GetPropertyInfo(AudioUnitPropertyID inID, AudioUnitScope inScope
+ 
+ OSStatus AUHAL::GetPropertyInfo(AudioUnitPropertyID inID, AudioUnitScope inScope, AudioUnitElement inElement, UInt32& outDataSize, Boolean& outWritable)
  {
++	if (rclolAudioTraceEnabled() && rclolVolumeRelated(inID))
++		rclolAudioTrace("AUHAL_INFO_VOLPROP property=%08x scope=%u element=%u\n",inID,inScope,inElement);
  	switch (inID)
  	{
 +        case kAudioDevicePropertyBufferFrameSize:
@@ -2054,18 +2560,20 @@ index fe4d1eaa1..172f751ba 100644
  		case kAudioOutputUnitProperty_SetInputCallback:
  		{
  			outDataSize = sizeof(AURenderCallbackStruct);
-@@ -210,13 +266,20 @@ OSStatus AUHAL::GetPropertyInfo(AudioUnitPropertyID inID, AudioUnitScope inScope
+@@ -210,13 +288,22 @@ OSStatus AUHAL::GetPropertyInfo(AudioUnitPropertyID inID, AudioUnitScope inScope
  			return noErr;
  		}
  	}
 -	return AUBase::GetPropertyInfo(inID, inScope, inElement, outDataSize, outWritable);
 +    OSStatus status=AUBase::GetPropertyInfo(inID,inScope,inElement,outDataSize,outWritable);
-+    if(status && getenv("RCLOL_AUDIO_TRACE")) rclolAudioTrace("AUDIO_UNIT_INFO property=%u scope=%u element=%u status=%d\n",inID,inScope,inElement,status);
++    if(status && rclolAudioTraceEnabled()) rclolAudioTrace("AUDIO_UNIT_INFO property=%u scope=%u element=%u status=%d\n",inID,inScope,inElement,status);
 +    return status;
  }
  
  OSStatus AUHAL::GetProperty(AudioUnitPropertyID inID, AudioUnitScope inScope, AudioUnitElement inElement, void* outData)
  {
++	if (rclolAudioTraceEnabled() && rclolVolumeRelated(inID))
++		rclolAudioTrace("AUHAL_GET_VOLPROP property=%08x scope=%u element=%u\n",inID,inScope,inElement);
  	switch (inID)
  	{
 +        case kAudioDevicePropertyBufferFrameSize: {
@@ -2076,7 +2584,7 @@ index fe4d1eaa1..172f751ba 100644
  		case kAudioOutputUnitProperty_SetInputCallback:
  		{
  			memcpy(outData, &m_outputAvailableCb, sizeof(m_outputAvailableCb));
-@@ -228,12 +291,12 @@ OSStatus AUHAL::GetProperty(AudioUnitPropertyID inID, AudioUnitScope inScope, Au
+@@ -228,12 +315,12 @@ OSStatus AUHAL::GetProperty(AudioUnitPropertyID inID, AudioUnitScope inScope, Au
  			if (inElement == kOutputBus)
  			{
  				UInt32 value = m_enableOutput;
@@ -2091,17 +2599,97 @@ index fe4d1eaa1..172f751ba 100644
  			}
  			else
  				return kAudioUnitErr_InvalidElement;
-@@ -280,6 +343,9 @@ OSStatus AUHAL::recordCallback(AudioObjectID inObjectID,
+@@ -277,9 +364,89 @@ OSStatus AUHAL::recordCallback(AudioObjectID inObjectID,
+ 	return This->doRecord(inNow, inInputData, inInputTime);
+ }
+ 
++// Diagnostic only: classify each rendered block (see AUDIO_BLOCK_STATE).
++void AUHAL::traceBlock(const AudioTimeStamp* inNow, const AudioTimeStamp* inOutputTime, OSStatus result,
++    const CAStreamBasicDescription& desc, UInt32 nFrames, AudioBufferList* out)
++{
++    static std::atomic<unsigned> stateLines(0);
++    static mach_timebase_info_data_t tb={0,0};
++    if(!tb.denom) mach_timebase_info(&tb);
++    BlockTrace& t=m_blockTrace;
++    const unsigned long long cb=++t.callbacks;
++    if(result) {
++        if(++t.pullFailures<=50 || t.pullFailures%200==0)
++            rclolAudioTrace("AUDIO_PULL_FAIL unit=%p cb=%llu status=%d frames=%u count=%llu\n",
++                (void*)this,cb,(int)result,nFrames,t.pullFailures);
++        return;
++    }
++    if(!desc.IsFloat() || desc.mBitsPerChannel!=32 || !nFrames || !desc.mChannelsPerFrame) return;
++    const bool planar=desc.mFormatFlags&kAudioFormatFlagIsNonInterleaved;
++    const UInt32 ch=desc.mChannelsPerFrame;
++    const float* base=planar?(const float*)m_playbackSamples.data():(const float*)out->mBuffers[0].mData;
++    if(!base) return;
++    auto at=[&](UInt32 c,UInt32 f)->float { return planar?base[(size_t)c*nFrames+f]:base[(size_t)f*ch+c]; };
++    float peak[2]={0,0}; double sq[2]={0,0}; bool halves[2]={true,true}; bool zero=true;
++    const UInt32 half=nFrames/2;
++    for(UInt32 c=0;c<ch && c<2;++c) {
++        for(UInt32 f=0;f<nFrames;++f) {
++            float v=at(c,f);
++            if(v!=0 || std::signbit(v)) { if(v!=0) zero=false; }
++            peak[c]=std::max(peak[c],std::abs(v)); sq[c]+=(double)v*v;
++            if(f<half && (nFrames&1)==0) {
++                float w=at(c,f+half);
++                if(memcmp(&v,&w,4)) halves[c]=false;
++            }
++        }
++    }
++    const bool halvesSame=(nFrames&1)==0 && halves[0] && (ch<2 || halves[1]);
++    const double rms0=sqrt(sq[0]/nFrames), rms1=ch>1?sqrt(sq[1]/nFrames):0;
++    bool same=false;
++    const size_t total=(size_t)nFrames*ch;
++    if(t.havePrev && t.prev.size()==total) {
++        same=true;
++        for(UInt32 c=0;c<ch&&same;++c) for(UInt32 f=0;f<nFrames;++f) {
++            float v=at(c,f);
++            if(memcmp(&v,&t.prev[(size_t)c*nFrames+f],4)) { same=false; break; }
++        }
++    }
++    // 0 silent, 1 live, 2 repeat-of-previous-nonsilent, 3 halves-identical-nonsilent
++    int state=zero?0:same?2:halvesSame?3:1;
++    t.prev.resize(total);
++    for(UInt32 c=0;c<ch;++c) for(UInt32 f=0;f<nFrames;++f) t.prev[(size_t)c*nFrames+f]=at(c,f);
++    t.havePrev=true;
++    ++t.stateCounts[state];
++    static const char* names[4]={"silent","live","repeat","halves"};
++    double dSample=0, dHostMs=0;
++    const double sample=inOutputTime->mSampleTime;
++    if(t.haveTime) {
++        dSample=sample-t.lastSample;
++        dHostMs=(double)(inOutputTime->mHostTime-t.lastHost)*tb.numer/tb.denom/1e6;
++        if(dHostMs>t.maxGapMs) t.maxGapMs=dHostMs;
++    }
++    t.haveTime=true; t.lastSample=sample; t.lastHost=inOutputTime->mHostTime;
++    const bool transition=state!=t.state;
++    if(transition && t.state>=0 && stateLines.fetch_add(1)<2000)
++        rclolAudioTrace("AUDIO_BLOCK_STATE unit=%p from=%s to=%s cb=%llu frames=%u peakL=%g peakR=%g rmsL=%g rmsR=%g\n",
++            (void*)this,names[t.state],names[state],cb,nFrames,peak[0],peak[1],rms0,rms1);
++    if(cb<=40 || cb%200==0 || transition)
++        rclolAudioTrace("AUDIO_BLOCK unit=%p cb=%llu state=%s frames=%u peakL=%g peakR=%g rmsL=%g rmsR=%g "
++            "halvesL=%d halvesR=%d same=%d zero=%d outSample=%.0f nowSample=%.0f dSample=%.0f outHost=%llu nowHost=%llu "
++            "dHostMs=%.3f maxGapMs=%.3f\n",
++            (void*)this,cb,names[state],nFrames,peak[0],peak[1],rms0,rms1,(int)halves[0],(int)halves[1],(int)same,(int)zero,
++            sample,inNow->mSampleTime,dSample,(unsigned long long)inOutputTime->mHostTime,
++            (unsigned long long)inNow->mHostTime,dHostMs,t.maxGapMs);
++    if(cb%2000==0)
++        rclolAudioTrace("AUDIO_BLOCK_SUMMARY unit=%p cb=%llu silent=%llu live=%llu repeat=%llu halves=%llu pullFail=%llu maxGapMs=%.3f\n",
++            (void*)this,cb,t.stateCounts[0],t.stateCounts[1],t.stateCounts[2],t.stateCounts[3],t.pullFailures,t.maxGapMs);
++    t.state=state;
++}
++
  OSStatus AUHAL::doPlayback(const AudioTimeStamp* inNow, AudioBufferList* outOutputData, const AudioTimeStamp* inOutputTime)
  {
  	// std::cout << "AUHAL::DoPlayback()\n";
 +    static unsigned stackTraces=0;
-+    if(getenv("RCLOL_AUDIO_TRACE") && stackTraces++<2)
++    if(rclolAudioTraceEnabled() && stackTraces++<2)
 +        rclolAudioTrace("AUDIO_CALLBACK_STACK bytes=%zu\n",pthread_get_stacksize_np(pthread_self()));
  	if (!HasInput(0))
  	{
  		// std::cerr << "No connection\n";
-@@ -290,9 +356,44 @@ OSStatus AUHAL::doPlayback(const AudioTimeStamp* inNow, AudioBufferList* outOutp
+@@ -290,9 +457,75 @@ OSStatus AUHAL::doPlayback(const AudioTimeStamp* inNow, AudioBufferList* outOutp
  	AudioUnitRenderActionFlags flags = kAudioUnitRenderAction_PreRender;
  	const CAStreamBasicDescription& desc = GetStreamFormat(kAudioUnitScope_Input, kOutputBus);
  
@@ -2136,8 +2724,39 @@ index fe4d1eaa1..172f751ba 100644
 +        result=GetInput(kOutputBus)->PullInputWithBufferList(flags,*inNow,kOutputBus,nFrames,outOutputData);
 +    }
 +
++    if(rclolAudioTraceEnabled()) traceBlock(inNow,inOutputTime,result,desc,nFrames,outOutputData);
++
++    // Diagnostic: Chromium's audio source can start handing out one identical
++    // block forever (heard as static). Log the timestamp Darling supplied at the
++    // moment that begins, so we can tell whether our clock inputs look sane.
++    {
++        const unsigned char* produced;
++        size_t producedBytes;
++        if(desc.mFormatFlags&kAudioFormatFlagIsNonInterleaved) {
++            produced=m_playbackSamples.data();
++            producedBytes=(size_t)nFrames*frameBytes;
++        } else {
++            produced=(const unsigned char*)outOutputData->mBuffers[0].mData;
++            producedBytes=outOutputData->mBuffers[0].mDataByteSize;
++        }
++        uint64_t sum=1469598103934665603ull;
++        for(size_t i=0;i<producedBytes;++i) sum=(sum^produced[i])*1099511628211ull;
++        static uint64_t lastSum=0;
++        static unsigned repeatRun=0;
++        if(producedBytes && sum==lastSum) {
++            ++repeatRun;
++            if(rclolAudioTraceEnabled() && (repeatRun==2 || repeatRun%500==0))
++                rclolAudioTrace("AUDIO_INPUT_REPEAT frames=%u run=%u host=%llu sample=%.0f flags=%u\n",
++                    nFrames,repeatRun,(unsigned long long)inOutputTime->mHostTime,inOutputTime->mSampleTime,
++                    (unsigned)inOutputTime->mFlags);
++        } else {
++            repeatRun=0;
++        }
++        lastSum=sum;
++    }
++
 +    static unsigned traceRenders=0;
-+    if (getenv("RCLOL_AUDIO_TRACE") && traceRenders++ < 16) {
++    if (rclolAudioTraceEnabled() && traceRenders++ < 16) {
 +        float peak=0;
 +        if (!result && desc.IsFloat() && sampleBytes==4) {
 +            const float* samples=static_cast<const float*>(outOutputData->mBuffers[0].mData);
@@ -2150,7 +2769,7 @@ index fe4d1eaa1..172f751ba 100644
  	// std::cout << "Bytes: " << outOutputData->mBuffers[0].mDataByteSize << std::endl;
  	// m_auhalData.write((char*) outOutputData->mBuffers[0].mData, outOutputData->mBuffers[0].mDataByteSize);
 diff --git a/src/CoreAudio/CoreAudioComponent/AUHAL.h b/src/CoreAudio/CoreAudioComponent/AUHAL.h
-index bc21bcbbb..190a0ffc8 100644
+index bc21bcbbb..e369f95d1 100644
 --- a/src/CoreAudio/CoreAudioComponent/AUHAL.h
 +++ b/src/CoreAudio/CoreAudioComponent/AUHAL.h
 @@ -25,6 +25,7 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
@@ -2171,7 +2790,15 @@ index bc21bcbbb..190a0ffc8 100644
  	bool CanScheduleParameters() const override;
  	bool StreamFormatWritable(AudioUnitScope scope, AudioUnitElement element) override;
  	OSStatus Version() override;
-@@ -76,6 +80,11 @@ protected:
+@@ -59,6 +63,7 @@ private:
+ 		void* inClientData);
+ 
+ 	OSStatus doPlayback(const AudioTimeStamp* inNow, AudioBufferList* outOutputData, const AudioTimeStamp* inOutputTime);
++	void traceBlock(const AudioTimeStamp* inNow, const AudioTimeStamp* inOutputTime, OSStatus result, const CAStreamBasicDescription& desc, UInt32 nFrames, AudioBufferList* out);
+ 	OSStatus doRecord(const AudioTimeStamp* inNow, const AudioBufferList* inInputData, const AudioTimeStamp* inInputTime);
+ 	
+ protected:
+@@ -76,6 +81,24 @@ protected:
  	// TODO: Prepare for non-interleaved audio
  	std::unique_ptr<uint8_t[]> m_buffer;
  	size_t m_bufferSize = 0, m_bufferUsed = 0;
@@ -2180,6 +2807,19 @@ index bc21bcbbb..190a0ffc8 100644
 +    // Keep planar conversion storage across callbacks and start/stop cycles.
 +    std::vector<unsigned char> m_playbackSamples;
 +    std::vector<unsigned char> m_playbackBufferList;
++
++    // Diagnostic-only block statistics (touched only when audio tracing is on).
++    struct BlockTrace {
++        unsigned long long callbacks = 0, pullFailures = 0;
++        unsigned long long stateCounts[4] = {0,0,0,0};
++        int state = -1;
++        std::vector<float> prev;
++        bool havePrev = false;
++        bool haveTime = false;
++        double lastSample = 0;
++        unsigned long long lastHost = 0;
++        double maxGapMs = 0;
++    } m_blockTrace;
  };
  
  #endif
@@ -7241,16 +7881,39 @@ diff --git a/src/CoreAudio/AudioTrace.h b/src/CoreAudio/AudioTrace.h
 new file mode 100644
 --- /dev/null
 +++ b/src/CoreAudio/AudioTrace.h
-@@ -0,0 +1,14 @@
+@@ -0,0 +1,37 @@
 +#ifndef RCLOL_AUDIO_TRACE_H
 +#define RCLOL_AUDIO_TRACE_H
 +#include <cstdio>
 +#include <cstdlib>
 +#include <cstdarg>
++#include <ctime>
++#include <atomic>
 +#include <unistd.h>
 +// Opt-in API/status diagnostics only; never records audio samples or names.
++// Enabled by env RCLOL_AUDIO_TRACE or by the existence of /tmp/rclol-audio-trace
++// or /Users/Shared/rclol-audio-trace (the latter survives /tmp wipes at launch).
++// A negative result is re-checked at most once every ~2 seconds; a positive
++// result is cached for the life of the process.
++static inline bool rclolAudioTraceEnabled() {
++    static std::atomic<bool> enabled{false};
++    static std::atomic<long long> nextCheckMs{0};
++    if (enabled.load(std::memory_order_relaxed)) return true;
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    long long nowMs = (long long) ts.tv_sec * 1000 + ts.tv_nsec / 1000000 + 1;
++    if (nowMs < nextCheckMs.load(std::memory_order_relaxed)) return false;
++    nextCheckMs.store(nowMs + 2000, std::memory_order_relaxed);
++    if (getenv("RCLOL_AUDIO_TRACE") != nullptr ||
++        access("/tmp/rclol-audio-trace", F_OK) == 0 ||
++        access("/Users/Shared/rclol-audio-trace", F_OK) == 0) {
++        enabled.store(true, std::memory_order_relaxed);
++        return true;
++    }
++    return false;
++}
 +static inline void rclolAudioTrace(const char* format, ...) {
-+    if (!getenv("RCLOL_AUDIO_TRACE")) return;
++    if (!rclolAudioTraceEnabled()) return;
 +    static FILE* file=[] { FILE* f=fopen("/tmp/rclol-audio-api.log","a"); if(f) setvbuf(f,nullptr,_IOLBF,0); return f; }();
 +    if(!file) return;
 +    va_list args;va_start(args,format);fprintf(file,"pid=%d ",getpid());vfprintf(file,format,args);va_end(args);
@@ -7344,7 +8007,7 @@ new file mode 100644
 +    OSStatus SetParameter(AudioUnitParameterID id, AudioUnitScope scope, AudioUnitElement element,
 +                          AudioUnitParameterValue gain, UInt32) override {
 +        static std::atomic<unsigned> traceCount{0};
-+        if (getenv("RCLOL_AUDIO_TRACE") && traceCount++ < 64)
++        if (rclolAudioTraceEnabled() && traceCount++ < 64)
 +            rclolAudioTrace("AUDIO_MATRIX_PARAM id=%u scope=%u element=%08x gain=%g\n",id,scope,element,gain);
 +        std::lock_guard<std::mutex> lock(mMutex);
 +        if (!std::isfinite(gain)) return kAudioUnitErr_InvalidParameter;
@@ -8801,3 +9464,67 @@ new file mode 100644
 +	api->sd_bus_flush_close_unref(bus);
 +	return r < 0 ? r : 0;
 +}
+diff --git a/src/frameworks/CoreServices/src/CarbonCore/Gestalt.cpp b/src/frameworks/CoreServices/src/CarbonCore/Gestalt.cpp
+index dffdd4cb2..7430f587b 100644
+--- a/src/frameworks/CoreServices/src/CarbonCore/Gestalt.cpp
++++ b/src/frameworks/CoreServices/src/CarbonCore/Gestalt.cpp
+@@ -25,6 +25,9 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+ 
+ OSStatus Gestalt(uint32_t type, int* value)
+ {
++	if (!value)
++		return paramErr;
++	*value = 0;
+ 	switch (type)
+ 	{
+ 	case gestaltSystemVersion:
+@@ -32,24 +35,31 @@ OSStatus Gestalt(uint32_t type, int* value)
+ 	case gestaltSystemVersionMinor:
+ 	case gestaltSystemVersionPatch:
+ 	{
+-		// We may be mixing the Darwin and OS version, but this API is deprecated anyway
+-		int name[2] = { CTL_KERN, KERN_OSRELEASE };
+-		char version[32];
+-		size_t version_len = sizeof(version) - 1;
+-		int maj, min, patch;
+-		
+-		sysctl(name, 2, version, &version_len, nullptr, 0);
+-		sscanf(version, "%d.%d.%d", &maj, &min, &patch);
+-		
+-		if (type == gestaltSystemVersion)
+-			*value = 0x100 * maj + 0x10 * min;
+-		else if (type == gestaltSystemVersionMajor)
+-			*value = maj;
+-		else if (type == gestaltSystemVersionMinor)
+-			*value = min;
+-		else if (type == gestaltSystemVersionPatch)
+-			*value = patch;
+-	}
++        // Darwin's kernel release is not the macOS product version.
++        char version[64] = {};
++        size_t version_len = sizeof(version);
++        int major = 0, minor = 0, patch = 0;
++        if (sysctlbyname("kern.osproductversion", version, &version_len, nullptr, 0) != 0)
++            return gestaltUnknownErr;
++        version[sizeof(version) - 1] = '\0';
++        if (sscanf(version, "%d.%d.%d", &major, &minor, &patch) < 1 ||
++            major < 0 || major > 99 || minor < 0 || patch < 0)
++            return gestaltUnknownErr;
++
++        if (type == gestaltSystemVersion) {
++            // Legacy packed BCD: minor and bug-fix components saturate at 9.
++            const int packedMajor = ((major / 10) << 4) | (major % 10);
++            *value = (packedMajor << 8) | ((minor > 9 ? 9 : minor) << 4) |
++                     (patch > 9 ? 9 : patch);
++        } else if (type == gestaltSystemVersionMajor)
++            *value = major;
++        else if (type == gestaltSystemVersionMinor)
++            *value = minor;
++        else
++            *value = patch;
++        // Version selectors must not fall through to the architecture case.
++        return 0;
++    }
+ 	case gestaltSysArchitecture:
+ #ifdef __powerpc__
+ 		*value = gestaltPowerPC;

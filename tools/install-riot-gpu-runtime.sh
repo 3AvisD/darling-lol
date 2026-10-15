@@ -14,6 +14,8 @@ python3 tools/build-m58f341-corevideo.py
 python3 tools/build-riot-x11-runtime.py
 python3 tools/build-riot-appkit-runtime.py
 python3 tools/build-riot-coregraphics-runtime.py
+python3 tools/build-riot-coretext-runtime.py
+python3 tools/build-riot-carboncore-runtime.py
 python3 tools/build-riot-corefoundation-runtime.py
 python3 tools/build-riot-kqueue-runtime.py
 python3 tools/build-riot-malloc-runtime.py
@@ -31,7 +33,7 @@ python3 tools/stop-darling-runtime.py
 sudo make -C "$project_dir/build/darling-src/build/src/external/darlingserver" install -j12
 # Electron's window-visibility correction lives in the AppKit overlay
 # (NSWindow -occlusionState, cocotron.patch); no Riot binary is modified here.
-for name in IOSurface OpenGL QuartzCore CoreVideo CoreAudio AudioToolbox CoreGraphics CoreFoundation Metal; do
+for name in IOSurface OpenGL QuartzCore CoreVideo CoreAudio AudioToolbox CoreGraphics CoreText CoreFoundation Metal; do
  framework="$guest_home/RuntimeFrameworks/$name.framework"
  if [ ! -d "$framework" ]; then cp -a "@DARLING_SDK@/System/Library/Frameworks/$name.framework" "$framework"; fi
  binary="$framework/Versions/A/$name"
@@ -39,13 +41,13 @@ for name in IOSurface OpenGL QuartzCore CoreVideo CoreAudio AudioToolbox CoreGra
  case "$name" in
  IOSurface) source=build/m333-IOSurface;;
  OpenGL) source=build/m327-OpenGL;;
- QuartzCore)
-  if [ -f build/riot-QuartzCore ]; then source=build/riot-QuartzCore;
-  else source=build/m336-QuartzCore; fi;;
+ # Use the artifact rebuilt by this invocation, not an older optional probe build.
+ QuartzCore) source=build/m336-QuartzCore;;
  CoreVideo) source=build/m341-CoreVideo;;
  CoreAudio) source=build/riot-CoreAudio;;
  AudioToolbox) source=build/riot-AudioToolbox;;
  CoreGraphics) source=build/riot-CoreGraphics;;
+ CoreText) source=build/riot-CoreText;;
  CoreFoundation) source=build/riot-CoreFoundation;;
  Metal) source=build/riot-Metal;;
  esac
@@ -54,6 +56,8 @@ for name in IOSurface OpenGL QuartzCore CoreVideo CoreAudio AudioToolbox CoreGra
  # Dyld resolves Versions/A. Preserve the standard outer symlink as well.
  if [ ! -L "$framework/$name" ]; then rm -f "$framework/$name"; ln -s "Versions/Current/$name" "$framework/$name"; fi
 done
+# Legacy version queries must also reach the corrected absolute subframework.
+sh tools/install-riot-carboncore-runtime.sh
 # Re-exported GL symbols use the native library's absolute install name.
 # DYLD_LIBRARY_PATH must see this rebuilt wrapper as well as the framework copy.
 mkdir -p "$guest_home/RuntimeLibraries"

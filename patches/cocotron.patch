@@ -1271,10 +1271,42 @@ index 9177a986..9c3c5ca3 100644
  
  @end
 diff --git a/AppKit/NSThemeFrame.m b/AppKit/NSThemeFrame.m
-index 0ec827c0..6f780225 100644
+index 0ec827c0..a24cd9f5 100644
 --- a/AppKit/NSThemeFrame.m
 +++ b/AppKit/NSThemeFrame.m
-@@ -133,8 +133,10 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+@@ -85,7 +85,14 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ - (void) resizeSubviewsWithOldSize: (NSSize) oldSize {
+     NSView *menuView = nil;
+     NSToolbarView *toolbarView = nil;
+-    NSView *contentView = nil;
++    /* Browser windows can add overlay/titlebar siblings after their content.
++     * Identify the window's actual content owner rather than choosing the
++     * last ordinary subview. Full-size content wrappers can own it indirectly. */
++    NSView *contentView = [[self window] contentView];
++    while (contentView && [contentView superview] && [contentView superview] != self)
++        contentView = [contentView superview];
++    if ([contentView superview] != self)
++        contentView = nil;
+ 
+     // tile the subviews, when/if we add titlebars and such do it here
+     for (NSView *view in _subviews) {
+@@ -93,10 +100,13 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+             menuView = view;
+         else if ([view isKindOfClass: [NSToolbarView class]])
+             toolbarView = (NSToolbarView *) view;
+-        else
+-            contentView = view;
+     }
+ 
++    // Other decorations still follow their autoresizing masks.
++    for (NSView *view in [[_subviews copy] autorelease])
++        if (view != contentView && view != menuView && view != toolbarView)
++            [view resizeWithOldSuperviewSize: oldSize];
++
+     // subtracts menu height but not toolbar height
+     NSRect contentFrame = [[[self window] class]
+             contentRectForFrameRect: [self bounds]
+@@ -133,8 +143,10 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
  }
  
  - (void) mouseDown: (NSEvent *) event {
@@ -1300,19 +1332,31 @@ index c3f5d056..dbd93174 100644
          @"NSTouchBarItemIdentifierCharacterPicker";
  
 diff --git a/AppKit/NSView.m b/AppKit/NSView.m
-index 8ac2bbdc..7486ebf5 100644
+index 8ac2bbdc..08197fbc 100644
 --- a/AppKit/NSView.m
 +++ b/AppKit/NSView.m
-@@ -46,6 +46,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+@@ -46,6 +46,12 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
  #import <QuartzCore/CALayerContext.h>
  #import <QuartzCore/CATransaction.h>
  #import <AppKit/NSLayoutConstraint.h>
 +#import <AppKit/NSTextInput.h>
 +#import <objc/runtime.h>
++#include "NSGeometryTrace.h"
++#include <stdio.h>
++#include <stdlib.h>
++#include <unistd.h>
  
  @class IBMetricsTable;
  
-@@ -955,6 +957,54 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -66,6 +72,7 @@ const NSViewFullScreenModeOptionKey NSFullScreenModeApplicationPresentationOptio
+ - (CGAffineTransform) transformToWindow;
+ - (CGAffineTransform) transformToLayer;
+ - (void) _trackingAreasChanged;
++- (void) _darlingSetFrame: (NSRect) frame;
+ @end
+ 
+ @implementation NSView
+@@ -955,6 +962,54 @@ static inline void buildTransformsIfNeeded(NSView *self) {
              CGPointApplyAffineTransform(point, toWindow), fromWindow);
  }
  
@@ -1367,7 +1411,77 @@ index 8ac2bbdc..7486ebf5 100644
  - (NSSize) convertSize: (NSSize) size fromView: (NSView *) viewOrNil {
      NSView *fromView =
              (viewOrNil != nil) ? viewOrNil : [[self window] _backgroundView];
-@@ -1254,7 +1304,11 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1029,6 +1084,16 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+ }
+ 
+ - (void) setFrame: (NSRect) frame {
++    /* AppKit dispatches through the component setters. Subclasses use
++     * setFrameSize: to notify their renderer even when callers set a full
++     * frame (including autoresizing through resizeWithOldSuperviewSize:). */
++    if (!NSEqualPoints(_frame.origin, frame.origin))
++        [self setFrameOrigin: frame.origin];
++    if (!NSEqualSizes(_frame.size, frame.size))
++        [self setFrameSize: frame.size];
++}
++
++- (void) _darlingSetFrame: (NSRect) frame {
+     // Cocoa does not post the notification if the frames are equal
+     // Possible that resizeSubviewsWithOldSize is not called if the sizes are
+     // equal
+@@ -1052,6 +1117,12 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+     }
+     _frame = frame;
+ 
++    /* Resize callbacks can convert child frames to window coordinates. They
++     * must see the new parent transform, and compositor submissions must see
++     * the new layer bounds even before the next coordinate conversion. */
++    invalidateTransform(self);
++    configureLayerGeometry(self);
++
+     [_window invalidateCursorRectsForView: self]; // this also invalidates
+                                                   // tracking areas
+ 
+@@ -1068,6 +1139,14 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+ 
+     invalidateTransform(self);
+ 
++    if (getenv("DARLING_UI_GEOMETRY_TRACE") &&
++        (_frame.size.width >= 256 || _frame.size.height >= 256))
++        DarlingGeometryTrace("UI_GEOMETRY view pid=%d class=%s parent=%s frame=%.0fx%.0f bounds=%.0fx%.0f mask=%lu autoresizes=%d\n",
++            getpid(), class_getName([self class]),
++            _superview ? class_getName([_superview class]) : "none",
++            _frame.size.width, _frame.size.height, _bounds.size.width, _bounds.size.height,
++            (unsigned long)_autoresizingMask, _autoresizesSubviews);
++
+     if (_postsNotificationOnFrameChange)
+         [[NSNotificationCenter defaultCenter]
+                 postNotificationName: NSViewFrameDidChangeNotification
+@@ -1078,14 +1157,14 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+     NSRect frame = _frame;
+ 
+     frame.size = size;
+-    [self setFrame: frame];
++    [self _darlingSetFrame: frame];
+ }
+ 
+ - (void) setFrameOrigin: (NSPoint) origin {
+     NSRect frame = [self frame];
+ 
+     frame.origin = origin;
+-    [self setFrame: frame];
++    [self _darlingSetFrame: frame];
+ }
+ 
+ - (void) setFrameRotation: (CGFloat) angle {
+@@ -1100,6 +1179,7 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+     if (!NSEqualRects(bounds, _bounds)) {
+         _bounds = bounds;
+         invalidateTransform(self);
++        configureLayerGeometry(self);
+ 
+         [_window invalidateCursorRectsForView: self]; // this also invalidates
+                                                       // tracking areas
+@@ -1254,7 +1334,11 @@ static inline void buildTransformsIfNeeded(NSView *self) {
                   (NSComparisonResult (*)(id, id, void *)) compareFunction
                             context: (void *) context
  {
@@ -1380,7 +1494,7 @@ index 8ac2bbdc..7486ebf5 100644
  }
  
  - (void) didAddSubview: (NSView *) subview {
-@@ -1511,8 +1565,16 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1511,8 +1595,16 @@ static inline void buildTransformsIfNeeded(NSView *self) {
  }
  
  - (NSTextInputContext *) inputContext {
@@ -1399,7 +1513,7 @@ index 8ac2bbdc..7486ebf5 100644
  }
  
  - (void) registerForDraggedTypes: (NSArray *) types {
-@@ -1819,15 +1881,21 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1819,15 +1911,21 @@ static inline void buildTransformsIfNeeded(NSView *self) {
  
  - (void) _createLayerContextIfNeeded {
      if ([_superview layer] == nil) {
@@ -1423,7 +1537,7 @@ index 8ac2bbdc..7486ebf5 100644
      [[_superview layer] addSublayer: _layer];
      [self _createLayerContextIfNeeded];
  }
-@@ -1905,6 +1973,7 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1905,6 +2003,7 @@ static inline void buildTransformsIfNeeded(NSView *self) {
              [[_superview layer] replaceSublayer: _layer with: value];
              [_layer release];
              _layer = value;
@@ -1432,14 +1546,15 @@ index 8ac2bbdc..7486ebf5 100644
  
          [_subviews
 diff --git a/AppKit/NSWindow.m b/AppKit/NSWindow.m
-index d545120a..db2c12d9 100644
+index d545120a..b2845478 100644
 --- a/AppKit/NSWindow.m
 +++ b/AppKit/NSWindow.m
-@@ -45,6 +45,20 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+@@ -45,6 +45,21 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
  #import <AppKit/NSWindowAnimationContext.h>
  #import <ApplicationServices/ApplicationServices.h>
  #import <CoreGraphics/CGWindow.h>
 +#import <objc/runtime.h>
++#include "NSGeometryTrace.h"
 +#include <unistd.h>
 +#include <string.h>
 +
@@ -1456,7 +1571,7 @@ index d545120a..db2c12d9 100644
  
  const NSNotificationName NSWindowDidBecomeKeyNotification =
          @"NSWindowDidBecomeKeyNotification";
-@@ -204,6 +218,25 @@ NSInteger NSBitsPerPixelFromDepth(NSWindowDepth depth) {
+@@ -204,6 +219,25 @@ NSInteger NSBitsPerPixelFromDepth(NSWindowDepth depth) {
  
  @end
  
@@ -1482,7 +1597,7 @@ index d545120a..db2c12d9 100644
  @implementation NSWindow
  
  @synthesize identifier = _identifier;
-@@ -218,7 +251,8 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -218,7 +252,8 @@ static BOOL _allowsAutomaticWindowTabbing;
  /* This method is Cococtron specific and can be override by subclasses, do not
   * change method name */
  + (BOOL) hasMainMenuForStyleMask: (NSWindowStyleMask) styleMask {
@@ -1492,7 +1607,7 @@ index d545120a..db2c12d9 100644
  }
  
  /* This method is Cococtron specific and can be override by subclasses, do not
-@@ -318,6 +352,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -318,6 +353,7 @@ static BOOL _allowsAutomaticWindowTabbing;
          [NSApplication sharedApplication];
      }
      _styleMask = styleMask;
@@ -1500,7 +1615,7 @@ index d545120a..db2c12d9 100644
      _backingType = backing;
      _isDeferred = defer;
  
-@@ -351,7 +386,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -351,7 +387,7 @@ static BOOL _allowsAutomaticWindowTabbing;
      [_backgroundView _setWindow: self];
      [_backgroundView setNextResponder: self];
  
@@ -1509,7 +1624,7 @@ index d545120a..db2c12d9 100644
      _contentView = [[NSView alloc] initWithFrame: contentViewFrame];
      [_contentView setAutoresizesSubviews: YES];
      [_contentView
-@@ -399,6 +434,8 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -399,6 +435,8 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (void) dealloc {
@@ -1518,7 +1633,51 @@ index d545120a..db2c12d9 100644
      [[NSNotificationCenter defaultCenter] removeObserver: self];
      [_childWindows release];
      [_title release];
-@@ -1025,7 +1062,34 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -934,6 +972,22 @@ static BOOL _allowsAutomaticWindowTabbing;
+     return _animationContext;
+ }
+ 
++/* Dump geometry only, including children which did not receive a resize.
++ * The node/depth bounds keep malformed or unexpectedly large trees bounded. */
++static void traceGeometryTree(NSView *view, unsigned depth, unsigned *remaining) {
++    if (!view || depth > 12 || !*remaining)
++        return;
++    --*remaining;
++    NSRect frame = [view frame], bounds = [view bounds];
++    DarlingGeometryTrace("UI_GEOMETRY tree pid=%d depth=%u view=%p class=%s parent=%p frame=%.0f,%.0f,%.0fx%.0f bounds=%.0f,%.0f,%.0fx%.0f mask=%lu autoresizes=%d layer=%d\n",
++        getpid(), depth, view, class_getName([view class]), [view superview],
++        frame.origin.x, frame.origin.y, frame.size.width, frame.size.height,
++        bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height,
++        (unsigned long)[view autoresizingMask], [view autoresizesSubviews], [view wantsLayer]);
++    for (NSView *child in [view subviews])
++        traceGeometryTree(child, depth + 1, remaining);
++}
++
+ - (void) setFrame: (NSRect) newFrame
+           display: (BOOL) display
+           animate: (BOOL) animate
+@@ -944,8 +998,19 @@ static BOOL _allowsAutomaticWindowTabbing;
+     _frame = newFrame;
+     _makeSureIsOnAScreen = YES;
+ 
+-    [_backgroundView setFrameSize: _frame.size];
++    /* Native child windows convert their Y origin using the platform
++     * window's height. Update it before laying out/resizing those children. */
+     [_platformWindow setFrame: _frame];
++    [_backgroundView setFrameSize: _frame.size];
++
++    if (didSize && getenv("DARLING_UI_GEOMETRY_TRACE")) {
++        NSSize contentSize = [_contentView frame].size;
++        DarlingGeometryTrace("UI_GEOMETRY window pid=%d class=%s frame=%.0fx%.0f content=%.0fx%.0f style=%lu window=%p contentView=%p\n",
++            getpid(), class_getName([self class]), _frame.size.width, _frame.size.height,
++            contentSize.width, contentSize.height, (unsigned long)_styleMask, self, [self contentView]);
++        unsigned remaining = 128;
++        traceGeometryTree(_backgroundView, 0, &remaining);
++    }
+ 
+     if (didSize) {
+         [self resetCursorRects];
+@@ -1025,7 +1090,34 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (void) setMovable: (BOOL) movable {
@@ -1554,7 +1713,7 @@ index d545120a..db2c12d9 100644
  }
  
  - (void) setBackingType: (NSBackingStoreType) value {
-@@ -1234,6 +1298,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1234,6 +1326,7 @@ static BOOL _allowsAutomaticWindowTabbing;
  
  - (void) setIgnoresMouseEvents: (BOOL) value {
      _ignoresMouseEvents = value;
@@ -1562,7 +1721,7 @@ index d545120a..db2c12d9 100644
  }
  
  - (void) setAspectRatio: (NSSize) value {
-@@ -1413,8 +1478,14 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1413,8 +1506,14 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (NSButton *) standardWindowButton: (NSWindowButton) value {
@@ -1579,7 +1738,7 @@ index d545120a..db2c12d9 100644
  }
  
  - (NSButtonCell *) defaultButtonCell {
-@@ -1425,6 +1496,17 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1425,6 +1524,17 @@ static BOOL _allowsAutomaticWindowTabbing;
      return [_sheetContext sheet];
  }
  
@@ -1597,7 +1756,7 @@ index d545120a..db2c12d9 100644
  - (id) windowController {
      return _windowController;
  }
-@@ -1511,10 +1593,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1511,10 +1621,7 @@ static BOOL _allowsAutomaticWindowTabbing;
      return [_platformWindow isMiniaturized];
  }
  
@@ -1609,7 +1768,7 @@ index d545120a..db2c12d9 100644
  
  - (BOOL) inLiveResize {
      return _isInLiveResize;
-@@ -1561,6 +1640,117 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1561,6 +1668,117 @@ static BOOL _allowsAutomaticWindowTabbing;
      return point;
  }
  
@@ -1727,7 +1886,7 @@ index d545120a..db2c12d9 100644
  - (NSRect) frameRectForContentRect: (NSRect) contentRect {
      // hasMainMenu is an instance method so we can't just use the class method
      //  frameRectForContentRect:styleMask:
-@@ -1580,6 +1761,10 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1580,6 +1798,10 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (NSRect) contentRectForFrameRect: (NSRect) frameRect {
@@ -1738,7 +1897,7 @@ index d545120a..db2c12d9 100644
      NSRect result = [[NSDisplay currentDisplay] insetRect: frameRect
                             forNativeWindowBorderWithStyle: [self styleMask]];
  
-@@ -2155,6 +2340,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2155,6 +2377,7 @@ static BOOL _allowsAutomaticWindowTabbing;
  - (void) orderWindow: (NSWindowOrderingMode) place
            relativeTo: (NSInteger) relativeTo
  {
@@ -1746,7 +1905,7 @@ index d545120a..db2c12d9 100644
      // The move notifications are sent under unknown conditions around
      // orderFront: in the Apple AppKit, we do them all the time here until it's
      // figured out. I suspect it is a side effect of off-screen windows being at
-@@ -2208,6 +2394,8 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2208,6 +2431,8 @@ static BOOL _allowsAutomaticWindowTabbing;
          break;
      }
  
@@ -1755,7 +1914,7 @@ index d545120a..db2c12d9 100644
      [self postNotificationName: NSWindowDidMoveNotification];
  }
  
-@@ -2257,6 +2445,12 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2257,6 +2482,12 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (void) sendEvent: (NSEvent *) event {
@@ -1768,7 +1927,7 @@ index d545120a..db2c12d9 100644
      // Some events can cause our window to be destroyed
      // So make sure self lives at least through this current run loop...
      [[self retain] autorelease];
-@@ -2300,6 +2494,10 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2300,6 +2531,10 @@ static BOOL _allowsAutomaticWindowTabbing;
  
      case NSLeftMouseDown: {
          NSView *view = [_backgroundView hitTest: [event locationInWindow]];
@@ -1779,7 +1938,7 @@ index d545120a..db2c12d9 100644
  
          if ([view acceptsFirstResponder]) {
              if ([view needsPanelToBecomeKey]) {
-@@ -2307,6 +2505,27 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2307,6 +2542,27 @@ static BOOL _allowsAutomaticWindowTabbing;
              }
          }
  
@@ -1807,7 +1966,7 @@ index d545120a..db2c12d9 100644
          // Event goes to view, not first responder.
          [view mouseDown: event];
          _mouseDownLocationInWindow = [event locationInWindow];
-@@ -2330,6 +2549,31 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2330,6 +2586,31 @@ static BOOL _allowsAutomaticWindowTabbing;
          _mouseDownLocationInWindow = NSMakePoint(NAN, NAN);
          break;
  
@@ -1839,7 +1998,7 @@ index d545120a..db2c12d9 100644
      case NSMouseMoved: {
          NSView *hit = [_backgroundView hitTest: [event locationInWindow]];
  
-@@ -2536,6 +2780,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2536,6 +2817,7 @@ static BOOL _allowsAutomaticWindowTabbing;
      } else {
          [[self platformWindow] hideWindow];
      }
@@ -1847,7 +2006,21 @@ index d545120a..db2c12d9 100644
  }
  
  - (void) orderFront: (id) sender {
-@@ -3260,8 +3505,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -3064,6 +3346,13 @@ static BOOL _allowsAutomaticWindowTabbing;
+     if (didSize) {
+         // Don't redraw everything unless we really have to.
+         [_backgroundView setFrameSize: _frame.size];
++        if (getenv("DARLING_UI_GEOMETRY_TRACE")) {
++            DarlingGeometryTrace("UI_GEOMETRY native_window pid=%d window=%p contentView=%p frame=%.0fx%.0f\n",
++                                 getpid(), self, [self contentView],
++                                 _frame.size.width, _frame.size.height);
++            unsigned remaining = 128;
++            traceGeometryTree(_backgroundView, 0, &remaining);
++        }
+         [_backgroundView setNeedsDisplay: YES];
+         [self resetCursorRects];
+         [self saveFrameUsingName: _autosaveFrameName];
+@@ -3260,8 +3549,7 @@ static BOOL _allowsAutomaticWindowTabbing;
                  mouseWasInside && !mouseIsInside) {
                  [exited addObject: area];
              }
@@ -1857,7 +2030,7 @@ index d545120a..db2c12d9 100644
                  [moved addObject: area];
              }
              if (options & NSTrackingCursorUpdate && !mouseWasInside &&
-@@ -3459,7 +3703,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -3459,7 +3747,7 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (CGSubWindow *) _createSubWindowWithFrame: (CGRect) frame {
@@ -2957,7 +3130,7 @@ index bfe3839a..2521ffd5 100644
  - (void) frameChanged;
  - (void) setLastKnownCursorPosition: (CGPoint) point;
 diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
-index f4925b66..8553a8b4 100644
+index f4925b66..67b084a0 100644
 --- a/AppKit/X11.backend/X11Window.m
 +++ b/AppKit/X11.backend/X11Window.m
 @@ -38,6 +38,34 @@
@@ -3114,7 +3287,7 @@ index f4925b66..8553a8b4 100644
      [_context release];
      _context = nil;
  
-@@ -421,6 +499,379 @@ static NSData *makeWindowIcon() {
+@@ -421,6 +499,388 @@ static NSData *makeWindowIcon() {
      }
  }
  
@@ -3280,9 +3453,18 @@ index f4925b66..8553a8b4 100644
 +        closedir(dir);
 +    }
 +
-+    /* Keep the software compositor owner across its other window updates.
-+     * Otherwise a temporary size mismatch selects stale browser readback. */
-+    if (_remoteFrameSoftwarePublisher && _remoteFrameMapping && !bestSoftware) {
++    /* Keep a software owner across popup updates while the presented size
++     * still belongs to this window. After a real resize, retaining that owner
++     * can strand us on its popup slot even though a matching readback frame
++     * is ready from another publisher. Let normal candidate selection make
++     * that handoff when the old presentation no longer matches a target. */
++    BOOL presentationMatchesTarget = NO;
++    for (unsigned i = 0; i < frameTargetCount; ++i)
++        if (_remoteFrameWidth == (unsigned)frameTargets[i].width &&
++            _remoteFrameHeight == (unsigned)frameTargets[i].height)
++            presentationMatchesTarget = YES;
++    if (_remoteFrameSoftwarePublisher && _remoteFrameMapping && !bestSoftware &&
++        presentationMatchesTarget) {
 +        const char *pidText = strrchr(_remoteFrameMappingPath, '-');
 +        int publisher = pidText ? atoi(pidText + 1) : 0;
 +        if (publisher > 0 && (kill(publisher, 0) == 0 || errno != ESRCH)) {
@@ -3494,7 +3676,7 @@ index f4925b66..8553a8b4 100644
  - (Window) windowHandle {
      return _window;
  }
-@@ -478,6 +929,15 @@ static NSData *makeWindowIcon() {
+@@ -478,6 +938,15 @@ static NSData *makeWindowIcon() {
                        frame.size.width, frame.size.height);
      [self invalidateContextWithNewSize: frame.size];
      _frame = frame;
@@ -3510,7 +3692,7 @@ index f4925b66..8553a8b4 100644
  }
  
  - (void) setHasShadow: (BOOL) value {
-@@ -559,7 +1019,29 @@ static NSData *makeWindowIcon() {
+@@ -559,7 +1028,29 @@ static NSData *makeWindowIcon() {
      XRaiseWindow(_display, _window);
  }
  
@@ -3540,7 +3722,7 @@ index f4925b66..8553a8b4 100644
      Atom wmState = XInternAtom(_display, "_NET_WM_STATE", FALSE);
      Atom hiddenState = XInternAtom(_display, "_NET_WM_STATE_HIDDEN", FALSE);
  
-@@ -615,6 +1097,12 @@ static NSData *makeWindowIcon() {
+@@ -615,6 +1106,12 @@ static NSData *makeWindowIcon() {
  }
  
  - (void) openGLFlushBuffer {
@@ -3553,7 +3735,7 @@ index f4925b66..8553a8b4 100644
      CGLError error;
  
      CGLContextObj prevContext = CGLGetCurrentContext();
-@@ -666,6 +1154,7 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
+@@ -666,6 +1163,7 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
  }
  
  - (void) frameChanged {
@@ -4587,7 +4769,7 @@ index e1112f40..3a4fa2d6 100644
  COREGRAPHICS_EXPORT CGImageRef CGWindowListCreateImageFromArray(CGRect screenBounds, CFArrayRef  windowArray, CGWindowImageOption imageOption);
  
 diff --git a/CoreText/CMakeLists.txt b/CoreText/CMakeLists.txt
-index 1ec11620..08a238ca 100644
+index 1ec11620..af21f5b3 100644
 --- a/CoreText/CMakeLists.txt
 +++ b/CoreText/CMakeLists.txt
 @@ -28,7 +28,6 @@ set(CoreText_sources
@@ -4598,6 +4780,12 @@ index 1ec11620..08a238ca 100644
  )
  
  set_source_files_properties(${CoreText_sources} LANGUAGE C)
+@@ -58,4 +57,5 @@ add_framework(CoreText
+ 		Onyx2D
+ 		# native
+ 		FreeType
++		fontconfig
+ )
 diff --git a/CoreText/CTFont.m b/CoreText/CTFont.m
 index 94ddabf9..fa018d3d 100644
 --- a/CoreText/CTFont.m
@@ -5236,10 +5424,19 @@ index 94ddabf9..fa018d3d 100644
  
  CFTypeID CTFontGetTypeID(void)
 diff --git a/CoreText/CTFontDescriptor.m b/CoreText/CTFontDescriptor.m
-index 8866ce59..eb8a101c 100644
+index 8866ce59..62dcf226 100644
 --- a/CoreText/CTFontDescriptor.m
 +++ b/CoreText/CTFontDescriptor.m
-@@ -24,9 +24,23 @@ const CFStringRef kCTFontEnabledAttribute = CFSTR("NSCTFontEnabledAttribute");
+@@ -1,6 +1,7 @@
+ #import <CoreText/CTFontDescriptor.h>
+ 
+-#include <stdio.h>
++#import <Foundation/Foundation.h>
++#import <Onyx2D/O2Font_freetype.h>
+ 
+ const CFStringRef kCTFontURLAttribute = CFSTR("NSCTFontFileURLAttribute");
+ const CFStringRef kCTFontNameAttribute = CFSTR("NSFontNameAttribute");
+@@ -24,9 +25,103 @@ const CFStringRef kCTFontEnabledAttribute = CFSTR("NSCTFontEnabledAttribute");
  const CFStringRef kCTFontFormatAttribute = CFSTR("NSCTFontFormatAttribute");
  const CFStringRef kCTFontRegistrationScopeAttribute = CFSTR("NSCTFontRegistrationScopeAttribute");
  const CFStringRef kCTFontPriorityAttribute = CFSTR("NSCTFontPriorityAttribute");
@@ -5264,17 +5461,99 @@ index 8866ce59..eb8a101c 100644
 +    if (value)
 +        CFRetain(value);
 +    return value;
++}
++
++/* Enumerate actual installed faces, rather than returning the query itself.
++ * FcFontList does not substitute an unrelated font for a missing family. */
++CFArrayRef CTFontDescriptorCreateMatchingFontDescriptors(CTFontDescriptorRef descriptor,
++                                                        CFSetRef mandatoryAttributes)
++{
++    if (!descriptor)
++        return NULL;
++    NSDictionary *query = (NSDictionary *)descriptor;
++    FcPattern *pattern = FcPatternCreate();
++    const CFStringRef keys[] = { kCTFontFamilyNameAttribute, kCTFontNameAttribute,
++                                kCTFontStyleNameAttribute, kCTFontDisplayNameAttribute };
++    const char *properties[] = { FC_FAMILY, FC_POSTSCRIPT_NAME, FC_STYLE, FC_FULLNAME };
++    for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i) {
++        id value = [query objectForKey:(id)keys[i]];
++        if ([value isKindOfClass:[NSString class]])
++            FcPatternAddString(pattern, properties[i], (const FcChar8 *)[value UTF8String]);
++    }
++    FcObjectSet *objects = FcObjectSetBuild(FC_FAMILY, FC_POSTSCRIPT_NAME,
++                                           FC_STYLE, FC_FULLNAME, FC_FILE, NULL);
++    FcFontSet *fonts = FcFontList(O2FontSharedFontConfig(), pattern, objects);
++    CFMutableArrayRef matchesArray = CFArrayCreateMutable(NULL, 0, &kCFTypeArrayCallBacks);
++    for (int i = 0; fonts && i < fonts->nfont; ++i) {
++        NSMutableDictionary *attributes = [NSMutableDictionary dictionary];
++        for (unsigned j = 0; j < sizeof(keys) / sizeof(keys[0]); ++j) {
++            FcChar8 *text;
++            if (FcPatternGetString(fonts->fonts[i], properties[j], 0, &text) == FcResultMatch) {
++                NSString *value = [NSString stringWithUTF8String:(const char *)text];
++                if (value) [attributes setObject:value forKey:(id)keys[j]];
++            }
++        }
++        FcChar8 *file;
++        if (FcPatternGetString(fonts->fonts[i], FC_FILE, 0, &file) == FcResultMatch) {
++            NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:(const char *)file]];
++            if (url) [attributes setObject:url forKey:(id)kCTFontURLAttribute];
++        }
++        /* Point size is a request, not an installed-face property. */
++        id size = [query objectForKey:(id)kCTFontSizeAttribute];
++        if (size) [attributes setObject:size forKey:(id)kCTFontSizeAttribute];
++        BOOL matches = YES;
++        for (id key in (NSSet *)mandatoryAttributes) {
++            id expected = [query objectForKey:key];
++            if (!expected || ![expected isEqual:[attributes objectForKey:key]]) {
++                matches = NO;
++                break;
++            }
++        }
++        if (matches) {
++            CTFontDescriptorRef match = CTFontDescriptorCreateWithAttributes((CFDictionaryRef)attributes);
++            CFArrayAppendValue(matchesArray, match);
++            CFRelease(match);
++        }
++    }
++    if (fonts) FcFontSetDestroy(fonts);
++    FcObjectSetDestroy(objects);
++    FcPatternDestroy(pattern);
++    return matchesArray;
++}
++
++CTFontDescriptorRef CTFontDescriptorCreateMatchingFontDescriptor(CTFontDescriptorRef descriptor,
++                                                                CFSetRef mandatoryAttributes)
++{
++    CFArrayRef matches = CTFontDescriptorCreateMatchingFontDescriptors(descriptor, mandatoryAttributes);
++    CTFontDescriptorRef result = NULL;
++    if (matches) {
++        if (CFArrayGetCount(matches))
++            result = (CTFontDescriptorRef)CFRetain(CFArrayGetValueAtIndex(matches, 0));
++        CFRelease(matches);
++    }
++    return result;
++}
++
++CFTypeRef CTFontDescriptorCopyLocalizedAttribute(CTFontDescriptorRef descriptor,
++                                                CFStringRef attribute, CFStringRef *language)
++{
++    /* Fall back to the canonical name when localized font metadata is absent.
++     * A NULL language output is valid (Chromium uses it for family names). */
++    if (language) *language = NULL;
++    return CTFontDescriptorCopyAttribute(descriptor, attribute);
  }
 diff --git a/CoreText/CTFontManager.m b/CoreText/CTFontManager.m
-index 943e1b78..5c295cbf 100644
+index 943e1b78..049665fb 100644
 --- a/CoreText/CTFontManager.m
 +++ b/CoreText/CTFontManager.m
-@@ -1,17 +1,24 @@
+@@ -1,23 +1,43 @@
  #import <CoreText/CTFontManager.h>
 +#import <CoreText/CTFontDescriptor.h>
 +#import <Foundation/NSString.h>
 +#import <Foundation/NSDictionary.h>
 +#import <Foundation/NSData.h>
++#import <Foundation/NSSet.h>
++#import <Foundation/NSArray.h>
  
  const CFStringRef kCTFontManagerRegisteredFontsChangedNotification = CFSTR("CTFontManagerFontChangedNotification");
  
@@ -5298,7 +5577,26 @@ index 943e1b78..5c295cbf 100644
  }
  
  CFArrayRef CTFontManagerCopyAvailableFontFamilyNames(void)
-@@ -25,3 +32,118 @@ bool CTFontManagerRegisterFontsForURL(CFURLRef fontURL, CTFontManagerScope scope
+ {
+-    printf("STUB %s\n", __PRETTY_FUNCTION__);
+-    return nil;
++    CFDictionaryRef empty = CFDictionaryCreate(NULL, NULL, NULL, 0,
++        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
++    CTFontDescriptorRef query = CTFontDescriptorCreateWithAttributes(empty);
++    CFArrayRef descriptors = CTFontDescriptorCreateMatchingFontDescriptors(query, NULL);
++    NSMutableSet *families = [NSMutableSet set];
++    for (NSDictionary *descriptor in (NSArray *)descriptors) {
++        id family = [descriptor objectForKey:(id)kCTFontFamilyNameAttribute];
++        if (family) [families addObject:family];
++    }
++    CFRelease(query);
++    CFRelease(empty);
++    if (descriptors) CFRelease(descriptors);
++    return (CFArrayRef)[[[families allObjects] sortedArrayUsingSelector:@selector(compare:)] copy];
+ }
+ 
+ bool CTFontManagerRegisterFontsForURL(CFURLRef fontURL, CTFontManagerScope scope, CFErrorRef * error)
+@@ -25,3 +45,118 @@ bool CTFontManagerRegisterFontsForURL(CFURLRef fontURL, CTFontManagerScope scope
      printf("STUB %s\n", __PRETTY_FUNCTION__);
      return false;
  }
@@ -5575,9 +5873,15 @@ index 33dc18c6..78887dd8 100644
  
  @end
 diff --git a/CoreText/include/CoreText/CTFontDescriptor.h b/CoreText/include/CoreText/CTFontDescriptor.h
-index b2688960..61dfef1a 100644
+index b2688960..fee68509 100644
 --- a/CoreText/include/CoreText/CTFontDescriptor.h
 +++ b/CoreText/include/CoreText/CTFontDescriptor.h
+@@ -1,4 +1,4 @@
+-#import <CoreFoundation/CFString.h>
++#import <CoreFoundation/CoreFoundation.h>
+ #import <CoreText/CoreTextExport.h>
+ #import <CoreText/CTFontTraits.h>
+ 
 @@ -24,6 +24,19 @@ CORETEXT_EXPORT const CFStringRef kCTFontEnabledAttribute;
  CORETEXT_EXPORT const CFStringRef kCTFontFormatAttribute;
  CORETEXT_EXPORT const CFStringRef kCTFontRegistrationScopeAttribute;
@@ -5598,11 +5902,15 @@ index b2688960..61dfef1a 100644
  
  CF_IMPLICIT_BRIDGING_ENABLED
  
-@@ -39,5 +52,6 @@ typedef enum CTFontOrientation : uint32_t {
+@@ -39,5 +52,10 @@ typedef enum CTFontOrientation : uint32_t {
  } CTFontOrientation;
  
  CORETEXT_EXPORT CFTypeRef CTFontDescriptorCopyAttribute(CTFontDescriptorRef descriptor, CFStringRef attribute);
 +CORETEXT_EXPORT CTFontDescriptorRef CTFontDescriptorCreateWithAttributes(CFDictionaryRef attributes);
++
++CORETEXT_EXPORT CFArrayRef CTFontDescriptorCreateMatchingFontDescriptors(CTFontDescriptorRef descriptor, CFSetRef mandatoryAttributes);
++CORETEXT_EXPORT CTFontDescriptorRef CTFontDescriptorCreateMatchingFontDescriptor(CTFontDescriptorRef descriptor, CFSetRef mandatoryAttributes);
++CORETEXT_EXPORT CFTypeRef CTFontDescriptorCopyLocalizedAttribute(CTFontDescriptorRef descriptor, CFStringRef attribute, CFStringRef *language);
  
  CF_IMPLICIT_BRIDGING_DISABLED
 diff --git a/CoreText/include/CoreText/KTFont.h b/CoreText/include/CoreText/KTFont.h
@@ -5957,10 +6265,10 @@ index 039d8c94..b518c961 100644
  #import <fontconfig/fontconfig.h>
  
 diff --git a/QuartzCore/CALayer.m b/QuartzCore/CALayer.m
-index 5dcac115..7cc63b0b 100644
+index 5dcac115..5de4f03f 100644
 --- a/QuartzCore/CALayer.m
 +++ b/QuartzCore/CALayer.m
-@@ -1,8 +1,234 @@
+@@ -1,8 +1,243 @@
  #import <Foundation/NSDictionary.h>
 +#import <Foundation/NSInvocation.h>
 +#import <Foundation/NSMethodSignature.h>
@@ -6032,6 +6340,15 @@ index 5dcac115..7cc63b0b 100644
 +    }
 +    size_t width = IOSurfaceGetWidth(surface);
 +    size_t height = IOSurfaceGetHeight(surface);
++    if (getenv("DARLING_UI_GEOMETRY_TRACE")) {
++        static __thread size_t previousWidth, previousHeight;
++        if (width != previousWidth || height != previousHeight) {
++            fprintf(stderr, "UI_GEOMETRY surface pid=%d pixels=%zux%zu route=%s\n",
++                getpid(), width, height, readback ? "gpu-readback" : "software");
++            previousWidth = width;
++            previousHeight = height;
++        }
++    }
 +    size_t rowBytes = IOSurfaceGetBytesPerRow(surface);
 +    size_t dataSize = rowBytes * height;
 +    void *base = IOSurfaceGetBaseAddress(surface);
@@ -6195,7 +6512,7 @@ index 5dcac115..7cc63b0b 100644
  
  NSString *const kCAFilterLinear = @"linear";
  NSString *const kCAFilterNearest = @"nearest";
-@@ -61,13 +287,22 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -61,13 +296,22 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
  }
  
  - (void) setSublayers: (NSArray *) sublayers {
@@ -6219,7 +6536,19 @@ index 5dcac115..7cc63b0b 100644
  }
  
  - (id<CALayerDelegate>) delegate {
-@@ -171,14 +406,73 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -117,6 +361,11 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+             [self addAnimation: action forKey: @"bounds"];
+     }
+ 
++    if (!CGRectEqualToRect(_bounds, value) && getenv("DARLING_UI_GEOMETRY_TRACE") &&
++        (value.size.width >= 256 || value.size.height >= 256))
++        fprintf(stderr, "UI_GEOMETRY layer pid=%d class=%s bounds=%.0fx%.0f transform=%.3fx%.3f\n",
++            getpid(), class_getName([self class]), value.size.width, value.size.height,
++            _transform.m11, _transform.m22);
+     _bounds = value;
+ }
+ 
+@@ -171,14 +420,73 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
      _opaque = value;
  }
  
@@ -6293,7 +6622,19 @@ index 5dcac115..7cc63b0b 100644
  }
  
  - (CATransform3D) transform {
-@@ -236,6 +530,10 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -186,6 +494,11 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+ }
+ 
+ - (void) setTransform: (CATransform3D) value {
++    if (getenv("DARLING_UI_GEOMETRY_TRACE") &&
++        (_bounds.size.width >= 256 || _bounds.size.height >= 256))
++        fprintf(stderr, "UI_GEOMETRY transform pid=%d class=%s bounds=%.0fx%.0f scale=%.3fx%.3f\n",
++            getpid(), class_getName([self class]), _bounds.size.width, _bounds.size.height,
++            value.m11, value.m22);
+     _transform = value;
+ }
+ 
+@@ -236,6 +549,10 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
  }
  
  - (void) dealloc {
@@ -6304,7 +6645,7 @@ index 5dcac115..7cc63b0b 100644
      [_sublayers release];
      [_animations release];
      [_minificationFilter release];
-@@ -258,6 +556,33 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -258,6 +575,33 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
      [self setSublayers: [_sublayers arrayByAddingObject: layer]];
  }
  
@@ -6338,7 +6679,7 @@ index 5dcac115..7cc63b0b 100644
  - (void) replaceSublayer: (CALayer *) layer with: (CALayer *) other {
      NSMutableArray *layers = [_sublayers mutableCopy];
      NSUInteger index = [_sublayers indexOfObjectIdenticalTo: layer];
-@@ -298,9 +623,14 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -298,9 +642,14 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
  }
  
  - (void) removeFromSuperlayer {
@@ -6354,7 +6695,7 @@ index 5dcac115..7cc63b0b 100644
  }
  
  - (void) setNeedsDisplay {
-@@ -319,6 +649,19 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -319,6 +668,19 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
      [_context startTimerIfNeeded];
  }
  
@@ -6374,7 +6715,7 @@ index 5dcac115..7cc63b0b 100644
  - (CAAnimation *) animationForKey: (NSString *) key {
      return [_animations objectForKey: key];
  }
-@@ -364,4 +707,119 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -364,4 +726,119 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
      _textureId = value;
  }
  
@@ -7881,3 +8222,34 @@ index ad5e4f9d..dbd997aa 100644
 -
 -@end
 \ No newline at end of file
+diff --git a/AppKit/NSGeometryTrace.h b/AppKit/NSGeometryTrace.h
+new file mode 100644
+index 00000000..a51a9241
+--- /dev/null
++++ b/AppKit/NSGeometryTrace.h
+@@ -0,0 +1,25 @@
++/* Opt-in runtime geometry diagnostics; never log view text or client data. */
++#ifndef DARLING_NS_GEOMETRY_TRACE_H
++#define DARLING_NS_GEOMETRY_TRACE_H
++#include <stdarg.h>
++#include <stdio.h>
++#include <stdlib.h>
++
++static inline void DarlingGeometryTrace(const char *format, ...) {
++    if (!getenv("DARLING_UI_GEOMETRY_TRACE"))
++        return;
++    va_list args, copy;
++    va_start(args, format);
++    va_copy(copy, args);
++    vfprintf(stderr, format, args);
++    va_end(args);
++    /* Clients may redirect stderr to a non-log descriptor. Keep a copy in
++     * the guest's temporary directory so their resize events remain visible. */
++    FILE *file = fopen("/tmp/darling-ui-geometry.log", "a");
++    if (file) {
++        vfprintf(file, format, copy);
++        fclose(file);
++    }
++    va_end(copy);
++}
++#endif

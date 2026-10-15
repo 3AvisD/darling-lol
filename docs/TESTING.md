@@ -15,6 +15,46 @@ python3 tools/riot-foundation-installer-offline-check.py
 
 The patch check uses temporary base indexes and does not reset or modify the source checkout. The launcher check uses stub commands and never starts or contacts Riot or Darling. It checks installed-client and first-time-installer launches, strips inherited `DYLD_INSERT_LIBRARIES` even with the old VPX opt-in set, and preserves Darling runtime library/framework paths. The memory-installer check imports the installer and exercises its policy (default source is the prepared artifact; the artifact is never a destination of a different library) in temporary directories. The Foundation-installer check does the same for the overlay installer: it seeds a temporary framework from a stub SDK, replaces `Versions/C/Foundation`, keeps the standard symlinks, stages a backup, treats a re-run as current and refuses a non-Mach-O source. The installer handoff mock covers 28 scenarios, including HTTP 409, interrupted verification and preserving active downloads.
 
+## CoreText font-list and AppKit resize regressions
+
+After preparing the source and configuring the runtime tools:
+
+```sh
+python3 build/runtime/tools/build-riot-coretext-runtime.py
+python3 build/runtime/tools/build-riot-appkit-runtime.py
+```
+
+After installing and activating the runtime with both clients and the game closed, run the standalone probes (replace `me` and the checkout path):
+
+```sh
+darling shell env DYLD_FRAMEWORK_PATH=/Users/me/RuntimeFrameworks \
+  /Volumes/SystemRoot/path/to/darling-lol/build/riot-coretext-font-list-check
+darling shell env DYLD_FRAMEWORK_PATH=/Users/me/RuntimeFrameworks \
+  /Volumes/SystemRoot/path/to/darling-lol/build/riot-window-layout-check
+```
+
+Expected: `CORETEXT_FONT_LIST pass=1` with nonzero family/face counts (306/1124 on the development host), `VIEW_LAYER_RESIZE initial=1600x900 pass=1`, `NATIVE_RESIZE_ORDER size=1600x900 pass=1` `CONTENT_SIBLING_RESIZE ... pass=1` and `WINDOW_LAYOUT_CHECK ... pass=1`.
+
+The font probe reproduces Chromium's installed-family enumeration, mandatory family matching and localized-name lookup with a null language output. It checks ownership of the single-match result and that a nonexistent mandatory family produces no substitute. The resize probe checks backing-layer bounds immediately after frame/bounds changes, including a scaled view and a child layer, without relying on input or coordinate conversion to refresh them. It also verifies that native parent size is current during child layout, and that adding an overlay sibling after the content view does not redirect subsequent content resizing into that overlay. The old sibling selection left content at 1600×900 while stretching the 30×20 overlay to 1280×720; the corrected layout resizes the content and preserves the overlay. Before the fixes, these checks report a stale 1280×720 layer and native parent after a 1600×900 resize. The `FRAME_SIZE_HOOK` check uses a subclass whose `setFrameSize:` publishes its viewport size. It checks growth and shrinkage through parent autoresizing, direct `setFrame:`, and direct `setFrameSize:`. Before component-setter dispatch was corrected only the final direct size setter reached the subclass (one callback); afterward all four updates do, with current geometry visible inside the callback. No probe launches or contacts Riot/League. The user confirmed that the language dropdown and League window resizing work after the final X11 correction (2026-10-15). The practice-tool crash remains unresolved.
+
+### Presentation publisher handoff
+
+With clients closed, run `build/riot-client-resize-check --handoff` through Darling with the normal runtime overrides. This creates an owned window and two fixture frame slots. The live software owner first supplies a 1280×720 main frame, then switches to a 262×131 popup; another slot supplies the resized main frame without the software flag. The test samples its own window beyond the original frame extent and checks generation colors across growth and shrinkage. The old selector reports black at the 1600×900 sample; the correction passes all four sizes. Repeat with `RCLOL_XSHM=0` and with `DARLING_XSHM_LIBRARY` pointing to the normal transport to cover both paths. The fixtures remove their own frame slots on exit; they do not read client pixels or send input.
+
+### Pixels after a window resize
+
+`python3 build/runtime/tools/build-riot-client-resize-check.py` builds an independent AppKit window and IOSurface publisher. With clients closed and a display at least 1600×900, run it with the same framework/library overrides and `DARLING_XSHM_LIBRARY=/Users/me/libDarlingXShm.dylib`, `DARLING_CA_PRESENT_AT_COMMIT=1`, `DARLING_CA_SKIP_LOCAL_IOSURFACE_RENDER=1`. The default mode publishes software pixels. For the GPU path add `--gpu` and set `RCLOL_GPU_DIRECT_PRESENT=1 RCLOL_GPU_DIRECT_ASYNC=1` in the guest environment.
+
+The probe cycles through 1280×720, 1600×900, 1024×576 and 1280×720. Each stage changes the frame color and samples its own X11 window near the bottom-right corner, beyond the original frame's extent when growing. It waits up to 2.5 seconds for presentation and prints `RESIZE_PIXEL ... pass=1` for every stage. This verifies presented pixels rather than only view properties. Success does not reproduce League's own resize callbacks; the reported League UI failure remains open, with the opt-in [geometry trace](TROUBLESHOOTING.md#language-dropdown-closes-riot-or-client-resize-leaves-a-clipped-ui) needed to locate the remaining mismatch.
+
+## Legacy operating-system version query
+
+```sh
+python3 build/runtime/tools/build-riot-carboncore-runtime.py
+```
+
+After installing and activating CarbonCore, run the independent `build/riot-gestalt-version-check` through Darling with the normal framework/library overrides. Expected on the current kernel: `GESTALT_VERSION product=14.7 version=14.7.0 packed=0x1470 architecture=10 pass=1`. It compares the separate version selectors against `kern.osproductversion`, checks packed BCD, confirms architecture remains a separate result, and covers null outputs and unknown selectors. The previous implementation returned 10 for every version component and the packed selector. The probe does not launch or contact Riot. Passing it establishes the API correction, not Vanguard compatibility.
+
 ## Standalone guest probes
 
 Build and install the base/runtime first. Native probes are built by the incremental runtime scripts. With the default guest username, run a probe like this (replace `me` and the host checkout path):
