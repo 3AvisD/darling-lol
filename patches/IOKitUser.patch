@@ -7,10 +7,10 @@ index 81ed8f7..3120abb 100644
      Boolean		            cfReusedPort = false;
  
 +#ifdef DARLING
-+    /* Fail soft instead of crashing: without iokitd some registry/power
-+     * lookups never produce a port, and callers (e.g. Chromium's power
-+     * monitor) pass the NULL through unchecked. CFRunLoopAddSource
-+     * already ignores NULL sources, so returning NULL here is safe. */
++    /* A notification port can still be absent when allocation fails or
++     * the IOKit service is unavailable. Keep the accessor tolerant of
++     * that failure; CFRunLoopAddSource already ignores NULL sources.
++     * Normal power registration is implemented by iokitd. */
 +    if (!notify)
 +        return NULL;
 +#endif

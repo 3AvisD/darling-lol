@@ -64,6 +64,59 @@ Expected: `warm_empty_allocations=0 single_packet_allocations=2`, correct creden
 
 The same source passed AddressSanitizer/UndefinedBehaviorSanitizer and leak detection. Allocation counts depend on this fixture/compiler/library; preserve the no-wasted-slot property rather than interpreting them as game performance. See [setup](SETUP.md#updating-an-existing-runtime) for server build/install/activation.
 
+## System sleep/wake notifications
+
+The power monitor uses `IORegisterForSystemPower`, an `IOPMrootDomain` user
+client and standard IOKit interest messages. `iokitd` listens to logind's
+`PrepareForSleep` signals on the host system bus. A delay inhibitor stays open
+until every notified application acknowledges sleep or the deadline expires.
+Wake notifications arrive in `SystemWillPowerOn`, `SystemHasPoweredOn` order.
+Registration also works without logind, with no host events in that case.
+
+Build the runtime and standalone probes:
+
+```sh
+cmake --build build/darling-src/build --target darlingserver iokitd --parallel 3
+python3 tools/build-riot-power-notify-check.py
+cc -Wall -Wextra -Werror -pthread \
+  -I build/darling-src/src/external/iokitd/src \
+  tools/riot-logind-sleep-check.c \
+  build/darling-src/src/external/iokitd/src/LogindSleep.c \
+  $(pkg-config --cflags --libs libsystemd) -o build/riot-logind-sleep-check
+build/riot-logind-sleep-check
+```
+
+The host check uses a private D-Bus daemon and fake logind. It covers absent
+services, delay-lock ownership, acknowledgement deadlines, stale
+acknowledgements, repeated sleep/wake, a logind restart, a full system-bus
+restart and a sleep signal during startup timeout discovery. Expected:
+`LOGIND_SLEEP PASS checks=57 failures=0`. It also runs with
+`-fsanitize=address,undefined`.
+
+`IOServiceOpen` sends an empty out-of-line descriptor. Older Darling servers
+reject that descriptor with `0x400` before the request reaches `iokitd`.
+Install the rebuilt server with Darling stopped, using the server installer in
+[setup](SETUP.md#updating-an-existing-runtime), before running:
+
+```sh
+python3 tools/riot-power-integration-check.py
+```
+
+The integration check creates its own prefix, copies the built `iokitd` into
+it and connects it exclusively to fake logind. It never suspends the host,
+starts Riot or uses the normal Darling prefix. Expected: `POWER_INTEGRATION
+PASS`, covering a full notification queue, two clients, dead destinations,
+failed-registration cleanup, the acknowledgement timeout, deregistration during
+sleep and sleep with no clients. Fixture logs stay under
+`build/power-integration-*`; Darling's overlay work directory may require root
+to remove.
+
+The integration check passed against the installed rebuilt server without an
+interposer. Its bootstrap run can also acquire an inhibitor, so readiness
+requires a new lock from the persistent launcher plus confirmation that its
+shell has started. Lock numbering is relative to that launcher, rather than
+assuming that the first recorded lock belongs to the test clients.
+
 ## Host URL hand-off regression
 
 LaunchServices' D-Bus hand-off code (`LSHostOpenBus.c`) builds natively against the host's libsystemd. The check starts a private `dbus-daemon` with no service directories and a fake portal/systemd service, so nothing real is activated and no browser opens:

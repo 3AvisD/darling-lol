@@ -1031,7 +1031,7 @@ index bbaab01..4f01234 100644
  };
  
 diff --git a/duct-tape/xnu/osfmk/ipc/ipc_kmsg.c b/duct-tape/xnu/osfmk/ipc/ipc_kmsg.c
-index 7c2559b..712ff8f 100644
+index 7c2559b..202d5dc 100644
 --- a/duct-tape/xnu/osfmk/ipc/ipc_kmsg.c
 +++ b/duct-tape/xnu/osfmk/ipc/ipc_kmsg.c
 @@ -77,6 +77,7 @@
@@ -1053,6 +1053,17 @@ index 7c2559b..712ff8f 100644
  		mr = MACH_RCV_INVALID_DATA;
  		size = 0;
  	} else {
+@@ -3819,7 +3824,9 @@ ipc_kmsg_copyin_body(
+ 				goto clean_message;
+ 			}
+ 
+-			if ((size >= MSG_OOL_SIZE_SMALL) &&
++			/* Darling has a zero small-copy threshold. Empty OOL regions
++			 * require no allocation and must not trip the overflow check. */
++			if (size != 0 && (size >= MSG_OOL_SIZE_SMALL) &&
+ 			    (daddr->out_of_line.copy == MACH_MSG_PHYSICAL_COPY) &&
+ 			    !(daddr->out_of_line.deallocate)) {
+ 				/*
 diff --git a/duct-tape/xnu/osfmk/ipc/ipc_mqueue.c b/duct-tape/xnu/osfmk/ipc/ipc_mqueue.c
 index 98ad438..221a1be 100644
 --- a/duct-tape/xnu/osfmk/ipc/ipc_mqueue.c
