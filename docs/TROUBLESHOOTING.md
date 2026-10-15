@@ -135,6 +135,7 @@ A separate multi-window path stopped the active async presenter when another dif
 - **OpenDirectory 32-bit ivar errors:** keep `TARGET_i386=OFF`; the supported client is x86-64.
 - **Undefined empty Objective-C collection symbols:** retain the patched macOS 10.15 Objective-C runtime code generation.
 - **LLVM branch opcode errors:** retain the Indium LLVM 22/23 compatibility patch; do not replace its branch handling with an unconditional version-specific opcode.
+- **Every game shader fails to compile on LLVM 23** (r3dlog full of `Failed to compile shader`, then `Material Missing Pipeline` and a crash before the loading screen; `/tmp/metal-errors.log` shows `Unsupported LLVM value: <3 x float> zeroinitializer`): LLVM 23 represents vector splats as vector-typed `ConstantFP`/`ConstantInt`, which Iridium did not translate. Indium now splats them itself. Rebuild and reinstall the Metal/Indium pair ([setup](SETUP.md#metal-and-indium-overlays)). The offline check `python3 tools/build-riot-air-check.py --native` translates shader libraries without the game.
 - **Build process killed:** lower parallelism, for example `JOBS=2 ./scripts/build.sh` or `--parallel 1` for an incremental component build.
 - **Incremental helper cannot find `flags.make` or `link.txt`:** use Unix Makefiles, not Ninja.
 - **Prebuilt Swift file contains Git LFS pointer text:** install Git LFS and fetch the original upstream assets; pointer text is not a usable library.
