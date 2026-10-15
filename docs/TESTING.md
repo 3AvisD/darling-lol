@@ -64,6 +64,21 @@ Expected: `warm_empty_allocations=0 single_packet_allocations=2`, correct creden
 
 The same source passed AddressSanitizer/UndefinedBehaviorSanitizer and leak detection. Allocation counts depend on this fixture/compiler/library; preserve the no-wasted-slot property rather than interpreting them as game performance. See [setup](SETUP.md#updating-an-existing-runtime) for server build/install/activation.
 
+## Host URL hand-off regression
+
+LaunchServices' D-Bus hand-off code (`LSHostOpenBus.c`) builds natively against the host's libsystemd. The check starts a private `dbus-daemon` with no service directories and a fake portal/systemd service, so nothing real is activated and no browser opens:
+
+```sh
+cc -std=gnu11 -O2 -Wall -Wextra \
+  -I build/darling-src/src/frameworks/CoreServices/src/LaunchServices \
+  tools/riot-host-open-url-check.c \
+  build/darling-src/src/frameworks/CoreServices/src/LaunchServices/LSHostOpenBus.c \
+  $(pkg-config --cflags --libs libsystemd) -o build/riot-host-open-url-check
+build/riot-host-open-url-check
+```
+
+Expected: `HOST_OPEN_URL PASS checks=79 failures=0`. It covers: the portal receives the exact URL; with no portal, or a portal error, `StartTransientUnit` runs `[xdg-open, url]`; a portal timeout is not retried; rejected schemes, control characters and overlong URLs never connect to the bus; and a missing bus or libsystemd returns an error. It also covers the `/run/user/<uid>/bus` fallback when `DBUS_SESSION_BUS_ADDRESS` is unset, against a temporary directory. It needs `dbus-daemon` and the libsystemd headers.
+
 ## Host reply path regression
 
 The direct-reply checks run entirely on independent host sockets and exercise the real `src/message.cpp` (`MessageQueue::pushAndSend`, `sendMany`, `empty`):

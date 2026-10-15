@@ -2630,15 +2630,16 @@ index cf9933a84..6651d50dc 100644
  				forKey: [NSNumber numberWithInt: wd]];
  	}
 diff --git a/src/frameworks/CoreServices/src/LaunchServices/LSOpen.m b/src/frameworks/CoreServices/src/LaunchServices/LSOpen.m
-index dd78f6df4..fc25c7970 100644
+index dd78f6df4..8fa95a174 100644
 --- a/src/frameworks/CoreServices/src/LaunchServices/LSOpen.m
 +++ b/src/frameworks/CoreServices/src/LaunchServices/LSOpen.m
-@@ -19,8 +19,100 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+@@ -19,8 +19,104 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
  
  
  #include <LaunchServices/LaunchServices.h>
 +#include <LaunchServices/LaunchServicesPriv.h>
  #include <CarbonCore/MacErrors.h>
++#include "LSHostOpen.h"
  #include <stdio.h>
 +#include <string.h>
 +#include <strings.h>
@@ -2669,6 +2670,9 @@ index dd78f6df4..fc25c7970 100644
 +
 +	if (url == NULL)
 +		return paramErr;
++
++	if ((params == NULL || params->application == NULL) && _LSIsHostOpenURL(url))
++		return _LSOpenURLOnHost(url);
 +
 +	// open(1) builds URLs via +URLWithString from a raw path, which may yield
 +	// a scheme-less URL object. CFURLCopyFileSystemPath works either way.
@@ -2734,7 +2738,7 @@ index dd78f6df4..fc25c7970 100644
  
  OSStatus
  LSOpenURLsWithRole(
-@@ -31,8 +123,27 @@ LSOpenURLsWithRole(
+@@ -31,8 +127,27 @@ LSOpenURLsWithRole(
    ProcessSerialNumber * outPSNs,
    CFIndex inMaxPSNCount)
  {
@@ -2765,11 +2769,14 @@ index dd78f6df4..fc25c7970 100644
  
  OSStatus
 diff --git a/src/frameworks/CoreServices/src/LaunchServices/LaunchServices.c b/src/frameworks/CoreServices/src/LaunchServices/LaunchServices.c
-index 854fa1e7f..5a39038d3 100644
+index 854fa1e7f..8a76923c4 100644
 --- a/src/frameworks/CoreServices/src/LaunchServices/LaunchServices.c
 +++ b/src/frameworks/CoreServices/src/LaunchServices/LaunchServices.c
-@@ -21,7 +21,11 @@
+@@ -19,9 +19,14 @@
+ 
+ #include <LaunchServices/LaunchServices.h>
  #include <LaunchServices/LaunchServicesPriv.h>
++#include "LSHostOpen.h"
  #include <stdio.h>
  #include <stdlib.h>
 -#include <launch_priv.h>
@@ -2781,7 +2788,20 @@ index 854fa1e7f..5a39038d3 100644
  
  static void get_main_executable_info(CFURLRef appURL, CFStringRef *exec, CFStringRef *bundleName);
  
-@@ -108,8 +112,14 @@ OSStatus _LSLaunchApplication(CFURLRef appPath)
+@@ -77,6 +82,12 @@ OSStatus LSOpenFromURLSpec(const LSLaunchURLSpec *inLaunchSpec, CFURLRef *outLau
+ 			if (extension != NULL)
+ 				CFRelease(extension);
+ 		}
++		else if (_LSIsHostOpenURL(url))
++		{
++			temp = _LSOpenURLOnHost(url);
++			if (temp)
++				ret = temp;
++		}
+ 		else
+ 		{
+ 			printf("We can't handle this scheme yet\n");
+@@ -108,8 +119,14 @@ OSStatus _LSLaunchApplication(CFURLRef appPath)
  		CFRelease(url_plus_exec);
  		url_plus_exec = CFURLCreateCopyAppendingPathComponent(kCFAllocatorDefault, pre, executable, FALSE);
  		CFRelease(pre);
@@ -2798,7 +2818,7 @@ index 854fa1e7f..5a39038d3 100644
  
  		/* Try to use CFBundleName first */
  		if (bundleName == NULL)
-@@ -122,15 +132,19 @@ OSStatus _LSLaunchApplication(CFURLRef appPath)
+@@ -122,15 +139,19 @@ OSStatus _LSLaunchApplication(CFURLRef appPath)
  		CFStringGetFileSystemRepresentation(executable, exec, execSize);
  		argv[0] = exec;
  		argv[1] = NULL;
@@ -2822,7 +2842,7 @@ index 854fa1e7f..5a39038d3 100644
  		CFRelease(executable);
  
  	}
-@@ -184,3 +198,25 @@ err_pre_info:
+@@ -184,3 +205,25 @@ err_pre_info:
  	CFRelease(rs);
  	CFRelease(info_plist_url);
  }
@@ -8025,10 +8045,18 @@ index 7079e613e..397ec6de0 100644
  			"\treturn _elfcalls->dlsym_fatal(lib_handle, \"" << sym << "\");\n"
  			"}\n\n";
 diff --git a/src/frameworks/CoreServices/src/LaunchServices/LSInfo.m b/src/frameworks/CoreServices/src/LaunchServices/LSInfo.m
-index 4cb2a4941..f08d05a2b 100644
+index 4cb2a4941..29eef9956 100644
 --- a/src/frameworks/CoreServices/src/LaunchServices/LSInfo.m
 +++ b/src/frameworks/CoreServices/src/LaunchServices/LSInfo.m
-@@ -106,7 +106,7 @@ CFArrayRef LSCopyApplicationURLsForBundleIdentifier(CFStringRef inBundleIdentifi
+@@ -20,6 +20,7 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+ 
+ #include <LaunchServices/LaunchServices.h>
+ #include <CarbonCore/MacErrors.h>
++#include "LSHostOpen.h"
+ #include <stdio.h>
+ #include <sqlite3.h>
+ #import <Foundation/NSString.h>
+@@ -106,7 +107,7 @@ CFArrayRef LSCopyApplicationURLsForBundleIdentifier(CFStringRef inBundleIdentifi
  {
  	if (!inBundleIdentifier)
  	{
@@ -8037,7 +8065,7 @@ index 4cb2a4941..f08d05a2b 100644
  			*outError = CFErrorCreate(NULL, kCFErrorDomainOSStatus, paramErr, NULL);
  		return NULL;
  	}
-@@ -116,7 +116,7 @@ CFArrayRef LSCopyApplicationURLsForBundleIdentifier(CFStringRef inBundleIdentifi
+@@ -116,7 +117,7 @@ CFArrayRef LSCopyApplicationURLsForBundleIdentifier(CFStringRef inBundleIdentifi
  
  	if (dq == nil)
  	{
@@ -8046,7 +8074,7 @@ index 4cb2a4941..f08d05a2b 100644
  			*outError = CFErrorCreate(NULL, kCFErrorDomainOSStatus, fnfErr, NULL);
  		return NULL;
  	}
-@@ -138,7 +138,7 @@ CFArrayRef LSCopyApplicationURLsForBundleIdentifier(CFStringRef inBundleIdentifi
+@@ -138,7 +139,7 @@ CFArrayRef LSCopyApplicationURLsForBundleIdentifier(CFStringRef inBundleIdentifi
  		}
  		else
  		{
@@ -8055,7 +8083,7 @@ index 4cb2a4941..f08d05a2b 100644
  				*outError = CFErrorCreate(NULL, kCFErrorDomainOSStatus, kLSApplicationNotFoundErr, NULL);
  			retval = NULL;
  		}
-@@ -247,7 +247,7 @@ CFURLRef LSCopyDefaultApplicationURLForContentType(CFStringRef inContentType, LS
+@@ -247,7 +248,7 @@ CFURLRef LSCopyDefaultApplicationURLForContentType(CFStringRef inContentType, LS
  
  	if (dq == nil)
  	{
@@ -8064,7 +8092,7 @@ index 4cb2a4941..f08d05a2b 100644
  			*outError = CFErrorCreate(NULL, kCFErrorDomainOSStatus, fnfErr, NULL);
  		return NULL;
  	}
-@@ -275,7 +275,7 @@ CFURLRef LSCopyDefaultApplicationURLForContentType(CFStringRef inContentType, LS
+@@ -275,7 +276,7 @@ CFURLRef LSCopyDefaultApplicationURLForContentType(CFStringRef inContentType, LS
  		}
  		else
  		{
@@ -8073,7 +8101,7 @@ index 4cb2a4941..f08d05a2b 100644
  				*outError = CFErrorCreate(NULL, kCFErrorDomainOSStatus, kLSApplicationNotFoundErr, NULL);
  			retval = NULL;
  		}
-@@ -292,7 +292,7 @@ CFURLRef LSCopyDefaultApplicationURLForURL(CFURLRef inURL, LSRolesMask inRoleMas
+@@ -292,7 +293,7 @@ CFURLRef LSCopyDefaultApplicationURLForURL(CFURLRef inURL, LSRolesMask inRoleMas
  
  	if (status != noErr)
  	{
@@ -8082,3 +8110,694 @@ index 4cb2a4941..f08d05a2b 100644
  			*outError = CFErrorCreate(NULL, kCFErrorDomainOSStatus, status, NULL);
  		return NULL;
  	}
+@@ -306,6 +307,9 @@ CFURLRef LSCopyDefaultApplicationURLForURL(CFURLRef inURL, LSRolesMask inRoleMas
+ 
+ OSStatus LSGetApplicationForURL(CFURLRef inURL, LSRolesMask inRoleMask, FSRef *outAppRef, CFURLRef *outAppURL)
+ {
++	if (_LSGetHostHandlerForURL(inURL, outAppRef, outAppURL) == noErr)
++		return noErr;
++
+ 	NSString* extension = [(NSURL*) inURL pathExtension];
+ 	return LSGetApplicationForInfo(kLSUnknownType, kLSUnknownCreator, (CFStringRef) extension, inRoleMask, outAppRef, outAppURL);
+ }
+diff --git a/src/frameworks/CoreServices/src/LaunchServices/CMakeLists.txt b/src/frameworks/CoreServices/src/LaunchServices/CMakeLists.txt
+index bb7f35068..957cc9d3e 100644
+--- a/src/frameworks/CoreServices/src/LaunchServices/CMakeLists.txt
++++ b/src/frameworks/CoreServices/src/LaunchServices/CMakeLists.txt
+@@ -1,5 +1,8 @@
+ set(SUBFRAMEWORK_VERSION "A")
+ 
++# LSHostOpen.c loads the host's libsystemd through the ELF loader.
++include_directories(${CMAKE_SOURCE_DIR}/src/startup/mldr/elfcalls)
++
+ generate_sdk_subframework(LaunchServices
+ 	BASE_PATH ${coreservices_sdk_path}
+ 	VERSION ${SUBFRAMEWORK_VERSION}
+@@ -20,6 +23,8 @@ add_framework(LaunchServices
+ 		LSApplicationWorkspace.m
+ 		LSRunning.m
+ 		constants.c
++		LSHostOpen.c
++		LSHostOpenBus.c
+ 		LSInfo.m
+ 		LSOpen.m
+ 		UTType.m
+diff --git a/src/frameworks/CoreServices/src/LaunchServices/LSHostOpen.h b/src/frameworks/CoreServices/src/LaunchServices/LSHostOpen.h
+new file mode 100644
+--- /dev/null
++++ b/src/frameworks/CoreServices/src/LaunchServices/LSHostOpen.h
+@@ -0,0 +1,43 @@
++/*
++This file is part of Darling.
++
++Copyright (C) 2026 Darling developers
++
++Darling is free software: you can redistribute it and/or modify
++it under the terms of the GNU General Public License as published by
++the Free Software Foundation, either version 3 of the License, or
++(at your option) any later version.
++
++Darling is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++GNU General Public License for more details.
++
++You should have received a copy of the GNU General Public License
++along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#ifndef LS_HOST_OPEN_H_
++#define LS_HOST_OPEN_H_
++
++#include <CoreFoundation/CoreFoundation.h>
++#include <LaunchServices/LaunchServices.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* URLs with these schemes (http, https, mailto) are opened by the host desktop. */
++Boolean _LSIsHostOpenURL(CFURLRef url);
++
++/* Hands the URL to the host desktop. */
++OSStatus _LSOpenURLOnHost(CFURLRef url);
++
++/* Reports the host opener as the default application for a host-opened URL. */
++OSStatus _LSGetHostHandlerForURL(CFURLRef url, FSRef* outAppRef, CFURLRef* outAppURL);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff --git a/src/frameworks/CoreServices/src/LaunchServices/LSHostOpen.c b/src/frameworks/CoreServices/src/LaunchServices/LSHostOpen.c
+new file mode 100644
+--- /dev/null
++++ b/src/frameworks/CoreServices/src/LaunchServices/LSHostOpen.c
+@@ -0,0 +1,207 @@
++/*
++This file is part of Darling.
++
++Copyright (C) 2026 Darling developers
++
++Darling is free software: you can redistribute it and/or modify
++it under the terms of the GNU General Public License as published by
++the Free Software Foundation, either version 3 of the License, or
++(at your option) any later version.
++
++Darling is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++GNU General Public License for more details.
++
++You should have received a copy of the GNU General Public License
++along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++/*
++ * Web and mail URLs have no handler inside the prefix, so they are handed to
++ * the Linux desktop. sd-bus is used from the host's libsystemd, loaded through
++ * the ELF loader; the guest shares the host's user and network, so the
++ * session bus is reachable directly.
++ */
++
++#include "LSHostOpen.h"
++#include "LSHostOpenBus.h"
++#include <CarbonCore/MacErrors.h>
++#include <elfcalls.h>
++#include <pthread.h>
++#include <stdlib.h>
++#include <stdio.h>
++#include <string.h>
++
++extern struct elf_calls* _elfcalls;
++
++/* Where the host's root file system appears inside the prefix. */
++#define HOST_ROOT "/Volumes/SystemRoot"
++
++static struct ls_host_api host_api;
++static Boolean host_api_ready;
++static pthread_once_t host_api_once = PTHREAD_ONCE_INIT;
++
++static void load_host_api(void)
++{
++	void *systemd, *libc;
++	struct ls_host_api api;
++
++	if (_elfcalls == NULL)
++		return;
++
++	systemd = _elfcalls->dlopen("libsystemd.so.0");
++	if (systemd == NULL)
++		return;
++	libc = _elfcalls->dlopen("libc.so.6");
++	if (libc == NULL)
++	{
++		_elfcalls->dlclose(systemd);
++		return;
++	}
++
++	memset(&api, 0, sizeof(api));
++#define BIND(lib, field) \
++	if ((*(void**) &api.field = _elfcalls->dlsym(lib, #field)) == NULL) \
++		goto fail;
++	BIND(systemd, sd_bus_new);
++	BIND(systemd, sd_bus_set_address);
++	BIND(systemd, sd_bus_set_bus_client);
++	BIND(systemd, sd_bus_start);
++	BIND(systemd, sd_bus_flush_close_unref);
++	BIND(systemd, sd_bus_message_new_method_call);
++	BIND(systemd, sd_bus_message_append);
++	BIND(systemd, sd_bus_message_append_strv);
++	BIND(systemd, sd_bus_message_open_container);
++	BIND(systemd, sd_bus_message_close_container);
++	BIND(systemd, sd_bus_call);
++	BIND(systemd, sd_bus_message_unref);
++	BIND(systemd, sd_bus_error_free);
++	/* Host IDs and paths, not the prefix's view of them. */
++	BIND(libc, getuid);
++	BIND(libc, access);
++#undef BIND
++	api.getenv = getenv;
++	api.runtime_dir_root = "/run/user";
++
++	host_api = api;
++	host_api_ready = TRUE;
++	return;
++
++fail:
++	_elfcalls->dlclose(libc);
++	_elfcalls->dlclose(systemd);
++}
++
++static const struct ls_host_api* get_host_api(void)
++{
++	pthread_once(&host_api_once, load_host_api);
++	return host_api_ready ? &host_api : NULL;
++}
++
++/* Returns the absolute URL as a malloc'd UTF-8 string. */
++static char* copy_url_string(CFURLRef url)
++{
++	CFURLRef absolute;
++	CFStringRef string;
++	CFIndex size;
++	char* buffer = NULL;
++
++	if (url == NULL)
++		return NULL;
++	absolute = CFURLCopyAbsoluteURL(url);
++	if (absolute == NULL)
++		return NULL;
++
++	string = CFURLGetString(absolute);
++	size = CFStringGetMaximumSizeForEncoding(CFStringGetLength(string), kCFStringEncodingUTF8) + 1;
++	if (size <= LS_HOST_OPEN_MAX_URL_LENGTH * 4 + 1)
++	{
++		buffer = malloc(size);
++		if (buffer != NULL && !CFStringGetCString(string, buffer, size, kCFStringEncodingUTF8))
++		{
++			free(buffer);
++			buffer = NULL;
++		}
++	}
++	CFRelease(absolute);
++	return buffer;
++}
++
++Boolean _LSIsHostOpenURL(CFURLRef url)
++{
++	CFStringRef scheme;
++	Boolean result = FALSE;
++
++	if (url == NULL)
++		return FALSE;
++	scheme = CFURLCopyScheme(url);
++	if (scheme == NULL)
++		return FALSE;
++
++	result = CFStringCompare(scheme, CFSTR("http"), kCFCompareCaseInsensitive) == kCFCompareEqualTo
++		|| CFStringCompare(scheme, CFSTR("https"), kCFCompareCaseInsensitive) == kCFCompareEqualTo
++		|| CFStringCompare(scheme, CFSTR("mailto"), kCFCompareCaseInsensitive) == kCFCompareEqualTo;
++	CFRelease(scheme);
++	return result;
++}
++
++OSStatus _LSOpenURLOnHost(CFURLRef url)
++{
++	const struct ls_host_api* api;
++	char* string = copy_url_string(url);
++	int r;
++
++	if (string == NULL || _LSHostOpenValidateURL(string) < 0)
++	{
++		free(string);
++		return paramErr;
++	}
++
++	api = get_host_api();
++	if (api == NULL)
++	{
++		fprintf(stderr, "LaunchServices: cannot open URL: host libsystemd is unavailable\n");
++		free(string);
++		return kLSApplicationNotFoundErr;
++	}
++
++	r = _LSHostOpenURL(api, string, NULL);
++	free(string);
++	if (r < 0)
++	{
++		fprintf(stderr, "LaunchServices: host desktop did not accept URL (error %d)\n", -r);
++		return kLSServerCommunicationErr;
++	}
++	return noErr;
++}
++
++OSStatus _LSGetHostHandlerForURL(CFURLRef url, FSRef* outAppRef, CFURLRef* outAppURL)
++{
++	const struct ls_host_api* api;
++	const char* opener;
++	char path[256];
++
++	if (!_LSIsHostOpenURL(url))
++		return kLSApplicationNotFoundErr;
++	api = get_host_api();
++	if (api == NULL)
++		return kLSApplicationNotFoundErr;
++
++	opener = _LSHostOpenFindOpener(api);
++	snprintf(path, sizeof(path), HOST_ROOT "%s", opener ? opener : "/usr/bin/xdg-open");
++
++	if (outAppRef != NULL)
++	{
++		OSStatus status = FSPathMakeRef((const UInt8*) path, outAppRef, NULL);
++		if (status != noErr)
++			return status;
++	}
++	if (outAppURL != NULL)
++	{
++		*outAppURL = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8*) path, strlen(path), FALSE);
++		if (*outAppURL == NULL)
++			return kLSApplicationNotFoundErr;
++	}
++	return noErr;
++}
+diff --git a/src/frameworks/CoreServices/src/LaunchServices/LSHostOpenBus.h b/src/frameworks/CoreServices/src/LaunchServices/LSHostOpenBus.h
+new file mode 100644
+--- /dev/null
++++ b/src/frameworks/CoreServices/src/LaunchServices/LSHostOpenBus.h
+@@ -0,0 +1,111 @@
++/*
++This file is part of Darling.
++
++Copyright (C) 2026 Darling developers
++
++Darling is free software: you can redistribute it and/or modify
++it under the terms of the GNU General Public License as published by
++the Free Software Foundation, either version 3 of the License, or
++(at your option) any later version.
++
++Darling is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++GNU General Public License for more details.
++
++You should have received a copy of the GNU General Public License
++along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++/*
++ * Hands a URL to the host desktop over the user's D-Bus session bus.
++ *
++ * This part has no Darling or CoreFoundation dependencies: every host
++ * function comes from the table below, so it can also be built natively on
++ * Linux against libsystemd for testing. Errors are negative Linux errno
++ * values as returned by sd-bus.
++ */
++
++#ifndef LS_HOST_OPEN_BUS_H_
++#define LS_HOST_OPEN_BUS_H_
++
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define LS_HOST_OPEN_MAX_URL_LENGTH 4096
++
++/* Linux errno values; the guest's errno numbering differs. */
++#define LS_HOST_LINUX_ENOENT 2
++#define LS_HOST_LINUX_EINVAL 22
++#define LS_HOST_LINUX_ENOSYS 38
++#define LS_HOST_LINUX_ETIMEDOUT 110
++
++/* Layout of sd_bus_error. */
++struct ls_host_bus_error
++{
++	const char* name;
++	const char* message;
++	int _need_free;
++};
++
++struct ls_host_api
++{
++	/* libsystemd (sd-bus); bus and message objects are opaque */
++	int (*sd_bus_new)(void** ret);
++	int (*sd_bus_set_address)(void* bus, const char* address);
++	int (*sd_bus_set_bus_client)(void* bus, int b);
++	int (*sd_bus_start)(void* bus);
++	void* (*sd_bus_flush_close_unref)(void* bus);
++	int (*sd_bus_message_new_method_call)(void* bus, void** m, const char* destination,
++		const char* path, const char* interface, const char* member);
++	int (*sd_bus_message_append)(void* m, const char* types, ...);
++	int (*sd_bus_message_append_strv)(void* m, char** l);
++	int (*sd_bus_message_open_container)(void* m, char type, const char* contents);
++	int (*sd_bus_message_close_container)(void* m);
++	int (*sd_bus_call)(void* bus, void* m, uint64_t usec, struct ls_host_bus_error* ret_error, void** reply);
++	void* (*sd_bus_message_unref)(void* m);
++	void (*sd_bus_error_free)(struct ls_host_bus_error* e);
++
++	/* Host process environment */
++	char* (*getenv)(const char* name);
++	unsigned int (*getuid)(void);
++	int (*access)(const char* path, int mode);
++
++	/* Parent of the per-user runtime directories, normally "/run/user" */
++	const char* runtime_dir_root;
++	/* Per-call timeout; 0 selects the default */
++	uint64_t timeout_usec;
++};
++
++enum
++{
++	LS_HOST_OPEN_VIA_PORTAL = 1,
++	LS_HOST_OPEN_VIA_SYSTEMD = 2,
++};
++
++/* 1 if the URL has a scheme that is handed to the host (http, https, mailto). */
++int _LSHostOpenSchemeSupported(const char* url);
++
++/* 0 if the URL may be handed to the host, otherwise -EINVAL. */
++int _LSHostOpenValidateURL(const char* url);
++
++/* Host path of xdg-open, or NULL if it is not in the usual locations. */
++const char* _LSHostOpenFindOpener(const struct ls_host_api* api);
++
++/*
++ * Opens the URL through org.freedesktop.portal.OpenURI, or, if that fails,
++ * runs xdg-open in a transient systemd user service. Either way the handler
++ * is started by the host session, never as a child of the caller.
++ * Returns 0 and stores the method used in *method (may be NULL), or a
++ * negative errno.
++ */
++int _LSHostOpenURL(const struct ls_host_api* api, const char* url, int* method);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff --git a/src/frameworks/CoreServices/src/LaunchServices/LSHostOpenBus.c b/src/frameworks/CoreServices/src/LaunchServices/LSHostOpenBus.c
+new file mode 100644
+--- /dev/null
++++ b/src/frameworks/CoreServices/src/LaunchServices/LSHostOpenBus.c
+@@ -0,0 +1,278 @@
++/*
++This file is part of Darling.
++
++Copyright (C) 2026 Darling developers
++
++Darling is free software: you can redistribute it and/or modify
++it under the terms of the GNU General Public License as published by
++the Free Software Foundation, either version 3 of the License, or
++(at your option) any later version.
++
++Darling is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++GNU General Public License for more details.
++
++You should have received a copy of the GNU General Public License
++along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#include "LSHostOpenBus.h"
++#include <stdio.h>
++#include <string.h>
++#include <strings.h>
++#include <time.h>
++#include <unistd.h>
++
++#define DEFAULT_TIMEOUT_USEC (10ULL * 1000 * 1000)
++#define HOST_X_OK 1
++
++static const char* const supported_schemes[] = { "http:", "https:", "mailto:" };
++
++/* Passed to the transient unit so xdg-open finds the user's display. */
++static const char* const forwarded_environment[] = { "DISPLAY", "WAYLAND_DISPLAY", "XDG_CURRENT_DESKTOP" };
++
++int _LSHostOpenSchemeSupported(const char* url)
++{
++	if (url == NULL)
++		return 0;
++	for (size_t i = 0; i < sizeof(supported_schemes) / sizeof(supported_schemes[0]); i++)
++	{
++		size_t len = strlen(supported_schemes[i]);
++		if (strncasecmp(url, supported_schemes[i], len) == 0)
++			return 1;
++	}
++	return 0;
++}
++
++int _LSHostOpenValidateURL(const char* url)
++{
++	size_t len;
++
++	if (!_LSHostOpenSchemeSupported(url))
++		return -LS_HOST_LINUX_EINVAL;
++
++	len = strlen(url);
++	if (len > LS_HOST_OPEN_MAX_URL_LENGTH)
++		return -LS_HOST_LINUX_EINVAL;
++
++	for (size_t i = 0; i < len; i++)
++	{
++		unsigned char c = (unsigned char) url[i];
++		if (c < 0x20 || c == 0x7f)
++			return -LS_HOST_LINUX_EINVAL;
++	}
++	return 0;
++}
++
++const char* _LSHostOpenFindOpener(const struct ls_host_api* api)
++{
++	static const char* const candidates[] = {
++		"/usr/local/bin/xdg-open",
++		"/usr/bin/xdg-open",
++		"/bin/xdg-open",
++	};
++
++	if (api == NULL || api->access == NULL)
++		return NULL;
++	for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++)
++	{
++		if (api->access(candidates[i], HOST_X_OK) == 0)
++			return candidates[i];
++	}
++	return NULL;
++}
++
++static int api_complete(const struct ls_host_api* api)
++{
++	return api != NULL && api->sd_bus_new && api->sd_bus_set_address && api->sd_bus_set_bus_client
++		&& api->sd_bus_start && api->sd_bus_flush_close_unref && api->sd_bus_message_new_method_call
++		&& api->sd_bus_message_append && api->sd_bus_message_append_strv
++		&& api->sd_bus_message_open_container && api->sd_bus_message_close_container
++		&& api->sd_bus_call && api->sd_bus_message_unref && api->sd_bus_error_free
++		&& api->getenv && api->getuid;
++}
++
++static int open_session_bus(const struct ls_host_api* api, void** ret)
++{
++	char address[512];
++	const char* env = api->getenv("DBUS_SESSION_BUS_ADDRESS");
++	void* bus = NULL;
++	int r;
++
++	if (env != NULL && env[0] != '\0')
++	{
++		if (strlen(env) >= sizeof(address))
++			return -LS_HOST_LINUX_EINVAL;
++		strcpy(address, env);
++	}
++	else
++	{
++		const char* root = api->runtime_dir_root ? api->runtime_dir_root : "/run/user";
++		if (snprintf(address, sizeof(address), "unix:path=%s/%u/bus", root, api->getuid())
++				>= (int) sizeof(address))
++			return -LS_HOST_LINUX_EINVAL;
++	}
++
++	r = api->sd_bus_new(&bus);
++	if (r < 0)
++		return r;
++	r = api->sd_bus_set_address(bus, address);
++	if (r >= 0)
++		r = api->sd_bus_set_bus_client(bus, 1);
++	if (r >= 0)
++		r = api->sd_bus_start(bus);
++	if (r < 0)
++	{
++		api->sd_bus_flush_close_unref(bus);
++		return r;
++	}
++	*ret = bus;
++	return 0;
++}
++
++static int call(const struct ls_host_api* api, void* bus, void* m)
++{
++	struct ls_host_bus_error error = { NULL, NULL, 0 };
++	void* reply = NULL;
++	uint64_t timeout = api->timeout_usec ? api->timeout_usec : DEFAULT_TIMEOUT_USEC;
++	int r = api->sd_bus_call(bus, m, timeout, &error, &reply);
++
++	if (reply != NULL)
++		api->sd_bus_message_unref(reply);
++	api->sd_bus_error_free(&error);
++	return r < 0 ? r : 0;
++}
++
++static int open_via_portal(const struct ls_host_api* api, void* bus, const char* url)
++{
++	void* m = NULL;
++	int r = api->sd_bus_message_new_method_call(bus, &m, "org.freedesktop.portal.Desktop",
++		"/org/freedesktop/portal/desktop", "org.freedesktop.portal.OpenURI", "OpenURI");
++	if (r < 0)
++		return r;
++
++	r = api->sd_bus_message_append(m, "ss", "", url);
++	if (r >= 0)
++		r = api->sd_bus_message_append(m, "a{sv}", 0);
++	if (r >= 0)
++		r = call(api, bus, m);
++	api->sd_bus_message_unref(m);
++	return r;
++}
++
++static int append_environment(const struct ls_host_api* api, void* m)
++{
++	char storage[3][1024];
++	char* entries[4];
++	size_t count = 0;
++	int r;
++
++	for (size_t i = 0; i < sizeof(forwarded_environment) / sizeof(forwarded_environment[0]); i++)
++	{
++		const char* value = api->getenv(forwarded_environment[i]);
++		int n;
++
++		if (value == NULL || value[0] == '\0')
++			continue;
++		n = snprintf(storage[count], sizeof(storage[count]), "%s=%s", forwarded_environment[i], value);
++		if (n < 0 || n >= (int) sizeof(storage[count]))
++			continue;
++		entries[count] = storage[count];
++		count++;
++	}
++	entries[count] = NULL;
++	if (count == 0)
++		return 0;
++
++	r = api->sd_bus_message_open_container(m, 'r', "sv");
++	if (r >= 0)
++		r = api->sd_bus_message_append(m, "s", "Environment");
++	if (r >= 0)
++		r = api->sd_bus_message_open_container(m, 'v', "as");
++	if (r >= 0)
++		r = api->sd_bus_message_append_strv(m, entries);
++	if (r >= 0)
++		r = api->sd_bus_message_close_container(m);
++	if (r >= 0)
++		r = api->sd_bus_message_close_container(m);
++	return r;
++}
++
++static int open_via_systemd(const struct ls_host_api* api, void* bus, const char* url)
++{
++	static unsigned int counter;
++	struct timespec now;
++	char unit[128];
++	const char* opener = _LSHostOpenFindOpener(api);
++	void* m = NULL;
++	int r;
++
++	/* Bare names are resolved by systemd >= 248. */
++	if (opener == NULL)
++		opener = "xdg-open";
++
++	clock_gettime(CLOCK_REALTIME, &now);
++	snprintf(unit, sizeof(unit), "app-darling-openurl-%d-%llx-%u.service", (int) getpid(),
++		(unsigned long long) now.tv_sec * 1000000000ULL + (unsigned long long) now.tv_nsec,
++		__atomic_add_fetch(&counter, 1, __ATOMIC_RELAXED));
++
++	r = api->sd_bus_message_new_method_call(bus, &m, "org.freedesktop.systemd1",
++		"/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager", "StartTransientUnit");
++	if (r < 0)
++		return r;
++
++	r = api->sd_bus_message_append(m, "ss", unit, "fail");
++	if (r >= 0)
++		r = api->sd_bus_message_open_container(m, 'a', "(sv)");
++	if (r >= 0)
++		r = api->sd_bus_message_append(m, "(sv)(sv)(sv)(sv)",
++			"Description", "s", "Open URL from Darling",
++			/* Keep the handler running after xdg-open exits. */
++			"KillMode", "s", "process",
++			"CollectMode", "s", "inactive-or-failed",
++			"ExecStart", "a(sasb)", 1, opener, 2, "xdg-open", url, 0);
++	if (r >= 0)
++		r = append_environment(api, m);
++	if (r >= 0)
++		r = api->sd_bus_message_close_container(m);
++	if (r >= 0)
++		r = api->sd_bus_message_append(m, "a(sa(sv))", 0);
++	if (r >= 0)
++		r = call(api, bus, m);
++	api->sd_bus_message_unref(m);
++	return r;
++}
++
++int _LSHostOpenURL(const struct ls_host_api* api, const char* url, int* method)
++{
++	void* bus = NULL;
++	int r;
++
++	r = _LSHostOpenValidateURL(url);
++	if (r < 0)
++		return r;
++	if (!api_complete(api))
++		return -LS_HOST_LINUX_ENOSYS;
++
++	r = open_session_bus(api, &bus);
++	if (r < 0)
++		return r;
++
++	r = open_via_portal(api, bus, url);
++	if (r >= 0)
++	{
++		if (method)
++			*method = LS_HOST_OPEN_VIA_PORTAL;
++	}
++	/* A portal that timed out may still open the URL; don't open it twice. */
++	else if (r != -LS_HOST_LINUX_ETIMEDOUT)
++	{
++		r = open_via_systemd(api, bus, url);
++		if (r >= 0 && method)
++			*method = LS_HOST_OPEN_VIA_SYSTEMD;
++	}
++
++	api->sd_bus_flush_close_unref(bus);
++	return r < 0 ? r : 0;
++}
