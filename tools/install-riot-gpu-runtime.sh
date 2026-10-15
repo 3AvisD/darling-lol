@@ -8,6 +8,8 @@ python3 tools/build-m58f333-iosurface.py
 # Rebuild the native wrapper with floating-point-safe symbol resolvers.
 make -C build/darling-src/build/src/native GL -j4
 make -C build/darling-src/build/src/frameworks/CoreServices/src/LaunchServices LaunchServices -j4
+# WebAudio gain, mixing, filters and FFTs need real vDSP kernels, not stubs.
+make -C build/darling-src/build/src/frameworks/Accelerate/vecLib/vDSP vDSP -j4
 python3 tools/build-m58f327-opengl.py
 python3 tools/build-m58f336-quartzcore.py
 python3 tools/build-m58f341-corevideo.py
@@ -89,6 +91,15 @@ if [ ! -f "$launchservices_prefix.before-null-error" ]; then
 fi
 install -m755 build/darling-src/build/src/frameworks/CoreServices/src/LaunchServices/LaunchServices "$launchservices_prefix.next"
 mv "$launchservices_prefix.next" "$launchservices_prefix"
+# Accelerate re-exports libvDSP by absolute path, so replace it in the stopped prefix too.
+vdsp_prefix="$prefix_dir/System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libvDSP.dylib"
+mkdir -p "$(dirname "$vdsp_prefix")"
+if [ ! -f "$vdsp_prefix.before-vdsp" ]; then
+ if [ -f "$vdsp_prefix" ]; then cp -p "$vdsp_prefix" "$vdsp_prefix.before-vdsp"
+ else cp -p @DARLING_SDK@/System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libvDSP.dylib "$vdsp_prefix.before-vdsp"; fi
+fi
+install -m755 build/darling-src/build/src/frameworks/Accelerate/vecLib/vDSP/libvDSP.dylib "$vdsp_prefix.next"
+mv "$vdsp_prefix.next" "$vdsp_prefix"
 
 component="$guest_home/Library/Audio/Plug-Ins/Components/DarlingRiotAudio.component"
 if [ ! -d "$component" ]; then

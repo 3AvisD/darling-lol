@@ -9528,3 +9528,840 @@ index dffdd4cb2..7430f587b 100644
  	case gestaltSysArchitecture:
  #ifdef __powerpc__
  		*value = gestaltPowerPC;
+diff --git a/src/frameworks/Accelerate/vecLib/vDSP/CMakeLists.txt b/src/frameworks/Accelerate/vecLib/vDSP/CMakeLists.txt
+index 6ef701609..9bdcace68 100644
+--- a/src/frameworks/Accelerate/vecLib/vDSP/CMakeLists.txt
++++ b/src/frameworks/Accelerate/vecLib/vDSP/CMakeLists.txt
+@@ -7,7 +7,11 @@ set(DYLIB_CURRENT_VERSION "671.250.4")
+ add_darling_library(vDSP SHARED
+ 	src/vDSP.c
+ 	src/extrema.c
++	src/arith.c
++	src/fft.c
+ )
++# WebAudio calls these on the realtime render thread.
++target_compile_options(vDSP PRIVATE -O2)
+ make_fat(vDSP)
+ target_link_libraries(vDSP system)
+ install(TARGETS vDSP DESTINATION libexec/darling/usr/lib)
+diff --git a/src/frameworks/Accelerate/vecLib/vDSP/include/vDSP/vDSP.h b/src/frameworks/Accelerate/vecLib/vDSP/include/vDSP/vDSP.h
+index c6b437c5b..88505eda4 100644
+--- a/src/frameworks/Accelerate/vecLib/vDSP/include/vDSP/vDSP.h
++++ b/src/frameworks/Accelerate/vecLib/vDSP/include/vDSP/vDSP.h
+@@ -24,6 +24,51 @@
+ typedef unsigned long vDSP_Length;
+ typedef long vDSP_Stride;
+ 
++typedef struct DSPComplex {
++	float real;
++	float imag;
++} DSPComplex;
++
++typedef struct DSPSplitComplex {
++	float *realp;
++	float *imagp;
++} DSPSplitComplex;
++
++typedef int FFTDirection;
++typedef int FFTRadix;
++
++enum {
++	kFFTDirection_Forward = 1,
++	kFFTDirection_Inverse = -1
++};
++
++enum {
++	kFFTRadix2 = 0,
++	kFFTRadix3 = 1,
++	kFFTRadix5 = 2
++};
++
++typedef struct OpaqueFFTSetup *FFTSetup;
++
++void vDSP_vadd(const float *__A, vDSP_Stride __IA, const float *__B, vDSP_Stride __IB, float *__C, vDSP_Stride __IC, vDSP_Length __N);
++void vDSP_vsub(const float *__B, vDSP_Stride __IB, const float *__A, vDSP_Stride __IA, float *__C, vDSP_Stride __IC, vDSP_Length __N);
++void vDSP_vmul(const float *__A, vDSP_Stride __IA, const float *__B, vDSP_Stride __IB, float *__C, vDSP_Stride __IC, vDSP_Length __N);
++void vDSP_vsmul(const float *__A, vDSP_Stride __IA, const float *__B, float *__C, vDSP_Stride __IC, vDSP_Length __N);
++void vDSP_vsadd(const float *__A, vDSP_Stride __IA, const float *__B, float *__C, vDSP_Stride __IC, vDSP_Length __N);
++void vDSP_vsma(const float *__A, vDSP_Stride __IA, const float *__B, const float *__C, vDSP_Stride __IC, float *__D, vDSP_Stride __ID, vDSP_Length __N);
++void vDSP_svesq(const float *__A, vDSP_Stride __IA, float *__C, vDSP_Length __N);
++void vDSP_vclip(const float *__A, vDSP_Stride __IA, const float *__B, const float *__C, float *__D, vDSP_Stride __ID, vDSP_Length __N);
++void vDSP_maxmgv(const float *__A, vDSP_Stride __IA, float *__C, vDSP_Length __N);
++void vDSP_conv(const float *__A, vDSP_Stride __IA, const float *__F, vDSP_Stride __IF, float *__C, vDSP_Stride __IC, vDSP_Length __N, vDSP_Length __P);
++void vDSP_ctoz(const DSPComplex *__C, vDSP_Stride __IC, const DSPSplitComplex *__Z, vDSP_Stride __IZ, vDSP_Length __N);
++void vDSP_ztoc(const DSPSplitComplex *__Z, vDSP_Stride __IZ, DSPComplex *__C, vDSP_Stride __IC, vDSP_Length __N);
++void vDSP_zvmul(const DSPSplitComplex *__A, vDSP_Stride __IA, const DSPSplitComplex *__B, vDSP_Stride __IB, const DSPSplitComplex *__C, vDSP_Stride __IC, vDSP_Length __N, int __Conjugate);
++void vDSP_deq22(const float *__A, vDSP_Stride __IA, const float *__B, float *__C, vDSP_Stride __IC, vDSP_Length __N);
++void vDSP_deq22D(const double *__A, vDSP_Stride __IA, const double *__B, double *__C, vDSP_Stride __IC, vDSP_Length __N);
++FFTSetup vDSP_create_fftsetup(vDSP_Length __Log2n, FFTRadix __Radix);
++void vDSP_destroy_fftsetup(FFTSetup __setup);
++void vDSP_fft_zrip(FFTSetup __Setup, const DSPSplitComplex *__C, vDSP_Stride __IC, vDSP_Length __Log2N, FFTDirection __Direction);
++
+ void* vDSP_DCT_CreateSetup(void);
+ void* vDSP_DCT_Execute(void);
+ void* vDSP_DFT_CreateSetup(void);
+@@ -63,17 +108,11 @@ void* vDSP_biquadm_SetTargetsDouble(void);
+ void* vDSP_biquadm_SetTargetsSingle(void);
+ void* vDSP_blkman_window(void);
+ void* vDSP_blkman_windowD(void);
+-void* vDSP_conv(void);
+ void* vDSP_convD(void);
+-void* vDSP_create_fftsetup(void);
+ void* vDSP_create_fftsetupD(void);
+-void* vDSP_ctoz(void);
+ void* vDSP_ctozD(void);
+-void* vDSP_deq22(void);
+-void* vDSP_deq22D(void);
+ void* vDSP_desamp(void);
+ void* vDSP_desampD(void);
+-void* vDSP_destroy_fftsetup(void);
+ void* vDSP_destroy_fftsetupD(void);
+ void* vDSP_distancesq(void);
+ void* vDSP_distancesqD(void);
+@@ -117,7 +156,6 @@ void* vDSP_fft_zop(void);
+ void* vDSP_fft_zopD(void);
+ void* vDSP_fft_zopt(void);
+ void* vDSP_fft_zoptD(void);
+-void* vDSP_fft_zrip(void);
+ void* vDSP_fft_zripD(void);
+ void* vDSP_fft_zript(void);
+ void* vDSP_fft_zriptD(void);
+@@ -194,7 +232,6 @@ void* vDSP_sve_svesq(void);
+ void* vDSP_sve_svesqD(void);
+ void* vDSP_svemg(void);
+ void* vDSP_svemgD(void);
+-void* vDSP_svesq(void);
+ void* vDSP_svesqD(void);
+ void* vDSP_svs(void);
+ void* vDSP_svsD(void);
+@@ -203,7 +240,6 @@ void* vDSP_vaamD(void);
+ void* vDSP_vabs(void);
+ void* vDSP_vabsD(void);
+ void* vDSP_vabsi(void);
+-void* vDSP_vadd(void);
+ void* vDSP_vaddD(void);
+ void* vDSP_vaddi(void);
+ void* vDSP_vaddsub(void);
+@@ -216,7 +252,6 @@ void* vDSP_vasm(void);
+ void* vDSP_vasmD(void);
+ void* vDSP_vavlin(void);
+ void* vDSP_vavlinD(void);
+-void* vDSP_vclip(void);
+ void* vDSP_vclipD(void);
+ void* vDSP_vclipc(void);
+ void* vDSP_vclipcD(void);
+@@ -316,7 +351,6 @@ void* vDSP_vmsa(void);
+ void* vDSP_vmsaD(void);
+ void* vDSP_vmsb(void);
+ void* vDSP_vmsbD(void);
+-void* vDSP_vmul(void);
+ void* vDSP_vmulD(void);
+ void* vDSP_vnabs(void);
+ void* vDSP_vnabsD(void);
+@@ -350,7 +384,6 @@ void* vDSP_vrsum(void);
+ void* vDSP_vrsumD(void);
+ void* vDSP_vrvrs(void);
+ void* vDSP_vrvrsD(void);
+-void* vDSP_vsadd(void);
+ void* vDSP_vsaddD(void);
+ void* vDSP_vsaddi(void);
+ void* vDSP_vsbm(void);
+@@ -364,7 +397,6 @@ void* vDSP_vsdivD(void);
+ void* vDSP_vsdivi(void);
+ void* vDSP_vsimps(void);
+ void* vDSP_vsimpsD(void);
+-void* vDSP_vsma(void);
+ void* vDSP_vsmaD(void);
+ void* vDSP_vsmfix24(void);
+ void* vDSP_vsmfixu24(void);
+@@ -374,7 +406,6 @@ void* vDSP_vsmsb(void);
+ void* vDSP_vsmsbD(void);
+ void* vDSP_vsmsma(void);
+ void* vDSP_vsmsmaD(void);
+-void* vDSP_vsmul(void);
+ void* vDSP_vsmulD(void);
+ void* vDSP_vsort(void);
+ void* vDSP_vsortD(void);
+@@ -385,7 +416,6 @@ void* vDSP_vsq(void);
+ void* vDSP_vsqD(void);
+ void* vDSP_vssq(void);
+ void* vDSP_vssqD(void);
+-void* vDSP_vsub(void);
+ void* vDSP_vsubD(void);
+ void* vDSP_vswap(void);
+ void* vDSP_vswapD(void);
+@@ -439,7 +469,6 @@ void* vDSP_zrvmul(void);
+ void* vDSP_zrvmulD(void);
+ void* vDSP_zrvsub(void);
+ void* vDSP_zrvsubD(void);
+-void* vDSP_ztoc(void);
+ void* vDSP_ztocD(void);
+ void* vDSP_ztrans(void);
+ void* vDSP_ztransD(void);
+@@ -467,7 +496,6 @@ void* vDSP_zvmmaa(void);
+ void* vDSP_zvmmaaD(void);
+ void* vDSP_zvmov(void);
+ void* vDSP_zvmovD(void);
+-void* vDSP_zvmul(void);
+ void* vDSP_zvmulD(void);
+ void* vDSP_zvneg(void);
+ void* vDSP_zvnegD(void);
+diff --git a/src/frameworks/Accelerate/vecLib/vDSP/src/arith.c b/src/frameworks/Accelerate/vecLib/vDSP/src/arith.c
+new file mode 100644
+index 000000000..52550fb96
+--- /dev/null
++++ b/src/frameworks/Accelerate/vecLib/vDSP/src/arith.c
+@@ -0,0 +1,226 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#include <vDSP/vDSP.h>
++
++void vDSP_vadd(const float *__A, vDSP_Stride __IA, const float *__B, vDSP_Stride __IB, float *__C, vDSP_Stride __IC, vDSP_Length __N)
++{
++	if (__IA == 1 && __IB == 1 && __IC == 1)
++	{
++		for (vDSP_Length i = 0; i < __N; i++)
++			__C[i] = __A[i] + __B[i];
++	}
++	else
++	{
++		for (vDSP_Length i = 0; i < __N; i++)
++			__C[i * __IC] = __A[i * __IA] + __B[i * __IB];
++	}
++}
++
++// Apple's argument order: the subtrahend B comes first, C = A - B.
++void vDSP_vsub(const float *__B, vDSP_Stride __IB, const float *__A, vDSP_Stride __IA, float *__C, vDSP_Stride __IC, vDSP_Length __N)
++{
++	if (__IA == 1 && __IB == 1 && __IC == 1)
++	{
++		for (vDSP_Length i = 0; i < __N; i++)
++			__C[i] = __A[i] - __B[i];
++	}
++	else
++	{
++		for (vDSP_Length i = 0; i < __N; i++)
++			__C[i * __IC] = __A[i * __IA] - __B[i * __IB];
++	}
++}
++
++void vDSP_vmul(const float *__A, vDSP_Stride __IA, const float *__B, vDSP_Stride __IB, float *__C, vDSP_Stride __IC, vDSP_Length __N)
++{
++	if (__IA == 1 && __IB == 1 && __IC == 1)
++	{
++		for (vDSP_Length i = 0; i < __N; i++)
++			__C[i] = __A[i] * __B[i];
++	}
++	else
++	{
++		for (vDSP_Length i = 0; i < __N; i++)
++			__C[i * __IC] = __A[i * __IA] * __B[i * __IB];
++	}
++}
++
++void vDSP_vsmul(const float *__A, vDSP_Stride __IA, const float *__B, float *__C, vDSP_Stride __IC, vDSP_Length __N)
++{
++	const float b = *__B;
++
++	if (__IA == 1 && __IC == 1)
++	{
++		for (vDSP_Length i = 0; i < __N; i++)
++			__C[i] = __A[i] * b;
++	}
++	else
++	{
++		for (vDSP_Length i = 0; i < __N; i++)
++			__C[i * __IC] = __A[i * __IA] * b;
++	}
++}
++
++void vDSP_vsadd(const float *__A, vDSP_Stride __IA, const float *__B, float *__C, vDSP_Stride __IC, vDSP_Length __N)
++{
++	const float b = *__B;
++
++	if (__IA == 1 && __IC == 1)
++	{
++		for (vDSP_Length i = 0; i < __N; i++)
++			__C[i] = __A[i] + b;
++	}
++	else
++	{
++		for (vDSP_Length i = 0; i < __N; i++)
++			__C[i * __IC] = __A[i * __IA] + b;
++	}
++}
++
++void vDSP_vsma(const float *__A, vDSP_Stride __IA, const float *__B, const float *__C, vDSP_Stride __IC, float *__D, vDSP_Stride __ID, vDSP_Length __N)
++{
++	const float b = *__B;
++
++	if (__IA == 1 && __IC == 1 && __ID == 1)
++	{
++		for (vDSP_Length i = 0; i < __N; i++)
++			__D[i] = __A[i] * b + __C[i];
++	}
++	else
++	{
++		for (vDSP_Length i = 0; i < __N; i++)
++			__D[i * __ID] = __A[i * __IA] * b + __C[i * __IC];
++	}
++}
++
++void vDSP_svesq(const float *__A, vDSP_Stride __IA, float *__C, vDSP_Length __N)
++{
++	float sum = 0;
++
++	for (vDSP_Length i = 0; i < __N; i++)
++		sum += __A[i * __IA] * __A[i * __IA];
++	*__C = sum;
++}
++
++void vDSP_vclip(const float *__A, vDSP_Stride __IA, const float *__B, const float *__C, float *__D, vDSP_Stride __ID, vDSP_Length __N)
++{
++	const float low = *__B, high = *__C;
++
++	for (vDSP_Length i = 0; i < __N; i++)
++	{
++		float v = __A[i * __IA];
++		if (v < low)
++			v = low;
++		else if (v > high)
++			v = high;
++		__D[i * __ID] = v;
++	}
++}
++
++// Correlation, or convolution when F points at the filter's last tap with a negative stride.
++void vDSP_conv(const float *__A, vDSP_Stride __IA, const float *__F, vDSP_Stride __IF, float *__C, vDSP_Stride __IC, vDSP_Length __N, vDSP_Length __P)
++{
++	for (vDSP_Length n = 0; n < __N; n++)
++	{
++		const float *a = __A + n * __IA;
++		float sum = 0;
++
++		for (vDSP_Length p = 0; p < __P; p++)
++			sum += a[p * __IA] * __F[p * __IF];
++		__C[n * __IC] = sum;
++	}
++}
++
++// IC counts floats, so 2 is a contiguous DSPComplex array.
++void vDSP_ctoz(const DSPComplex *__C, vDSP_Stride __IC, const DSPSplitComplex *__Z, vDSP_Stride __IZ, vDSP_Length __N)
++{
++	const float *c = (const float *) __C;
++
++	for (vDSP_Length i = 0; i < __N; i++)
++	{
++		__Z->realp[i * __IZ] = c[i * __IC];
++		__Z->imagp[i * __IZ] = c[i * __IC + 1];
++	}
++}
++
++void vDSP_ztoc(const DSPSplitComplex *__Z, vDSP_Stride __IZ, DSPComplex *__C, vDSP_Stride __IC, vDSP_Length __N)
++{
++	float *c = (float *) __C;
++
++	for (vDSP_Length i = 0; i < __N; i++)
++	{
++		c[i * __IC] = __Z->realp[i * __IZ];
++		c[i * __IC + 1] = __Z->imagp[i * __IZ];
++	}
++}
++
++// C may alias A or B. Conjugate is 1 for A * B and -1 for conj(A) * B.
++void vDSP_zvmul(const DSPSplitComplex *__A, vDSP_Stride __IA, const DSPSplitComplex *__B, vDSP_Stride __IB, const DSPSplitComplex *__C, vDSP_Stride __IC, vDSP_Length __N, int __Conjugate)
++{
++	const float sign = __Conjugate == -1 ? -1.0f : 1.0f;
++
++	for (vDSP_Length i = 0; i < __N; i++)
++	{
++		const float ar = __A->realp[i * __IA], ai = sign * __A->imagp[i * __IA];
++		const float br = __B->realp[i * __IB], bi = __B->imagp[i * __IB];
++
++		__C->realp[i * __IC] = ar * br - ai * bi;
++		__C->imagp[i * __IC] = ar * bi + ai * br;
++	}
++}
++
++// Two-pole two-zero filter. A and C hold N + 2 elements; C[0] and C[1] are the initial outputs.
++void vDSP_deq22D(const double *__A, vDSP_Stride __IA, const double *__B, double *__C, vDSP_Stride __IC, vDSP_Length __N)
++{
++	const double b0 = __B[0], b1 = __B[1], b2 = __B[2], a1 = __B[3], a2 = __B[4];
++	double x1 = __A[__IA], x2 = __A[0];
++	double y1 = __C[__IC], y2 = __C[0];
++
++	for (vDSP_Length n = 2; n < __N + 2; n++)
++	{
++		const double x = __A[n * __IA];
++		const double y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
++
++		__C[n * __IC] = y;
++		x2 = x1;
++		x1 = x;
++		y2 = y1;
++		y1 = y;
++	}
++}
++
++void vDSP_deq22(const float *__A, vDSP_Stride __IA, const float *__B, float *__C, vDSP_Stride __IC, vDSP_Length __N)
++{
++	const float b0 = __B[0], b1 = __B[1], b2 = __B[2], a1 = __B[3], a2 = __B[4];
++	float x1 = __A[__IA], x2 = __A[0];
++	float y1 = __C[__IC], y2 = __C[0];
++
++	for (vDSP_Length n = 2; n < __N + 2; n++)
++	{
++		const float x = __A[n * __IA];
++		const float y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
++
++		__C[n * __IC] = y;
++		x2 = x1;
++		x1 = x;
++		y2 = y1;
++		y1 = y;
++	}
++}
+diff --git a/src/frameworks/Accelerate/vecLib/vDSP/src/basic.c b/src/frameworks/Accelerate/vecLib/vDSP/src/basic.c
+deleted file mode 100644
+index ecdd15b23..000000000
+--- a/src/frameworks/Accelerate/vecLib/vDSP/src/basic.c
++++ /dev/null
+@@ -1,36 +0,0 @@
+-/*
+- This file is part of Darling.
+-
+- Copyright (C) 2020 Lubos Dolezel
+-
+- Darling is free software: you can redistribute it and/or modify
+- it under the terms of the GNU General Public License as published by
+- the Free Software Foundation, either version 3 of the License, or
+- (at your option) any later version.
+-
+- Darling is distributed in the hope that it will be useful,
+- but WITHOUT ANY WARRANTY; without even the implied warranty of
+- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+- GNU General Public License for more details.
+-
+- You should have received a copy of the GNU General Public License
+- along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+-*/
+-
+-#include <vDSP/vDSP.h>
+-
+-void vDSP_vsadd(const float *__A, vDSP_Stride __IA, const float *__B, float *__C, vDSP_Stride __IC, vDSP_Length __N)
+-{
+-	if (__IA == 1 && __IC == 1)
+-	{
+-		#pragma clang loop vectorize(enable)
+-		for (vDSP_Length i = 0; i < __N; i++)
+-			__C[i] = __A[i] + __B[i];
+-	}
+-	else
+-	{
+-		#pragma clang loop vectorize(enable)
+-		for (vDSP_Length i = 0; i < __N; i++)
+-			__C[i * __IC] = __A[i * __IA] + __B[i * __IA];
+-	}
+-}
+diff --git a/src/frameworks/Accelerate/vecLib/vDSP/src/fft.c b/src/frameworks/Accelerate/vecLib/vDSP/src/fft.c
+new file mode 100644
+index 000000000..92873d796
+--- /dev/null
++++ b/src/frameworks/Accelerate/vecLib/vDSP/src/fft.c
+@@ -0,0 +1,162 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#include <vDSP/vDSP.h>
++#include <stdlib.h>
++#include <math.h>
++
++// Setups are shared between threads, so only read-only twiddles live here.
++struct OpaqueFFTSetup
++{
++	vDSP_Length log2n;
++	float *cosine;
++	float *sine;
++};
++
++FFTSetup vDSP_create_fftsetup(vDSP_Length __Log2n, FFTRadix __Radix)
++{
++	if (__Radix != kFFTRadix2 || __Log2n > 30)
++		return NULL;
++
++	const size_t n = (size_t) 1 << __Log2n;
++	const size_t half = n > 1 ? n / 2 : 1;
++	struct OpaqueFFTSetup *setup = malloc(sizeof(*setup) + 2 * half * sizeof(float));
++
++	if (!setup)
++		return NULL;
++	setup->log2n = __Log2n;
++	setup->cosine = (float *) (setup + 1);
++	setup->sine = setup->cosine + half;
++	for (size_t j = 0; j < half; j++)
++	{
++		const double angle = 2.0 * M_PI * (double) j / (double) n;
++		setup->cosine[j] = cos(angle);
++		setup->sine[j] = sin(angle);
++	}
++	return setup;
++}
++
++void vDSP_destroy_fftsetup(FFTSetup __setup)
++{
++	free(__setup);
++}
++
++// In-place radix-2 complex FFT of 2^log2m points, e^-i for forward and e^+i for inverse, unscaled.
++static void complex_fft(const struct OpaqueFFTSetup *setup, float *re, float *im, vDSP_Stride stride, vDSP_Length log2m, int inverse)
++{
++	const size_t m = (size_t) 1 << log2m;
++	const size_t full = (size_t) 1 << setup->log2n;
++
++	for (size_t i = 1, j = 0; i < m; i++)
++	{
++		size_t bit = m >> 1;
++		for (; j & bit; bit >>= 1)
++			j ^= bit;
++		j ^= bit;
++		if (i < j)
++		{
++			float t = re[i * stride];
++			re[i * stride] = re[j * stride];
++			re[j * stride] = t;
++			t = im[i * stride];
++			im[i * stride] = im[j * stride];
++			im[j * stride] = t;
++		}
++	}
++
++	for (size_t len = 2; len <= m; len <<= 1)
++	{
++		const size_t half = len >> 1;
++		const size_t step = full / len;
++
++		for (size_t base = 0; base < m; base += len)
++		{
++			for (size_t k = 0; k < half; k++)
++			{
++				const float wr = setup->cosine[k * step];
++				const float wi = inverse ? setup->sine[k * step] : -setup->sine[k * step];
++				const size_t a = (base + k) * stride, b = (base + k + half) * stride;
++				const float tr = re[b] * wr - im[b] * wi;
++				const float ti = re[b] * wi + im[b] * wr;
++
++				re[b] = re[a] - tr;
++				im[b] = im[a] - ti;
++				re[a] += tr;
++				im[a] += ti;
++			}
++		}
++	}
++}
++
++// Real FFT on N = 2^Log2N points packed as N/2 complex values (even samples real, odd imaginary).
++// Forward returns twice the DFT with X[0] in realp[0] and X[N/2] in imagp[0]; inverse is unscaled,
++// so a round trip multiplies by 2N, as on macOS.
++void vDSP_fft_zrip(FFTSetup __Setup, const DSPSplitComplex *__C, vDSP_Stride __IC, vDSP_Length __Log2N, FFTDirection __Direction)
++{
++	if (!__Setup || __Log2N == 0 || __Log2N > __Setup->log2n)
++		return;
++
++	float *re = __C->realp, *im = __C->imagp;
++	const vDSP_Stride s = __IC;
++	const size_t m = (size_t) 1 << (__Log2N - 1);
++	const size_t step = ((size_t) 1 << __Setup->log2n) >> __Log2N;
++
++	if (__Direction != kFFTDirection_Inverse)
++	{
++		complex_fft(__Setup, re, im, s, __Log2N - 1, 0);
++
++		const float z0r = re[0], z0i = im[0];
++		re[0] = 2 * (z0r + z0i);
++		im[0] = 2 * (z0r - z0i);
++
++		for (size_t k = 1; k <= m / 2; k++)
++		{
++			const size_t j = m - k;
++			const float c = __Setup->cosine[k * step], sn = __Setup->sine[k * step];
++			const float ar = re[k * s], ai = im[k * s], br = re[j * s], bi = im[j * s];
++			const float sr = ar + br, si = ai - bi, dr = ar - br, di = ai + bi;
++
++			re[k * s] = sr + (c * di - sn * dr);
++			im[k * s] = si - (c * dr + sn * di);
++			re[j * s] = sr - (c * di - sn * dr);
++			im[j * s] = -si - (c * dr + sn * di);
++		}
++	}
++	else
++	{
++		const float p0r = re[0], p0i = im[0];
++		re[0] = p0r + p0i;
++		im[0] = p0r - p0i;
++
++		for (size_t k = 1; k <= m / 2; k++)
++		{
++			const size_t j = m - k;
++			const float c = __Setup->cosine[k * step], sn = __Setup->sine[k * step];
++			const float ar = re[k * s], ai = im[k * s], br = re[j * s], bi = im[j * s];
++			const float sr = ar + br, si = ai - bi, dr = ar - br, di = ai + bi;
++
++			re[k * s] = sr - (c * di + sn * dr);
++			im[k * s] = si + (c * dr - sn * di);
++			re[j * s] = sr + (c * di + sn * dr);
++			im[j * s] = -si + (c * dr - sn * di);
++		}
++
++		complex_fft(__Setup, re, im, s, __Log2N - 1, 1);
++	}
++}
+diff --git a/src/frameworks/Accelerate/vecLib/vDSP/src/vDSP.c b/src/frameworks/Accelerate/vecLib/vDSP/src/vDSP.c
+index 24c037abc..cc18546ce 100644
+--- a/src/frameworks/Accelerate/vecLib/vDSP/src/vDSP.c
++++ b/src/frameworks/Accelerate/vecLib/vDSP/src/vDSP.c
+@@ -263,54 +263,24 @@ void* vDSP_blkman_windowD(void)
+     return NULL;
+ }
+ 
+-void* vDSP_conv(void)
+-{
+-    if (verbose) puts("STUB: vDSP_conv called");
+-    return NULL;
+-}
+-
+ void* vDSP_convD(void)
+ {
+     if (verbose) puts("STUB: vDSP_convD called");
+     return NULL;
+ }
+ 
+-void* vDSP_create_fftsetup(void)
+-{
+-    if (verbose) puts("STUB: vDSP_create_fftsetup called");
+-    return NULL;
+-}
+-
+ void* vDSP_create_fftsetupD(void)
+ {
+     if (verbose) puts("STUB: vDSP_create_fftsetupD called");
+     return NULL;
+ }
+ 
+-void* vDSP_ctoz(void)
+-{
+-    if (verbose) puts("STUB: vDSP_ctoz called");
+-    return NULL;
+-}
+-
+ void* vDSP_ctozD(void)
+ {
+     if (verbose) puts("STUB: vDSP_ctozD called");
+     return NULL;
+ }
+ 
+-void* vDSP_deq22(void)
+-{
+-    if (verbose) puts("STUB: vDSP_deq22 called");
+-    return NULL;
+-}
+-
+-void* vDSP_deq22D(void)
+-{
+-    if (verbose) puts("STUB: vDSP_deq22D called");
+-    return NULL;
+-}
+-
+ void* vDSP_desamp(void)
+ {
+     if (verbose) puts("STUB: vDSP_desamp called");
+@@ -323,12 +293,6 @@ void* vDSP_desampD(void)
+     return NULL;
+ }
+ 
+-void* vDSP_destroy_fftsetup(void)
+-{
+-    if (verbose) puts("STUB: vDSP_destroy_fftsetup called");
+-    return NULL;
+-}
+-
+ void* vDSP_destroy_fftsetupD(void)
+ {
+     if (verbose) puts("STUB: vDSP_destroy_fftsetupD called");
+@@ -587,12 +551,6 @@ void* vDSP_fft_zoptD(void)
+     return NULL;
+ }
+ 
+-void* vDSP_fft_zrip(void)
+-{
+-    if (verbose) puts("STUB: vDSP_fft_zrip called");
+-    return NULL;
+-}
+-
+ void* vDSP_fft_zripD(void)
+ {
+     if (verbose) puts("STUB: vDSP_fft_zripD called");
+@@ -1057,12 +1015,6 @@ void* vDSP_svemgD(void)
+     return NULL;
+ }
+ 
+-void* vDSP_svesq(void)
+-{
+-    if (verbose) puts("STUB: vDSP_svesq called");
+-    return NULL;
+-}
+-
+ void* vDSP_svesqD(void)
+ {
+     if (verbose) puts("STUB: vDSP_svesqD called");
+@@ -1111,12 +1063,6 @@ void* vDSP_vabsi(void)
+     return NULL;
+ }
+ 
+-void* vDSP_vadd(void)
+-{
+-    if (verbose) puts("STUB: vDSP_vadd called");
+-    return NULL;
+-}
+-
+ void* vDSP_vaddD(void)
+ {
+     if (verbose) puts("STUB: vDSP_vaddD called");
+@@ -1189,12 +1135,6 @@ void* vDSP_vavlinD(void)
+     return NULL;
+ }
+ 
+-void* vDSP_vclip(void)
+-{
+-    if (verbose) puts("STUB: vDSP_vclip called");
+-    return NULL;
+-}
+-
+ void* vDSP_vclipD(void)
+ {
+     if (verbose) puts("STUB: vDSP_vclipD called");
+@@ -1789,12 +1729,6 @@ void* vDSP_vmsbD(void)
+     return NULL;
+ }
+ 
+-void* vDSP_vmul(void)
+-{
+-    if (verbose) puts("STUB: vDSP_vmul called");
+-    return NULL;
+-}
+-
+ void* vDSP_vmulD(void)
+ {
+     if (verbose) puts("STUB: vDSP_vmulD called");
+@@ -1993,14 +1927,6 @@ void* vDSP_vrvrsD(void)
+     return NULL;
+ }
+ 
+-/*
+-void* vDSP_vsadd(void)
+-{
+-    if (verbose) puts("STUB: vDSP_vsadd called");
+-    return NULL;
+-}
+-*/
+-
+ void* vDSP_vsaddD(void)
+ {
+     if (verbose) puts("STUB: vDSP_vsaddD called");
+@@ -2079,12 +2005,6 @@ void* vDSP_vsimpsD(void)
+     return NULL;
+ }
+ 
+-void* vDSP_vsma(void)
+-{
+-    if (verbose) puts("STUB: vDSP_vsma called");
+-    return NULL;
+-}
+-
+ void* vDSP_vsmaD(void)
+ {
+     if (verbose) puts("STUB: vDSP_vsmaD called");
+@@ -2139,12 +2059,6 @@ void* vDSP_vsmsmaD(void)
+     return NULL;
+ }
+ 
+-void* vDSP_vsmul(void)
+-{
+-    if (verbose) puts("STUB: vDSP_vsmul called");
+-    return NULL;
+-}
+-
+ void* vDSP_vsmulD(void)
+ {
+     if (verbose) puts("STUB: vDSP_vsmulD called");
+@@ -2205,12 +2119,6 @@ void* vDSP_vssqD(void)
+     return NULL;
+ }
+ 
+-void* vDSP_vsub(void)
+-{
+-    if (verbose) puts("STUB: vDSP_vsub called");
+-    return NULL;
+-}
+-
+ void* vDSP_vsubD(void)
+ {
+     if (verbose) puts("STUB: vDSP_vsubD called");
+@@ -2529,12 +2437,6 @@ void* vDSP_zrvsubD(void)
+     return NULL;
+ }
+ 
+-void* vDSP_ztoc(void)
+-{
+-    if (verbose) puts("STUB: vDSP_ztoc called");
+-    return NULL;
+-}
+-
+ void* vDSP_ztocD(void)
+ {
+     if (verbose) puts("STUB: vDSP_ztocD called");
+@@ -2697,12 +2599,6 @@ void* vDSP_zvmovD(void)
+     return NULL;
+ }
+ 
+-void* vDSP_zvmul(void)
+-{
+-    if (verbose) puts("STUB: vDSP_zvmul called");
+-    return NULL;
+-}
+-
+ void* vDSP_zvmulD(void)
+ {
+     if (verbose) puts("STUB: vDSP_zvmulD called");
