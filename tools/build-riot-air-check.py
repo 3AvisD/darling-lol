@@ -7,8 +7,15 @@ import sys
 root = Path(__file__).resolve().parent.parent
 if '--native' in sys.argv:
     indium = root / 'build/darling-src/src/external/metal/deps/indium'
+    llvm_include = subprocess.check_output(['llvm-config', '--includedir'], text=True).strip()
+    llvm_libdir = Path(subprocess.check_output(['llvm-config', '--libdir'], text=True).strip())
+    llvm_names = shlex.split(subprocess.check_output(['llvm-config', '--link-shared', '--libnames'], text=True))
+    if len(llvm_names) != 1:
+        raise SystemExit('Iridium requires one shared LLVM library, got: ' + repr(llvm_names))
+    llvm_library = llvm_libdir / llvm_names[0]
+    print(f'Iridium LLVM headers: {llvm_include}; library: {llvm_library}', flush=True)
     subprocess.run(['clang++', '-O2', '-std=c++17',
-                    '-DHOST_LLVM_LIBNAME="libLLVM-22.so"',
+                    '-DHOST_LLVM_LIBNAME="' + str(llvm_library) + '"', '-I' + llvm_include,
                     '-I' + str(indium / 'include'), '-I' + str(indium / 'private-include'),
                     str(root / 'tools/riot-air-translate-check.cpp'),
                     *[str(indium / 'src/iridium' / (name + '.cpp'))

@@ -20,9 +20,20 @@ for line in (folder / 'CMakeFiles/iridium.dir/flags.make').read_text().splitline
 iridium_flags['CXX_INCLUDES'] = current_includes(iridium_flags['CXX_INCLUDES'])
 # RIOT_IRIDIUM_SYSTEM_LLVM=1 ignores the pin and builds against the host LLVM, as a fresh checkout does.
 if (pinned_llvm / 'lib/libLLVM-22.so').exists() and os.environ.get('RIOT_IRIDIUM_SYSTEM_LLVM') != '1':
-    iridium_flags['CXX_INCLUDES'].insert(0, '-I' + str(pinned_llvm / 'include'))
-    iridium_flags['CXX_DEFINES'] = [value for value in iridium_flags['CXX_DEFINES'] if not value.startswith('-DHOST_LLVM_LIBNAME=')]
-    iridium_flags['CXX_DEFINES'].append('-DHOST_LLVM_LIBNAME="' + str(pinned_llvm / 'lib/libLLVM-22.so') + '"')
+    llvm_include = pinned_llvm / 'include'
+    llvm_library = pinned_llvm / 'lib/libLLVM-22.so'
+else:
+    # Do not combine cached CMake include paths with a newer llvm-config library.
+    llvm_include = Path(subprocess.check_output(['llvm-config', '--includedir'], text=True).strip())
+    llvm_libdir = Path(subprocess.check_output(['llvm-config', '--libdir'], text=True).strip())
+    llvm_names = shlex.split(subprocess.check_output(['llvm-config', '--link-shared', '--libnames'], text=True))
+    if len(llvm_names) != 1:
+        raise SystemExit('Iridium requires one shared LLVM library, got: ' + repr(llvm_names))
+    llvm_library = llvm_libdir / llvm_names[0]
+iridium_flags['CXX_INCLUDES'].insert(0, '-I' + str(llvm_include))
+iridium_flags['CXX_DEFINES'] = [value for value in iridium_flags['CXX_DEFINES'] if not value.startswith('-DHOST_LLVM_LIBNAME=')]
+iridium_flags['CXX_DEFINES'].append('-DHOST_LLVM_LIBNAME="' + str(llvm_library) + '"')
+print(f'Iridium LLVM headers: {llvm_include}; library: {llvm_library}', flush=True)
 iridium_link = shlex.split((folder / 'CMakeFiles/iridium.dir/link.txt').read_text())
 for name in ('air', 'dynamic-llvm', 'iridium', 'spirv'):
     obj = root / f'build/riot-iridium-{name}.o'
