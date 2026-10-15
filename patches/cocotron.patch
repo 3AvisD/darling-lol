@@ -518,34 +518,17 @@ diff --git a/AppKit/NSCursor.m b/AppKit/NSCursor.m
 index 4cd74633..9be5239a 100644
 --- a/AppKit/NSCursor.m
 +++ b/AppKit/NSCursor.m
-@@ -174,6 +174,7 @@ void NSPlatformSetCursorImp(id object) {
- @implementation NSCursor
- 
- static NSMutableArray *_cursorStack = nil;
-+static BOOL hiddenUntilMouseMoves = NO;
- 
- + (void) initialize {
-     if (self == [NSCursor class]) {
-@@ -365,12 +366,22 @@ static NSMutableArray *_cursorStack = nil;
+@@ -365,12 +365,9 @@ static NSMutableArray *_cursorStack = nil;
  }
  
  + (void) setHiddenUntilMouseMoves: (BOOL) flag {
-+    hiddenUntilMouseMoves = flag;
-     if (flag)
-         [self hide];
-     else
-         [self unhide];
+-    if (flag)
+-        [self hide];
+-    else
+-        [self unhide];
++    [[NSDisplay currentDisplay] setCursorHiddenUntilMouseMoves: flag];
  }
  
-+/* Backend hook: typing may hide the cursor, but the next real motion
-+ * restores it without requiring the application to issue another cursor set. */
-++ (void) _unhideOnMouseMove {
-+    if (hiddenUntilMouseMoves) {
-+        hiddenUntilMouseMoves = NO;
-+        [self unhide];
-+    }
-+}
-+
  - initWithImage: (NSImage *) image
          foregroundColorHint: (NSColor *) foregroundHint
          backgroundColorHint: (NSColor *) backgroundHint
@@ -564,7 +547,34 @@ index cacd8999..13faf0f7 100644
  - (instancetype) init {
      if ([self class] != [NSDisplay class]) {
          // Initializing a concrete subclass.
-@@ -146,28 +150,46 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+@@ -135,6 +139,26 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ - (void) unhideCursor {
+     NSInvalidAbstractInvocation();
+ }
+ 
++- (void) setCursorHiddenUntilMouseMoves: (BOOL) flag {
++    if (_cursorHiddenUntilMouseMoves == flag)
++        return;
++
++    _cursorHiddenUntilMouseMoves = flag;
++    if (flag)
++        [self hideCursor];
++    else
++        [self unhideCursor];
++}
++
++// A backend calls this when the pointer genuinely moves; it cancels a
++// pending -setCursorHiddenUntilMouseMoves:YES, matching AppKit.
++- (void) pointerMoved {
++    if (_cursorHiddenUntilMouseMoves) {
++        _cursorHiddenUntilMouseMoves = NO;
++        [self unhideCursor];
++    }
++}
++
+ // Arrow, IBeam, HorizontalResize, VerticalResize
+ - (id) cursorWithName: (NSString *) name {
+@@ -146,28 +170,46 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
      NSInvalidAbstractInvocation();
  }
  
@@ -1961,7 +1971,7 @@ diff --git a/AppKit/X11.backend/X11Display.m b/AppKit/X11.backend/X11Display.m
 index 5ae29bf4..358e606b 100644
 --- a/AppKit/X11.backend/X11Display.m
 +++ b/AppKit/X11.backend/X11Display.m
-@@ -48,15 +48,21 @@
+@@ -48,15 +48,17 @@
  #import "X11KeySymToUCS.h"
  #import <X11/XKBlib.h>
  #import <X11/Xutil.h>
@@ -1976,10 +1986,6 @@ index 5ae29bf4..358e606b 100644
  
  void NSColorSetCatalogColor(NSColorListName catalogName, NSColorName colorName, NSColor *color);
  
-+@interface NSCursor (X11CursorVisibility)
-++ (void) _unhideOnMouseMove;
-+@end
-+
  @implementation X11Display
  
  static int errorHandler(Display *display, XErrorEvent *errorEvent) {
@@ -2446,7 +2452,7 @@ index 5ae29bf4..358e606b 100644
          default:
              type = NSOtherMouseUp;
          }
-@@ -1151,11 +1430,14 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1151,11 +1430,13 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                          clickCount: clickCount
                              deltaX: 0.0
                              deltaY: deltaY];
@@ -2458,12 +2464,12 @@ index 5ae29bf4..358e606b 100644
          break;
  
      case MotionNotify:; {
-+            [NSCursor _unhideOnMouseMove];
              // NSLog(@"MotionNotify, x=%d, y=%d, xroot=%d, yroot=%d\n",
              // ev->xmotion.x, ev->xmotion.y, ev->xmotion.x_root,
              // ev->xmotion.y_root);
-@@ -1195,14 +1477,28 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1195,14 +1476,29 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  
++            [self pointerMoved];
              if (ev->xmotion.state & Button1Mask) {
                  type = NSLeftMouseDragged;
 -            } else if (ev->xmotion.state & Button2Mask) {
@@ -3634,7 +3640,10 @@ index 8860a087..aec7116d 100644
  
  @class NSColor, NSDraggingManager, NSPrintInfo, NSView, NSSavePanel,
          NSOpenPanel, NSFontTypeface, CGWindow;
-@@ -31,6 +32,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+@@ -29,8 +30,10 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ @interface NSDisplay : NSObject {
+     NSMutableArray *_eventQueue;
++    BOOL _cursorHiddenUntilMouseMoves;
  }
  
  + (NSDisplay *) currentDisplay;
@@ -3642,7 +3651,17 @@ index 8860a087..aec7116d 100644
  
  - (NSArray *) screens;
  
-@@ -95,6 +97,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+@@ -50,7 +53,9 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ - (void) hideCursor;
+ - (void) unhideCursor;
++- (void) setCursorHiddenUntilMouseMoves: (BOOL) flag;
++- (void) pointerMoved;
+ 
+ - (id) cursorWithImage: (NSImage *) image hotSpot: (NSPoint) hotSpot;
+ - (id) cursorWithName: (NSString *) name;
+ - (void) setCursor: (id) cursor;
+ 
+@@ -95,6 +100,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
  
  - (NSPoint) mouseLocation;
  - (NSUInteger) currentModifierFlags;
