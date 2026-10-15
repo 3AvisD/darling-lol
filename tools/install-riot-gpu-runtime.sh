@@ -23,7 +23,6 @@ python3 tools/build-riot-objc-runtime.py
 python3 tools/build-riot-cxxabi-runtime.py
 python3 tools/build-riot-indium-runtime.py
 python3 tools/build-riot-metal-runtime.py
-python3 tools/build-riot-native-vpx-runtime.py
 python3 tools/build-riot-server-runtime.py
 build/riot-host-message-check
 cc -shared -fPIC -O2 -Wall -Wextra -Wl,-soname,"$project_dir/build/libdarling-xshm.so" tools/m58f299-xshm.c -o build/libdarling-xshm.so.next -pthread $(pkg-config --cflags --libs x11 x11-xcb xcb-shm xext)
@@ -35,9 +34,6 @@ if [ -f "$HOME/.darling/Applications/Riot Client.app/Contents/Frameworks/Riot Cl
 else
  echo 'Riot is not installed yet; apply the guarded Electron visibility fix after installation.'
 fi
-install -m755 build/libRiotNativeVpx.dylib.next "$guest_home/libRiotNativeVpx.dylib.next"
-mv "$guest_home/libRiotNativeVpx.dylib.next" "$guest_home/libRiotNativeVpx.dylib"
-mv build/libriot-native-vpx.so.next build/libriot-native-vpx.so
 for name in IOSurface OpenGL QuartzCore CoreVideo CoreAudio AudioToolbox CoreGraphics CoreFoundation Metal; do
  framework="$guest_home/RuntimeFrameworks/$name.framework"
  if [ ! -d "$framework" ]; then cp -a "@DARLING_SDK@/System/Library/Frameworks/$name.framework" "$framework"; fi

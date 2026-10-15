@@ -11,10 +11,11 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def check():
-    with tempfile.TemporaryDirectory(prefix="riot-launcher-offline-") as directory:
+    (ROOT / "build").mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="riot-launcher-offline-", dir=ROOT / "build") as directory:
         folder = Path(directory)
         launcher = folder / "launch.sh"
-        launcher.write_text((ROOT / "tools/run-riot-ux-with-logdir-shim.sh").read_text().replace("@GUEST_HOME@", "/Users/offline-check"))
+        launcher.write_text((ROOT / "tools/run-riot-client.sh").read_text().replace("@GUEST_HOME@", "/Users/offline-check"))
         binary_folder = folder / "bin"
         binary_folder.mkdir()
         log = folder / "calls.jsonl"
@@ -23,7 +24,7 @@ import json, os, sys
 record = {{"command": os.path.basename(sys.argv[0]), "args": sys.argv[1:]}}
 if record["command"] == "darling":
     record["flags"] = {{key: os.environ.get(key) for key in
-        ("RCLOL_APP_ARG3", "RCLOL_APP_ARG3_SLOT", "RCLOL_UX_ARG2", "RCLOL_UX_ARG2_SLOT", "RCLOL_UX_ARG1")}}
+        ("RCLOL_APP_ARG3", "RCLOL_APP_ARG3_SLOT", "RCLOL_UX_ARG2", "RCLOL_UX_ARG2_SLOT", "RCLOL_UX_ARG1", "RCLOL_APP_ARGS", "RCLOL_APP_ARG2", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH", "DARLING_XSHM_LIBRARY")}}
 with open({str(log)!r}, "a") as output:
     output.write(json.dumps(record) + "\\n")
 '''
@@ -35,7 +36,13 @@ with open({str(log)!r}, "a") as output:
         env.pop("RIOT_LAUNCHER_HOST", None)
         env.pop("RCLOL_LAUNCH_PRODUCT", None)
         env["PATH"] = str(binary_folder) + os.pathsep + env.get("PATH", "")
-        env["RCLOL_NATIVE_VPX"] = "0"
+        prefix = folder / "prefix"
+        (prefix / "Applications/Riot Client.app").mkdir(parents=True)
+        env["DPREFIX"] = str(prefix)
+        env["DYLD_INSERT_LIBRARIES"] = "/Users/offline-check/zzlogdir.dylib:/tmp/inherited.dylib"
+        env["RCLOL_APP_ARGS"] = "--inherited-shim-argument"
+        env["RCLOL_APP_ARG2"] = "--inherited-shim-argument-2"
+        env["RCLOL_NATIVE_VPX"] = "1"
         env["RCLOL_LEAGUE_UX_TUNING"] = "1"
         # Inherited legacy settings must not re-enable inspection or unlimited frames.
         env.update({
@@ -61,11 +68,29 @@ with open({str(log)!r}, "a") as output:
         assert all(launch["flags"][key] is None for key in (
             "RCLOL_APP_ARG3", "RCLOL_APP_ARG3_SLOT", "RCLOL_UX_ARG2", "RCLOL_UX_ARG2_SLOT"
         )), "inherited inspector/unlimited-frame argument survived"
-        assert launch["flags"]["RCLOL_UX_ARG1"], "feature compatibility setting lost"
+        assert all(launch["flags"][key] is None for key in (
+            "DYLD_INSERT_LIBRARIES", "RCLOL_APP_ARGS", "RCLOL_APP_ARG2", "RCLOL_UX_ARG1"
+        )), "injection or former shim settings survived"
+        assert all(launch["flags"][key] for key in (
+            "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH", "DARLING_XSHM_LIBRARY"
+        )), "Darling runtime overrides lost"
         assert "--launch-product=league_of_legends" in launch["args"], "product launch lost"
         assert "--app-root=/Applications/Riot Client.app" in launch["args"], "application root lost"
         assert "--log-dir=/Users/offline-check/Library/Logs/Riot Games/Riot Client" in launch["args"], "absolute log directory lost"
-        print("LAUNCHER_OFFLINE pass=1 automatic_inspector_helpers=0 inspector_argument=absent unlimited_frames=absent compatibility=preserved")
+        # An inherited injection must also be absent for first-time installation.
+        env["RIOT_LAUNCHER_HOST"] = str(folder / "Install Riot.app/Contents/MacOS/RiotClientServices")
+        subprocess.run(["sh", str(launcher)], env=env, check=True, capture_output=True, text=True)
+        install = json.loads(log.read_text().splitlines()[-1])
+        assert install["args"][0] == env["RIOT_LAUNCHER_HOST"]
+        assert "--skip-to-install" in install["args"]
+        assert not any(arg.startswith("--app-root=") for arg in install["args"])
+        assert install["flags"]["DYLD_INSERT_LIBRARIES"] is None
+        env.pop("RIOT_LAUNCHER_HOST")
+        env.pop("DYLD_INSERT_LIBRARIES")
+        subprocess.run(["sh", str(launcher)], env=env, check=True, capture_output=True, text=True)
+        clean = json.loads(log.read_text().splitlines()[-1])
+        assert clean["flags"]["DYLD_INSERT_LIBRARIES"] is None
+        print("LAUNCHER_OFFLINE pass=1 installed=PASS installer=PASS inherited_injection=absent runtime=preserved")
 
 
 if __name__ == "__main__":

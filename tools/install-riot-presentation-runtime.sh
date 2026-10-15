@@ -21,17 +21,10 @@ clang -target x86_64-apple-macosx11.0 -fuse-ld=lld -dynamiclib -nostdlib \
   "-DDARLING_XSHM_HOST_LIBRARY=\"$project_dir/build/libdarling-xshm.so\"" \
   -Wl,-undefined,dynamic_lookup -Wl,-install_name,@GUEST_HOME@/libDarlingXShm.dylib \
   "$project_dir/tools/m58f299-native-wrapper.c" -o "$guest_home/libDarlingXShm.next.dylib"
-clang -target x86_64-apple-macosx11.0 -fuse-ld=lld -dynamiclib -nostdlib \
-  -isysroot @DARLING_SDK@ -O2 -Wall -Wextra -Werror \
-  "$project_dir/tools/m58f317-empty-autofill.c" -lSystem \
-  -Wl,-install_name,@GUEST_HOME@/libRiotEmptyAutofill.dylib \
-  -o "$project_dir/build/libRiotEmptyAutofill.next.dylib"
 # Stop before changing the overlay's upper directory, even with atomic writes.
 darling shutdown || true
 mv "$project_dir/build/libdarling-xshm.next.so" "$project_dir/build/libdarling-xshm.so"
 mv "$guest_home/libDarlingXShm.next.dylib" "$guest_home/libDarlingXShm.dylib"
-install -m755 "$project_dir/build/libRiotEmptyAutofill.next.dylib" "$guest_home/libRiotEmptyAutofill.next.dylib"
-mv "$guest_home/libRiotEmptyAutofill.next.dylib" "$guest_home/libRiotEmptyAutofill.dylib"
 mkdir -p "$guest_home/RuntimeFrameworks"
 for framework in AppKit QuartzCore CoreFoundation SystemConfiguration; do
   if [ ! -d "$guest_home/RuntimeFrameworks/$framework.framework" ]; then
@@ -60,4 +53,4 @@ prefix_dir="${DPREFIX:-$HOME/.darling}"
 mkdir -p "$prefix_dir/usr/lib/system"
 atomic_install "$build_dir/src/external/xnu/darling/src/libsystem_kernel/libsystem_kernel.dylib" "$prefix_dir/usr/lib/system/libsystem_kernel.dylib"
 
-echo "Presentation runtime installed; launch tools/run-riot-ux-with-logdir-shim.sh."
+echo "Presentation runtime installed; launch scripts/run.sh."

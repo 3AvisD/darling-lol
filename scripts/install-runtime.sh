@@ -15,4 +15,3 @@ python3 build/runtime/tools/stop-darling-runtime.py
 sh build/runtime/tools/install-riot-presentation-runtime.sh
 sh build/runtime/tools/install-riot-gpu-runtime.sh
 python3 build/runtime/tools/install-darling-system-profiler.py
-python3 scripts/install-shim.py
