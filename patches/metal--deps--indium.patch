@@ -781,7 +781,7 @@ index 8546daa..7e4993c 100644
  		void updateBindings();
  
 diff --git a/private-include/indium/device.private.hpp b/private-include/indium/device.private.hpp
-index 58f1794..5b2b30d 100644
+index 58f1794..75cdeb3 100644
 --- a/private-include/indium/device.private.hpp
 +++ b/private-include/indium/device.private.hpp
 @@ -13,6 +13,8 @@
@@ -802,15 +802,16 @@ index 58f1794..5b2b30d 100644
  		std::mutex _eventLoopMutex;
  		std::mutex _pollingMutex;
  
-@@ -59,6 +63,7 @@ namespace Indium {
+@@ -59,6 +63,8 @@ namespace Indium {
  		}
  
  		virtual std::string name() const override;
 +		virtual bool supportsDepth24Stencil8PixelFormat() override;
++
  		virtual std::shared_ptr<CommandQueue> newCommandQueue() override;
  		virtual std::shared_ptr<RenderPipelineState> newRenderPipelineState(const RenderPipelineDescriptor& descriptor) override;
  		virtual std::shared_ptr<ComputePipelineState> newComputePipelineState(const ComputePipelineDescriptor& descriptor, PipelineOption options, std::shared_ptr<ComputePipelineReflection> reflection) override;
-@@ -73,6 +78,12 @@ namespace Indium {
+@@ -73,6 +79,12 @@ namespace Indium {
  		virtual void pollEvents(uint64_t timeoutNanoseconds) override;
  		virtual void wakeupEventLoop() override;
  
@@ -823,7 +824,7 @@ index 58f1794..5b2b30d 100644
  		void waitForSemaphore(VkSemaphore semaphore, uint64_t targetValue, std::function<void()> callback);
  
  		/**
-@@ -86,6 +97,11 @@ namespace Indium {
+@@ -86,6 +98,11 @@ namespace Indium {
  		 * Similar to getTimelineSemaphore(), but wraps it in a shared pointer
  		 * that automatically releases the semaphore when all references to it die out.
  		 */
@@ -835,7 +836,7 @@ index 58f1794..5b2b30d 100644
  		std::shared_ptr<TimelineSemaphore> getWrappedTimelineSemaphore();
  
  		BinarySemaphore getBinarySemaphore(bool exportable = false);
-@@ -111,5 +127,31 @@ namespace Indium {
+@@ -111,5 +128,31 @@ namespace Indium {
  
  		INDIUM_PROPERTY(VkPhysicalDeviceMemoryProperties, m, M,emoryProperties);
  		INDIUM_PROPERTY_READONLY(Feature, f, F,eatures);
@@ -2802,7 +2803,7 @@ index 5f62ad0..5957bec 100644
  	DynamicVK::vkCmdBindDescriptorSets(buf->commandBuffer(), VK_PIPELINE_BIND_POINT_COMPUTE, _pso->layout(), 0, descriptorSets.size(), descriptorSets.data(), 0, nullptr);
  };
 diff --git a/src/indium/device.cpp b/src/indium/device.cpp
-index 322e186..70c4a15 100644
+index 322e186..2003684 100644
 --- a/src/indium/device.cpp
 +++ b/src/indium/device.cpp
 @@ -1,4 +1,6 @@
@@ -2812,7 +2813,7 @@ index 322e186..70c4a15 100644
  #include <indium/instance.private.hpp>
  #include <indium/command-queue.private.hpp>
  #include <indium/render-pipeline.private.hpp>
-@@ -12,10 +14,12 @@
+@@ -12,39 +14,167 @@
  
  #include <iridium/iridium.hpp>
  
@@ -2823,45 +2824,274 @@ index 322e186..70c4a15 100644
  #include <unordered_set>
 +#include <utility>
  
++#include <cctype>
++#include <cstdio>
++#include <cstdlib>
  #include <cstring>
++#include <string>
++#include <unistd.h>
  #include <vector>
-@@ -39,6 +43,15 @@ void Indium::initGlobalDeviceList() {
+ 
+ std::vector<std::shared_ptr<Indium::PrivateDevice>> Indium::globalDeviceList;
+ 
++namespace {
++	// One line per event, appended to the guest's /tmp/metal-device.log (host:
++	// ~/.darling/private/tmp/metal-device.log). Low volume: a few lines while the
++	// device list is built, plus one when the presenting OpenGL context first
++	// imports a Vulkan drawable. It exists so a user can tell us which GPU
++	// actually rendered a match, which the game's own logs and FPS numbers do not
++	// show.
++	void appendDeviceLog(const std::string& line) {
++		if (FILE* log = fopen("/tmp/metal-device.log", "a")) {
++			fprintf(log, "[MetalDevice] pid=%d %s\n", getpid(), line.c_str());
++			fclose(log);
++		}
++	}
++
++	std::string hexValue(unsigned long long value, int width) {
++		char buffer[32];
++		snprintf(buffer, sizeof(buffer), "%0*llx", width, value);
++		return buffer;
++	}
++
++	std::string uuidToString(const uint8_t uuid[16]) {
++		static const char* digits = "0123456789abcdef";
++		std::string out;
++		out.reserve(32);
++		for (int i = 0; i < 16; ++i) {
++			out += digits[(uuid[i] >> 4) & 0xf];
++			out += digits[uuid[i] & 0xf];
++		}
++		return out;
++	}
++
++	const char* deviceTypeName(VkPhysicalDeviceType type) {
++		switch (type) {
++			case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return "integrated";
++			case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: return "discrete";
++			case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU: return "virtual";
++			case VK_PHYSICAL_DEVICE_TYPE_CPU: return "cpu";
++			default: return "other";
++		}
++	}
++
++	struct GpuSelector {
++		std::string value;
++		std::string source; // empty when the loader's default order should decide
++	};
++
++	// Explicit selection, in the style of the other opt-in guest files. The guest
++	// file /tmp/metal-gpu wins over the METAL_INDIUM_GPU environment variable: the
++	// file is scoped to the guest and does not depend on the environment reaching
++	// the game through the Riot/League client. The value is either the index of a
++	// supported device or a case-insensitive substring of its Vulkan name, so
++	// "nvidia", "amd" or "llvmpipe" all work.
++	GpuSelector readGpuSelector() {
++		if (FILE* file = fopen("/tmp/metal-gpu", "r")) {
++			char buffer[256] = {0};
++			char* got = fgets(buffer, sizeof(buffer), file);
++			fclose(file);
++			if (got) {
++				std::string value(buffer);
++				while (!value.empty() && (value.back() == '\n' || value.back() == '\r' || value.back() == ' ' || value.back() == '\t')) {
++					value.pop_back();
++				}
++				if (!value.empty()) return { value, "file:/tmp/metal-gpu" };
++			}
++		}
++		if (const char* env = getenv("METAL_INDIUM_GPU")) {
++			if (env[0]) return { std::string(env), "env:METAL_INDIUM_GPU" };
++		}
++		return {};
++	}
++
++	bool isAllDigits(const std::string& value) {
++		return !value.empty() && std::all_of(value.begin(), value.end(), [](unsigned char c) { return std::isdigit(c) != 0; });
++	}
++
++	bool nameContains(const std::string& name, const std::string& needle) {
++		return std::search(name.begin(), name.end(), needle.begin(), needle.end(), [](char a, char b) {
++			return std::tolower((unsigned char) a) == std::tolower((unsigned char) b);
++		}) != name.end();
++	}
++
++	struct DeviceCandidate {
++		VkPhysicalDevice device;
++		VkPhysicalDeviceProperties properties;
++		uint8_t deviceUUID[16];
++		uint8_t driverUUID[16];
++	};
++}
++
+ void Indium::initGlobalDeviceList() {
+ 	std::vector<VkPhysicalDevice> physicalDevices;
+ 	uint32_t count = 0;
+ 
+ 	auto result = DynamicVK::vkEnumeratePhysicalDevices(globalInstance, &count, nullptr);
+ 	if (result != VK_SUCCESS && result != VK_INCOMPLETE) {
+-		// TODO: maybe warn?
++		appendDeviceLog("vkEnumeratePhysicalDevices failed when counting devices; Metal will have no device");
  		return;
  	}
  
-+	// A VkDevice is created (and its driver initialized) for every supported physical device below, and
-+	// createSystemDefaultDevice() takes the first entry. Software devices (lavapipe) can be skipped -- a VkDevice on
-+	// one of them starts its rasterizer pool (nproc llvmpipe threads, idle for a whole match) and the loader may order
-+	// it first. Only skip them while some other supported device exists. OFF by default (round-3 behaviour: a device is
-+	// created for every supported device, in the loader's order); guest flag file /tmp/metal-skip-cpu-devices turns the
-+	// skip on. It is read here, at load time, because this list is built once.
+ 	physicalDevices.resize(count);
+ 	result = DynamicVK::vkEnumeratePhysicalDevices(globalInstance, &count, physicalDevices.data());
+ 	if (result != VK_SUCCESS && result != VK_INCOMPLETE) {
+-		// TODO: maybe warn?
++		appendDeviceLog("vkEnumeratePhysicalDevices failed when listing devices; Metal will have no device");
+ 		return;
+ 	}
+ 
++	// The loader's order used to decide the default device (createSystemDefaultDevice
++	// returns the first entry). On a hybrid laptop that is usually the integrated
++	// GPU the display is wired to, not the discrete GPU. Record every device the
++	// loader lists, then choose explicitly.
++	GpuSelector selector = readGpuSelector();
 +	const bool skipCPUDevices = access("/tmp/metal-skip-cpu-devices", F_OK) == 0;
-+	std::vector<std::pair<VkPhysicalDevice, VkPhysicalDeviceType>> candidates;
++	const bool allDevices = access("/tmp/metal-all-devices", F_OK) == 0;
++	appendDeviceLog("selector=" + (selector.source.empty() ? std::string("none") : selector.source + " value=\"" + selector.value + "\"")
++		+ " skipCPUDevices=" + (skipCPUDevices ? "1" : "0") + " allDevices=" + (allDevices ? "1" : "0")
++		+ " physicalDeviceCount=" + std::to_string(physicalDevices.size()));
++
++	std::vector<DeviceCandidate> candidates;
 +
  	for (auto&& device: physicalDevices) {
- 		VkPhysicalDeviceProperties props;
- 		DynamicVK::vkGetPhysicalDeviceProperties(device, &props);
-@@ -71,7 +84,18 @@ void Indium::initGlobalDeviceList() {
+-		VkPhysicalDeviceProperties props;
+-		DynamicVK::vkGetPhysicalDeviceProperties(device, &props);
++		VkPhysicalDeviceProperties properties;
++		DynamicVK::vkGetPhysicalDeviceProperties(device, &properties);
++
++		VkPhysicalDeviceIDProperties idProperties {};
++		idProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
++		VkPhysicalDeviceProperties2 properties2 {};
++		properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
++		properties2.pNext = &idProperties;
++		if (DynamicVK::vkGetPhysicalDeviceProperties2) {
++			DynamicVK::vkGetPhysicalDeviceProperties2(device, &properties2);
++		}
+ 
+-		if (VK_API_VERSION_VARIANT(props.apiVersion) != 0 || props.apiVersion < VK_API_VERSION_1_3) {
+-			// unsupported device
++		std::string line = "physical name=\"" + std::string(properties.deviceName) + "\""
++			+ " type=" + deviceTypeName(properties.deviceType)
++			+ " vendorID=0x" + hexValue(properties.vendorID, 4)
++			+ " driverVersion=0x" + hexValue(properties.driverVersion, 8)
++			+ " apiVersion=" + std::to_string(VK_API_VERSION_MAJOR(properties.apiVersion)) + "."
++			+ std::to_string(VK_API_VERSION_MINOR(properties.apiVersion)) + "."
++			+ std::to_string(VK_API_VERSION_PATCH(properties.apiVersion))
++			+ " deviceUUID=" + uuidToString(idProperties.deviceUUID)
++			+ " driverUUID=" + uuidToString(idProperties.driverUUID);
++
++		if (VK_API_VERSION_VARIANT(properties.apiVersion) != 0 || properties.apiVersion < VK_API_VERSION_1_3) {
++			appendDeviceLog(line + " supported=no reason=apiVersion");
+ 			continue;
+ 		}
+ 
+@@ -67,12 +197,101 @@ void Indium::initGlobalDeviceList() {
+ 		DynamicVK::vkGetPhysicalDeviceFeatures2(device, &features);
+ 
+ 		if (!features12.timelineSemaphore) {
+-			// unsupported device
++			appendDeviceLog(line + " supported=no reason=timelineSemaphore");
  			continue;
  		}
  
 -		globalDeviceList.push_back(std::make_shared<PrivateDevice>(std::move(device)));
-+		candidates.emplace_back(device, props.deviceType);
++		appendDeviceLog(line + " supported=yes");
++		DeviceCandidate candidate {};
++		candidate.device = device;
++		candidate.properties = properties;
++		memcpy(candidate.deviceUUID, idProperties.deviceUUID, 16);
++		memcpy(candidate.driverUUID, idProperties.driverUUID, 16);
++		candidates.push_back(candidate);
+ 	}
++
++	// Resolve the explicit selection against the supported list. An explicit choice
++	// is honoured even when it names a software (CPU) device, because the user asked
++	// for it; the skip-CPU rule only affects the automatic default.
++	long selectedIndex = -1;
++	std::string selectedReason;
++
++	if (!selector.source.empty()) {
++		if (isAllDigits(selector.value)) {
++			long index = strtol(selector.value.c_str(), nullptr, 10);
++			if (index >= 0 && index < (long) candidates.size()) {
++				selectedIndex = index;
++				selectedReason = selector.source + " index " + selector.value;
++			}
++		}
++		if (selectedIndex < 0) {
++			for (size_t i = 0; i < candidates.size(); ++i) {
++				if (nameContains(candidates[i].properties.deviceName, selector.value)) {
++					selectedIndex = (long) i;
++					selectedReason = selector.source + " name~=\"" + selector.value + "\"";
++					break;
++				}
++			}
++		}
++		if (selectedIndex < 0) {
++			appendDeviceLog("selector " + selector.source + " value=\"" + selector.value + "\" matched no supported device; falling back to the loader default");
++		}
 +	}
 +
-+	const bool haveHardwareDevice = skipCPUDevices && std::any_of(candidates.begin(), candidates.end(), [](const auto& candidate) {
-+		return candidate.second != VK_PHYSICAL_DEVICE_TYPE_CPU;
++	const bool haveHardwareDevice = std::any_of(candidates.begin(), candidates.end(), [](const DeviceCandidate& candidate) {
++		return candidate.properties.deviceType != VK_PHYSICAL_DEVICE_TYPE_CPU;
 +	});
 +
-+	for (auto&& candidate: candidates) {
-+		if (haveHardwareDevice && candidate.second == VK_PHYSICAL_DEVICE_TYPE_CPU) {
-+			continue;
++	if (selectedIndex < 0) {
++		for (size_t i = 0; i < candidates.size(); ++i) {
++			if (skipCPUDevices && haveHardwareDevice && candidates[i].properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) {
++				continue;
++			}
++			selectedIndex = (long) i;
++			selectedReason = skipCPUDevices ? "loader-first-hardware" : "loader-first";
++			break;
 +		}
-+		globalDeviceList.push_back(std::make_shared<PrivateDevice>(std::move(candidate.first)));
- 	}
++	}
++
++	if (selectedIndex < 0) {
++		appendDeviceLog("no usable supported Vulkan device found; Metal will have no device");
++		return;
++	}
++
++	DeviceCandidate& selected = candidates[selectedIndex];
++	appendDeviceLog("selected name=\"" + std::string(selected.properties.deviceName) + "\""
++		+ " type=" + deviceTypeName(selected.properties.deviceType)
++		+ " vendorID=0x" + hexValue(selected.properties.vendorID, 4)
++		+ " deviceUUID=" + uuidToString(selected.deviceUUID)
++		+ " reason=" + (selectedReason.empty() ? std::string("loader-first") : selectedReason));
++
++	// A VkDevice is created for the selected device only: its driver is initialized
++	// and, on a hybrid laptop, the discrete GPU is not woken for a device the
++	// rendering GPU cannot share memory with anyway. The old behaviour -- a VkDevice
++	// for every supported device, in the loader's order -- stays reachable with the
++	// opt-in guest file /tmp/metal-all-devices. MTLCopyAllDevices only ever exposes
++	// the default device, so nothing in the client depends on the full list.
++	std::vector<size_t> creationOrder;
++	creationOrder.push_back((size_t) selectedIndex);
++	if (allDevices) {
++		for (size_t i = 0; i < candidates.size(); ++i) {
++			if (i == (size_t) selectedIndex) {
++				continue;
++			}
++			if (skipCPUDevices && haveHardwareDevice && candidates[i].properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) {
++				continue;
++			}
++			creationOrder.push_back(i);
++		}
++	}
++
++	for (size_t index: creationOrder) {
++		globalDeviceList.push_back(std::make_shared<PrivateDevice>(candidates[index].device));
++	}
++
++	appendDeviceLog("created VkDevice for " + std::to_string(globalDeviceList.size()) + " of "
++		+ std::to_string(candidates.size()) + " supported device(s)"
++		+ (allDevices ? " (allDevices)" : " (selected only)"));
  };
  
-@@ -83,7 +107,8 @@ Indium::Device::~Device() {};
+ void Indium::finitGlobalDeviceList() {
+@@ -83,7 +302,8 @@ Indium::Device::~Device() {};
  
  Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
  	_physicalDevice(physicalDevice)
@@ -2871,7 +3101,7 @@ index 322e186..70c4a15 100644
  	DynamicVK::vkGetPhysicalDeviceProperties(_physicalDevice, &_properties);
  
  	std::vector<VkQueueFamilyProperties> queueFamilies;
-@@ -233,6 +258,36 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
+@@ -233,6 +453,36 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
  		}
  	}
  
@@ -2908,7 +3138,7 @@ index 322e186..70c4a15 100644
  	VkDeviceCreateInfo deviceCreateInfo {};
  	deviceCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
  	deviceCreateInfo.pQueueCreateInfos = queueCreateInfos.data();
-@@ -246,6 +301,7 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
+@@ -246,6 +496,7 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
  	}
  
  	_features = indiumFeatures;
@@ -2916,7 +3146,7 @@ index 322e186..70c4a15 100644
  
  	for (const auto& index: queueFamilyIndices) {
  		VkQueue queue;
-@@ -297,6 +353,9 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
+@@ -297,6 +548,9 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
  };
  
  Indium::PrivateDevice::~PrivateDevice() {
@@ -2926,7 +3156,7 @@ index 322e186..70c4a15 100644
  	if (_oneshotCommandPool) {
  		DynamicVK::vkDestroyCommandPool(_device, _oneshotCommandPool, nullptr);
  	}
-@@ -308,6 +367,23 @@ std::string Indium::PrivateDevice::name() const {
+@@ -308,6 +562,23 @@ std::string Indium::PrivateDevice::name() const {
  	return _properties.deviceName;
  };
  
@@ -2950,7 +3180,7 @@ index 322e186..70c4a15 100644
  std::shared_ptr<Indium::CommandQueue> Indium::PrivateDevice::newCommandQueue() {
  	return std::make_shared<PrivateCommandQueue>(shared_from_this());
  };
-@@ -317,9 +393,9 @@ std::shared_ptr<Indium::RenderPipelineState> Indium::PrivateDevice::newRenderPip
+@@ -317,9 +588,9 @@ std::shared_ptr<Indium::RenderPipelineState> Indium::PrivateDevice::newRenderPip
  };
  
  std::shared_ptr<Indium::ComputePipelineState> Indium::PrivateDevice::newComputePipelineState(const ComputePipelineDescriptor& descriptor, PipelineOption options, std::shared_ptr<ComputePipelineReflection> reflection) {
@@ -2963,7 +3193,7 @@ index 322e186..70c4a15 100644
  	return std::make_shared<PrivateComputePipelineState>(shared_from_this(), descriptor);
  };
  
-@@ -357,6 +433,7 @@ std::shared_ptr<Indium::Library> Indium::PrivateDevice::newLibrary(const void* d
+@@ -357,6 +628,7 @@ std::shared_ptr<Indium::Library> Indium::PrivateDevice::newLibrary(const void* d
  				break;
  		}
  
@@ -2971,7 +3201,7 @@ index 322e186..70c4a15 100644
  		funcInfo.bindings.insert(funcInfo.bindings.end(), info.bindings.begin(), info.bindings.end());
  		funcInfo.embeddedSamplers.insert(funcInfo.embeddedSamplers.end(), info.embeddedSamplers.begin(), info.embeddedSamplers.end());
  	}
-@@ -480,9 +557,18 @@ void Indium::PrivateDevice::waitForSemaphore(VkSemaphore semaphore, uint64_t tar
+@@ -480,9 +752,18 @@ void Indium::PrivateDevice::waitForSemaphore(VkSemaphore semaphore, uint64_t tar
  	wakeupEventLoop();
  };
  
@@ -2991,7 +3221,7 @@ index 322e186..70c4a15 100644
  	VkSemaphoreTypeCreateInfo typeInfo {};
  	typeInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
  	typeInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
-@@ -505,7 +591,14 @@ Indium::TimelineSemaphore Indium::PrivateDevice::getTimelineSemaphore() {
+@@ -505,7 +786,14 @@ Indium::TimelineSemaphore Indium::PrivateDevice::getTimelineSemaphore() {
  };
  
  void Indium::PrivateDevice::putTimelineSemaphore(const TimelineSemaphore& semaphore) {
@@ -3007,7 +3237,7 @@ index 322e186..70c4a15 100644
  };
  
  std::shared_ptr<Indium::TimelineSemaphore> Indium::PrivateDevice::getWrappedTimelineSemaphore() {
-@@ -551,3 +644,91 @@ std::shared_ptr<Indium::BinarySemaphore> Indium::PrivateDevice::getWrappedBinary
+@@ -551,3 +839,91 @@ std::shared_ptr<Indium::BinarySemaphore> Indium::PrivateDevice::getWrappedBinary
  		delete ptr;
  	});
  };

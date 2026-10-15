@@ -156,6 +156,39 @@ Compare matches on the same map: Bilgewater runs a few percent below Hexgate.
 
 On Hyprland, also check that direct scanout is off (`hyprctl getoption render:direct_scanout` prints `int: 0`). The first match with it off ran about 16 FPS faster than the previous one on the same build; see the next section.
 
+## Hybrid graphics laptops (AMD/Intel iGPU + NVIDIA)
+
+Metal renders with Vulkan, and each finished frame is handed to an OpenGL (EGL) context that presents it. The hand-off uses opaque file descriptors, which only work when Vulkan and OpenGL run on the same GPU. Indium takes the first Vulkan device the loader lists, and on a hybrid laptop both that device and the EGL context are normally the integrated GPU, so the discrete GPU stays idle. A report in [issue #3](https://github.com/lucannez64/darling-lol/issues/3) (Ryzen 9 5900HS, RTX 3060 Laptop) measured about 70 FPS in ARAM; which GPU rendered that match is not known. **Running on an NVIDIA GPU is not validated.**
+
+### Run on the discrete GPU
+
+Start the launcher with PRIME render offload so that both Vulkan and OpenGL move to the NVIDIA GPU:
+
+```sh
+prime-run sh scripts/run.sh
+```
+
+`prime-run` sets `__NV_PRIME_RENDER_OFFLOAD=1`, `__VK_LAYER_NV_optimus=NVIDIA_only` and `__GLX_VENDOR_LIBRARY_NAME=nvidia`. `darling` copies the caller's environment into the guest, and guest processes inherit it; whether the Riot client passes all of it to the game has not been checked; the log below shows the result. Darling's OpenGL uses EGL, so if the log below still shows the integrated GPU as the presenting renderer, also set `__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json`. On two Mesa GPUs, `DRI_PRIME=1` does the same.
+
+The guest file `/tmp/metal-gpu` (a device index or part of its name, for example `nvidia`) moves only the Vulkan side. Use it for diagnosis: on its own it splits the two sides across GPUs, and frames cannot be presented.
+
+### Check which GPU rendered
+
+Each process that uses Metal appends to guest `/tmp/metal-device.log` (host `~/.darling/private/tmp/metal-device.log`): every Vulkan device the loader reported, the selected one and why, and the renderer of the presenting OpenGL context with both device UUIDs:
+
+```
+[MetalDevice] pid=… physical name="NVIDIA GeForce RTX 3060 Laptop GPU" type=discrete vendorID=0x10de … supported=yes
+[MetalDevice] pid=… selected name="NVIDIA GeForce RTX 3060 Laptop GPU" type=discrete … reason=loader-first
+[MetalDevice] pid=… created VkDevice for 1 of 1 supported device(s) (selected only)
+[MetalDevice] pid=… presenting GL renderer="…" vendor="NVIDIA Corporation" … match=yes
+```
+
+`MISMATCH` on the presenting line means Vulkan and OpenGL are on different GPUs. `match=unknown` means the OpenGL driver reports no device UUID. Include this file with performance reports.
+
+### Host-side checks
+
+These are host settings, not game settings. Run on AC power, and use a performance power profile (`powerprofilesctl set performance`, or `asusctl profile -P Performance` on ASUS laptops). On the tested desktop the game is limited mostly by its own main thread on the CPU, not by the GPU (see [status](STATUS.md#game-fps-2026-10-1314)), so laptop CPU power limits matter as much as the GPU choice.
+
 ## Cursor stops changing shape in fullscreen
 
 On Hyprland the game's cursor can keep its first shape (for example, it never switches to the attack cursor) until you leave and re-enter fullscreen. Darling sends every change to the X server; what freezes the shape on screen is Hyprland's direct scanout of the fullscreen Xwayland window. Turn it off in `hyprland.conf`:
