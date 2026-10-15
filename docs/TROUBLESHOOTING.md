@@ -60,7 +60,7 @@ There is also a separate known compatibility gap: native LaunchAgent watch regis
 
 LaunchServices dereferenced a nullable error-output pointer in six paths. The patch checks the pointer itself and populates supplied outputs; the standalone regression covers missing handlers and null outputs. Electron opens LaunchServices through an absolute CoreServices subframework path, so the paired installer also replaces that binary in the stopped guest prefix. Updating only `RuntimeFrameworks/LaunchServices.framework` can leave the crash unfixed.
 
-LaunchServices now opens `http`, `https` and `mailto` links on the Linux desktop itself. It loads the host's `libsystemd.so.0` and asks `xdg-desktop-portal` (`org.freedesktop.portal.OpenURI`) on the user session bus to open the link, so your default browser starts outside Darling and survives `darling shutdown`. Without a portal, it starts `xdg-open` in a transient systemd user unit instead. It also reports a handler for these schemes, since Electron checks for one before opening a link. Other schemes, control characters and URLs over 4096 bytes are rejected. If a link still does nothing, check the client's stderr for a `LaunchServices:` line and that `busctl --user status org.freedesktop.portal.Desktop` works on the host. Both LaunchServices and AppKit must be rebuilt; the old `/private/tmp/rclol-open` spool and `tools/riot-open-url-bridge.py` are obsolete. The hand-off passed the host-side D-Bus regression and opened the host browser from a guest through both `open(1)` and `NSWorkspace`; a link clicked in the Riot client is not yet confirmed. The null-pointer fix does not explain every unrelated button crash.
+LaunchServices now opens `http`, `https` and `mailto` links on the Linux desktop itself. It loads the host's `libsystemd.so.0` and asks `xdg-desktop-portal` (`org.freedesktop.portal.OpenURI`) on the user session bus to open the link, so your default browser starts outside Darling and survives `darling shutdown`. Without a portal, it starts `xdg-open` in a transient systemd user unit instead. It also reports a handler for these schemes, since Electron checks for one before opening a link. Other schemes, control characters and URLs over 4096 bytes are rejected. If a link still does nothing, check the client's stderr for a `LaunchServices:` line and that `busctl --user status org.freedesktop.portal.Desktop` works on the host. Both LaunchServices and AppKit must be rebuilt. The hand-off passed the host-side D-Bus regression and opened the host browser from a guest through both `open(1)` and `NSWorkspace`; a link clicked in the Riot client is not yet confirmed. The null-pointer fix does not explain every unrelated button crash.
 
 ## `LOLSIGFAIL … addr=0x143` every 10 seconds
 
@@ -91,7 +91,7 @@ If FPS drops back towards the 10-13 morning numbers (75–85 on Hexgate):
 
 1. Make sure the current kernel library, Metal and Indium overlays are installed and active: exit the game and both clients, then `darling shutdown` and `sh scripts/run.sh` ([setup](SETUP.md#game-process-switches)).
 2. Check the game's line in `/tmp/rclol-game-decisions.log`: it should read `local_semaphores=1` and `core_isolation=0`. No `/tmp/rclol-no-local-*` file should exist unless you created it on purpose.
-3. Capture a match with `tools/riot-match-capture/sample-match.py` and compare it with an earlier one using `compare-matches.py` ([testing](TESTING.md#passive-match-capture)). A server wait above about 0.5 ms per frame means one of the local paths is off. A runqueue wait above a few percent on the main thread means the CPU is oversubscribed, for example by `/tmp/rclol-core-isolation` or background load.
+3. A server wait above about 0.5 ms per frame means one of the local paths is off. A runqueue wait above a few percent on the main thread means the CPU is oversubscribed, for example by `/tmp/rclol-core-isolation` or background load.
 
 Compare matches on the same map: Bilgewater runs a few percent below Hexgate.
 
@@ -99,7 +99,7 @@ On Hyprland, also check that direct scanout is off (`hyprctl getoption render:di
 
 ## Cursor stops changing shape in fullscreen
 
-On Hyprland the game's cursor can keep its first shape (for example, it never switches to the attack cursor) until you leave and re-enter fullscreen. Darling sends every change: `tools/riot-cursor-watch/cursor-watch.c` logs the X server's displayed cursor and saw about 1,500 changes in a 12-minute match. What freezes the shape on screen is Hyprland's direct scanout of the fullscreen Xwayland window. Turn it off in `hyprland.conf`:
+On Hyprland the game's cursor can keep its first shape (for example, it never switches to the attack cursor) until you leave and re-enter fullscreen. Darling sends every change to the X server; what freezes the shape on screen is Hyprland's direct scanout of the fullscreen Xwayland window. Turn it off in `hyprland.conf`:
 
 ```
 render {
@@ -107,11 +107,4 @@ render {
 }
 ```
 
-`hyprctl keyword render:direct_scanout 0` applies it until Hyprland restarts. To check the X side yourself, build and run the watcher while playing:
-
-```sh
-cc -O2 -o build/riot-cursor-watch tools/riot-cursor-watch/cursor-watch.c -lX11 -lXfixes
-build/riot-cursor-watch
-```
-
-It prints one line per cursor change. It only listens for X server notifications and does not touch the game.
+`hyprctl keyword render:direct_scanout 0` applies it until Hyprland restarts.

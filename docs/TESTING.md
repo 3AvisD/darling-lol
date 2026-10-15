@@ -11,11 +11,9 @@ python3 scripts/prepare.py --check-only
 python3 tools/riot-launcher-offline-check.py
 python3 tools/riot-memory-installer-offline-check.py
 python3 tools/riot-foundation-installer-offline-check.py
-node tools/riot-league-update-check.js
-node tools/riot-open-url-check.js
 ```
 
-The patch check uses temporary base indexes and does not reset or modify the source checkout. The launcher check uses stub commands and never starts or contacts Riot or Darling. It checks installed-client and first-time-installer launches, strips inherited `DYLD_INSERT_LIBRARIES` even with the old VPX opt-in set, and preserves Darling runtime library/framework paths. The memory-installer check imports the installer and exercises its policy (default source is the prepared artifact; the artifact is never a destination of a different library) in temporary directories. The Foundation-installer check does the same for the overlay installer: it seeds a temporary framework from a stub SDK, replaces `Versions/C/Foundation`, keeps the standard symlinks, stages a backup, treats a re-run as current and refuses a non-Mach-O source. The JavaScript checks use mock Electron/filesystem/HTTP objects; they do not enable the legacy hooks in a real client. The installer handoff mock covers 28 scenarios, including HTTP 409, interrupted verification and preserving active downloads.
+The patch check uses temporary base indexes and does not reset or modify the source checkout. The launcher check uses stub commands and never starts or contacts Riot or Darling. It checks installed-client and first-time-installer launches, strips inherited `DYLD_INSERT_LIBRARIES` even with the old VPX opt-in set, and preserves Darling runtime library/framework paths. The memory-installer check imports the installer and exercises its policy (default source is the prepared artifact; the artifact is never a destination of a different library) in temporary directories. The Foundation-installer check does the same for the overlay installer: it seeds a temporary framework from a stub SDK, replaces `Versions/C/Foundation`, keeps the standard symlinks, stages a backup, treats a re-run as current and refuses a non-Mach-O source. The installer handoff mock covers 28 scenarios, including HTTP 409, interrupted verification and preserving active downloads.
 
 ## Standalone guest probes
 
@@ -344,44 +342,9 @@ sh tools/run-deferred-handoff-tests.sh
 
 Both tests compile the real Indium private headers with the host compiler. `test-deferred-handoff` checks four things. The submit thread runs tasks in post order. The present-dispatch token returns while a later task is still queued, and `drain()` waits for that task. The wait counters write nothing without `/tmp/metal-debug-waits` (checked in a forked child). With the flag, they write one `waits enabled` line and then count only waits that actually blocked. `test-deferred-encoder-model` checks the deferred blit and render hand-off: order, resource lifetime and the drop after commit. The test creates the host `/tmp/metal-debug-waits` for its run and removes it afterwards. In the runtime these mechanisms are opt-in (see [setup](SETUP.md#metal-and-indium-overlays)). Expected: `all host deferred-hand-off tests passed`.
 
-## Passive match capture
-
-These tools observe a manually played match from the host. They wait for the game process, stop when it exits, and never attach to it, write to it, or read its memory.
-
-```sh
-python3 tools/riot-match-capture/sample-match.py           # start before the match; writes build/logs/host-sample-<stamp>.jsonl
-python3 tools/riot-match-capture/sample-report.py build/logs/host-sample-<stamp>.jsonl
-python3 tools/riot-match-capture/compare-matches.py \
-  "before=build/logs/host-sample-A.jsonl:$HOME/.darling/Applications/League of Legends.app/Contents/LoL/Logs/GameLogs/<A>" \
-  "after=build/logs/host-sample-B.jsonl:$HOME/.darling/Applications/League of Legends.app/Contents/LoL/Logs/GameLogs/<B>"
-```
-
-`sample-match.py` reads only `/proc` and `/sys`. Per thread of the game and of darlingserver it records scheduler run, runqueue and wakeup counts every second, and the system call each thread is blocked in (50 Hz for the main thread, 10 Hz for the others). It also records GPU busy percentage, the game's huge-page share every 30 seconds, and whether another of our threads runs on the main thread's SMT sibling. `compare-matches.py` aligns the capture with the game's 10-second `netstats.csv` rows. It prints average FPS, the worst row, the slowest quarter and, per frame, the main thread's CPU time, server waits, futex waits and blocks.
-
-For an instruction-address profile, which needs `perf_event_paranoid` ≤ 2 (user-space samples only), build the sampler once and run the wrapper instead:
-
-```sh
-c++ -O2 -std=c++17 -o build/riot-ip-profiler tools/riot-match-capture/ip-profiler.cpp
-python3 tools/riot-match-capture/profile-match.py
-python3 tools/riot-match-capture/profile-report.py build/logs/host-profile-<stamp> 120 4
-python3 tools/riot-match-capture/profile-symbols.py build/logs/host-profile-<stamp> <main tid> Metal libobjc.A.dylib libindium.dylib
-```
-
-Hardware counters for the main thread (counting only: no samples, no addresses) show whether the game loses time to TLB misses, which decides whether huge pages for its code or heap are worth pursuing:
-
-```sh
-c++ -O2 -std=c++17 -o build/riot-hw-counters tools/riot-match-capture/hw-counters.cpp
-python3 tools/riot-match-capture/counter-match.py
-python3 tools/riot-match-capture/counter-report.py build/logs/host-counters-<stamp>.jsonl "$HOME/.darling/Applications/League of Legends.app/Contents/LoL/Logs/GameLogs/<date>"
-```
-
-The raw TLB events are AMD Zen 3 encodings. On the Ryzen 5 5500, a random-read test over 1 GiB of 4 KiB pages reports about 62 dTLB walks per 1000 instructions; the same test on huge pages reports 0.04.
-
-The profiler samples each thread's user-space instruction pointer every 1 ms on the main thread and every 4 ms on the others, with no call stacks and no registers. The wrapper records the memory map every 15 seconds so the report can attribute samples to modules. Ask the person playing before profiling their match.
-
 ## Manual game observation
 
-Play matches manually through Riot. Check sound, keyboard/mouse buttons, fullscreen confinement, camera motion and returning to the client. The legacy `baron-setup.py`, `baron-reset.py`, `profile-cycle.sh`, inspector scheduling/update/URL helpers and Electron binary patching tools are excluded from this workflow. Normal launches enable none of these helpers and do not force unlimited UI frames. Automatic installer handoff and host external-link forwarding are consequently unavailable.
+Play matches manually through Riot. Check sound, keyboard/mouse buttons, fullscreen confinement, camera motion and returning to the client. Inspector, input-automation, client-API and client-binary-patching helpers are not part of this project. Normal launches enable none of these helpers and do not force unlimited UI frames. Automatic installer handoff and host external-link forwarding are consequently unavailable.
 
 Observe host CPU/thread scheduling, GPU counters, temperatures and memory pressure without controlling the client/game. Record manual FPS readings with timestamps and comparable graphics settings. Do not interpret a socket wait as avoidable RPC latency without distinguishing intentional synchronization. Server-only CPU sampling identifies costs but does not measure per-frame causality.
 

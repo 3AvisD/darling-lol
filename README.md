@@ -10,7 +10,6 @@ This is a development snapshot, not a finished launcher. Riot and League clients
 - Event-poll presentation and GPU synchronization fixes, floating-point-safe GL resolvers, multi-window presentation and nullable LaunchServices error handling.
 - Reusable server receive buffers and Darwin allocator hints translated to Linux lazy reclamation.
 - Build/install/launch wrappers, atomic incremental installers and standalone regression probes.
-- Historical experiments in `tools/` and `research/tools/`, explicitly excluded from the normal workflow where they automate or inspect the client/game.
 
 Game files, Riot installers, account databases, tokens, local prefixes, captures and compiled binaries are not included. Install the game manually through Riot. The normal launcher does not enable an Electron inspector or start UI automation helpers. The launcher clears `DYLD_INSERT_LIBRARIES` and retains Darling runtime library/framework overrides; this is not a claim of approval by Riot.
 
@@ -60,7 +59,7 @@ For another region, set `RCLOL_REGION` and `RCLOL_LOCALE` before launch. For exa
 
 ## Testing
 
-Start with standalone regression checks, then play a match manually. See [testing](docs/TESTING.md). Do not attach a debugger, query client APIs, inject diagnostic hooks or automate client/game input. Legacy practice, profiling and inspector helpers are retained as historical source, not recommended launch or testing steps.
+Start with standalone regression checks, then play a match manually. See [testing](docs/TESTING.md). Do not attach a debugger, query client APIs, inject diagnostic hooks or automate client/game input. This project ships no client-side automation, inspection or profiling helpers.
 
 FPS counters, game presentation requests and physical display refresh are different measurements. Record average and p99 frame times, the active scene, graphics settings, charger/power state and whether the game stayed focused. See [current status](docs/STATUS.md).
 
@@ -74,8 +73,7 @@ For existing installations, [incremental update instructions](docs/SETUP.md#upda
 scripts/             portable entry points
 upstream/manifest.json  exact base revisions and patch ownership
 patches/             current source changes, one patch per repository
-tools/               runtime templates, regression probes and legacy helpers
-research/tools/      historical experiments, not a supported workflow
+tools/               runtime templates, installers and standalone regression probes
 docs/                setup, testing, status and licensing notes
 build/               local sources, outputs and rendered tools (ignored)
 ```
