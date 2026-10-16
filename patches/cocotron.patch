@@ -8703,10 +8703,10 @@ index 5dcac115..5de4f03f 100644
 +
  @end
 diff --git a/QuartzCore/CALayerContext.m b/QuartzCore/CALayerContext.m
-index 5dce8c56..dee2b80c 100644
+index 5dce8c56..7f9125e3 100644
 --- a/QuartzCore/CALayerContext.m
 +++ b/QuartzCore/CALayerContext.m
-@@ -1,47 +1,58 @@
+@@ -1,47 +1,69 @@
  #import <Foundation/NSString.h>
 +#import <Foundation/NSMutableArray.h>
  #import <QuartzCore/CALayer.h>
@@ -8720,6 +8720,17 @@ index 5dce8c56..dee2b80c 100644
  
  @class CAMetalLayerInternal;
  
++/* A flattened IOSurface only replaces local rendering for trees without
++ * Metal content. Skipping a mixed tree also skips prepareRender, exhausting
++ * its drawable pool even though presentation callbacks continue to run. */
++static BOOL hasMetalLayer(CALayer *layer) {
++    if ([[layer class] isSubclassOfClass: [CAMetalLayerInternal class]])
++        return YES;
++    for (CALayer *child in layer.sublayers)
++        if (hasMetalLayer(child))return YES;
++    return NO;
++}
++
 +/* The X11 transport presents Chromium's flattened full-window surface.
 + * Avoid uploading and compositing that same window again into a covered GL
 + * child. Restrict this to the explicitly configured native presentation path. */
@@ -8784,7 +8795,7 @@ index 5dce8c56..dee2b80c 100644
      [super dealloc];
  }
  
-@@ -51,12 +62,22 @@
+@@ -51,12 +73,22 @@
  }
  
  - (void) setLayer: (CALayer *) layer {
@@ -8807,7 +8818,7 @@ index 5dce8c56..dee2b80c 100644
  }
  
  - (void) setSubwindow: (CGSubWindow*) subwindow
-@@ -68,16 +89,50 @@
+@@ -68,16 +100,50 @@
      }
  
      _subwindow = [subwindow retain];
@@ -8859,7 +8870,7 @@ index 5dce8c56..dee2b80c 100644
  }
  
  - (void) assignTextureIdsToLayerTree: (CALayer *) layer {
-@@ -93,7 +148,22 @@
+@@ -93,7 +159,22 @@
          [self assignTextureIdsToLayerTree: child];
  }
  
@@ -8882,7 +8893,7 @@ index 5dce8c56..dee2b80c 100644
      CGLContextMakeCurrentAndAttachToWindow(_glContext, _cglWindow);
  
      glEnable(GL_DEPTH_TEST);
-@@ -118,27 +188,63 @@
+@@ -118,27 +199,63 @@
  
      [_deleteTextureIds removeAllObjects];
  
@@ -8907,7 +8918,7 @@ index 5dce8c56..dee2b80c 100644
 +    if (_cglWindow == NULL || _layer == nil)
 +        return;
 +    if(getenv("DARLING_CA_SKIP_LOCAL_IOSURFACE_RENDER") &&
-+       hasFullWindowSurface(_layer,_frame.size))return;
++       !hasMetalLayer(_layer) && hasFullWindowSurface(_layer,_frame.size))return;
      [self renderLayer: _layer];
  }
  
@@ -8951,7 +8962,7 @@ index 5dce8c56..dee2b80c 100644
  }
  
  - (void) startTimerIfNeeded {
-@@ -147,7 +253,7 @@
+@@ -147,7 +264,7 @@
                                                     target: self
                                                   selector: @selector(timer:)
                                                   userInfo: nil
@@ -8960,13 +8971,13 @@ index 5dce8c56..dee2b80c 100644
  }
  
  - (void) deleteTextureId: (NSNumber *) textureId {
-@@ -155,7 +261,10 @@
+@@ -155,7 +272,10 @@
  }
  
  - (void) flush {
 -    CGLFlushDrawable(_glContext);
 +    if(getenv("DARLING_CA_SKIP_LOCAL_IOSURFACE_RENDER") && _layer &&
-+       hasFullWindowSurface(_layer,_frame.size))return;
++       !hasMetalLayer(_layer) && hasFullWindowSurface(_layer,_frame.size))return;
 +    if (_glContext != NULL && _cglWindow != NULL)
 +        CGLFlushDrawable(_glContext);
  }
