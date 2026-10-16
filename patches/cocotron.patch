@@ -2307,7 +2307,7 @@ index 18189404..c683f96a 100644
 +- (NSRect) frameForRootRect: (NSRect) rect;
  @end
 diff --git a/AppKit/X11.backend/X11Display.m b/AppKit/X11.backend/X11Display.m
-index 5ae29bf4..580386b4 100644
+index 5ae29bf4..25056329 100644
 --- a/AppKit/X11.backend/X11Display.m
 +++ b/AppKit/X11.backend/X11Display.m
 @@ -48,12 +48,271 @@
@@ -3391,7 +3391,7 @@ index 5ae29bf4..580386b4 100644
          [self postEvent: event atStart: NO];
          break;
  
-@@ -1160,49 +1855,114 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1160,49 +1855,106 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
              // ev->xmotion.x, ev->xmotion.y, ev->xmotion.x_root,
              // ev->xmotion.y_root);
  
@@ -3409,18 +3409,10 @@ index 5ae29bf4..580386b4 100644
 +            rclolPointerStamp = mach_absolute_time();
 +
 +            if (_confinedWindow == [window windowHandle] && _confinedWidth > 0 && _confinedHeight > 0) {
-+                int clampedX = ev->xmotion.x;
-+                int clampedY = ev->xmotion.y;
-+                BOOL needWarp = NO;
-+                if (clampedX < 0) { clampedX = 0; needWarp = YES; }
-+                else if (clampedX >= _confinedWidth) { clampedX = _confinedWidth - 1; needWarp = YES; }
-+                if (clampedY < 0) { clampedY = 0; needWarp = YES; }
-+                else if (clampedY >= _confinedHeight) { clampedY = _confinedHeight - 1; needWarp = YES; }
-+                if (needWarp) {
-+                    XWarpPointer(_display, None, _confinedWindow, 0, 0, 0, 0, clampedX, clampedY);
-+                    ev->xmotion.x = clampedX;
-+                    ev->xmotion.y = clampedY;
-+                }
++                if (ev->xmotion.x < 0) ev->xmotion.x = 0;
++                else if (ev->xmotion.x > _confinedWidth) ev->xmotion.x = _confinedWidth;
++                if (ev->xmotion.y < 0) ev->xmotion.y = 0;
++                else if (ev->xmotion.y > _confinedHeight) ev->xmotion.y = _confinedHeight;
 +            }
 +
              CGPoint lastMotionPos = [window mouseLocationOutsideOfEventStream];
@@ -3532,7 +3524,7 @@ index 5ae29bf4..580386b4 100644
                      mouseEventWithType: type
                                location: pos
                           modifierFlags:
-@@ -1211,28 +1971,58 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1211,28 +1963,58 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                              clickCount: 1
                                  deltaX: deltaX
                                  deltaY: deltaY];
@@ -3593,7 +3585,7 @@ index 5ae29bf4..580386b4 100644
          NSLog(@"FocusIn");
          if ([delegate attachedSheet]) {
              [[delegate attachedSheet] makeKeyAndOrderFront: delegate];
-@@ -1243,28 +2033,61 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1243,28 +2025,61 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                                   checkForAppDeactivation: NO];
              lastFocusedWindow = nil;
          }
@@ -3657,7 +3649,7 @@ index 5ae29bf4..580386b4 100644
          O2Rect rect = NSMakeRect(ev->xexpose.x, ev->xexpose.y,
                                   ev->xexpose.width, ev->xexpose.height);
  
-@@ -1301,11 +2124,23 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1301,11 +2116,23 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case UnmapNotify:
@@ -3685,7 +3677,7 @@ index 5ae29bf4..580386b4 100644
          break;
  
      case MapRequest:
-@@ -1317,10 +2152,15 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1317,10 +2144,15 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case ConfigureNotify:
@@ -3701,7 +3693,7 @@ index 5ae29bf4..580386b4 100644
          break;
  
      case ConfigureRequest:
-@@ -1344,6 +2184,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1344,6 +2176,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case PropertyNotify:
@@ -3710,7 +3702,7 @@ index 5ae29bf4..580386b4 100644
          if ([window respondsToSelector: @selector(propertyNotify:)]) {
              [window propertyNotify: &ev->xproperty];
          }
-@@ -1399,7 +2241,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1399,7 +2233,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      default:
@@ -3721,7 +3713,7 @@ index 5ae29bf4..580386b4 100644
              [self _invalidateRRCache];
              break;
          }
-@@ -1433,6 +2277,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1433,6 +2269,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
      NSLog(@"Request code: %d:%d", errorEvent->request_code,
            errorEvent->minor_code);
      NSLog(@"Error code: %d", errorEvent->error_code);
@@ -3732,7 +3724,7 @@ index 5ae29bf4..580386b4 100644
      return 0;
  }
  
-@@ -1476,54 +2324,285 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
+@@ -1476,54 +2316,285 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
      return frame;
  }
  
@@ -4454,7 +4446,7 @@ index bfe3839a..dbc974a0 100644
  - (void) frameChanged;
  - (void) setLastKnownCursorPosition: (CGPoint) point;
 diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
-index f4925b66..af6df163 100644
+index f4925b66..c288eb38 100644
 --- a/AppKit/X11.backend/X11Window.m
 +++ b/AppKit/X11.backend/X11Window.m
 @@ -38,6 +38,34 @@
@@ -4581,7 +4573,7 @@ index f4925b66..af6df163 100644
      return self;
  }
  
-@@ -287,10 +363,19 @@ static NSData *makeWindowIcon() {
+@@ -287,16 +363,33 @@ static NSData *makeWindowIcon() {
              // Make resizable
              sh->flags = 0;
          } else {
@@ -4605,23 +4597,59 @@ index f4925b66..af6df163 100644
          }
  
          XSetWMSizeHints(_display, _window, sh, XA_WM_NORMAL_HINTS);
-@@ -304,7 +389,14 @@ static NSData *makeWindowIcon() {
+         XFree(sh);
+     }
+ 
++    NSString *procName = [[NSProcessInfo processInfo] processName];
++    BOOL isGame = (procName && [procName rangeOfString:@"League" options:NSCaseInsensitiveSearch].location != NSNotFound &&
++                   [procName rangeOfString:@"Ux" options:NSCaseInsensitiveSearch].location == NSNotFound);
++    BOOL wasFullscreen = (_styleMask & NSWindowStyleMaskFullScreen) != 0 ||
++                         (isGame && (_styleMask == NSBorderlessWindowMask || !(_styleMask & NSTitledWindowMask)));
++    BOOL makeFullscreen = (mask & NSWindowStyleMaskFullScreen) != 0 ||
++                          (isGame && (mask == NSBorderlessWindowMask || !(mask & NSTitledWindowMask)));
++
+     if (!_mapped) {
+         long states[2];
+         int states_cnt = 0;
+@@ -304,7 +397,7 @@ static NSData *makeWindowIcon() {
              states[states_cnt++] =
                      (long) XInternAtom(_display, "_NET_WM_STATE_MODAL", False);
          }
 -        if (mask & NSWindowStyleMaskFullScreen) {
-+        NSString *procName = [[NSProcessInfo processInfo] processName];
-+        BOOL isGame = (procName && [procName rangeOfString:@"League" options:NSCaseInsensitiveSearch].location != NSNotFound &&
-+                       [procName rangeOfString:@"Ux" options:NSCaseInsensitiveSearch].location == NSNotFound);
-+        BOOL makeFullscreen = (mask & NSWindowStyleMaskFullScreen) != 0;
-+        if (!makeFullscreen && isGame && (mask == NSBorderlessWindowMask || !(mask & NSTitledWindowMask))) {
-+            makeFullscreen = YES;
-+        }
 +        if (makeFullscreen) {
              states[states_cnt++] = (long) XInternAtom(
                      _display, "_NET_WM_STATE_FULLSCREEN", False);
          }
-@@ -338,7 +430,6 @@ static NSData *makeWindowIcon() {
+@@ -312,20 +405,25 @@ static NSData *makeWindowIcon() {
+                         XInternAtom(_display, "_NET_WM_STATE", False), XA_ATOM,
+                         32, PropModeReplace, (const unsigned char *) states,
+                         states_cnt);
+-    } else if (force || ((mask & NSWindowStyleMaskFullScreen) !=
+-                         (_styleMask & NSWindowStyleMaskFullScreen))) {
++    } else if (force || (makeFullscreen != wasFullscreen)) {
+         XClientMessageEvent event = {0};
+         event.type = ClientMessage;
+         event.window = _window;
+         event.message_type = XInternAtom(_display, "_NET_WM_STATE", False);
+         event.format = 32;
+-        event.data.l[0] = (mask & NSWindowStyleMaskFullScreen) ? 1 : 2;
++        event.data.l[0] = makeFullscreen ? 1 : 2;
+         event.data.l[1] =
+                 (long) XInternAtom(_display, "_NET_WM_STATE_FULLSCREEN", False);
+         event.data.l[3] = 1;
+         XSendEvent(_display, DefaultRootWindow(_display), False,
+                    SubstructureNotifyMask | SubstructureRedirectMask,
+                    (XEvent *) &event);
++        if (makeFullscreen) {
++            unsigned long bypass = 2;
++            XChangeProperty(_display, _window, XInternAtom(_display, "_NET_WM_BYPASS_COMPOSITOR", False),
++                            XA_CARDINAL, 32, PropModeReplace, (unsigned char *)&bypass, 1);
++        }
++        XFlush(_display);
+     }
+ }
+ 
+@@ -338,7 +436,6 @@ static NSData *makeWindowIcon() {
  }
  
  + (void) removeDecorationForWindow: (Window) w onDisplay: (Display *) dpy {
@@ -4629,7 +4657,7 @@ index f4925b66..af6df163 100644
      struct {
          unsigned long flags;
          unsigned long functions;
-@@ -358,6 +449,7 @@ static NSData *makeWindowIcon() {
+@@ -358,6 +455,7 @@ static NSData *makeWindowIcon() {
      if (!_mapped) {
          XMapWindow(_display, _window);
          _mapped = YES;
@@ -4637,7 +4665,7 @@ index f4925b66..af6df163 100644
      }
  }
  
-@@ -377,15 +469,27 @@ static NSData *makeWindowIcon() {
+@@ -377,15 +475,27 @@ static NSData *makeWindowIcon() {
  - (void) syncDelegateProperties {
      long mask = KeyPressMask | KeyReleaseMask | ExposureMask |
                  StructureNotifyMask | EnterWindowMask | LeaveWindowMask |
@@ -4670,7 +4698,7 @@ index f4925b66..af6df163 100644
      // TODO: background color
  }
  
-@@ -393,6 +497,28 @@ static NSData *makeWindowIcon() {
+@@ -393,6 +503,28 @@ static NSData *makeWindowIcon() {
      // This is essentially dealloc; we release our contexts
      // and windows, but unlike dealloc, this method can be called
      // several times, so set everything to nil/NULL/0.
@@ -4699,7 +4727,7 @@ index f4925b66..af6df163 100644
      [_context release];
      _context = nil;
  
-@@ -421,6 +547,388 @@ static NSData *makeWindowIcon() {
+@@ -421,6 +553,388 @@ static NSData *makeWindowIcon() {
      }
  }
  
@@ -5088,7 +5116,7 @@ index f4925b66..af6df163 100644
  - (Window) windowHandle {
      return _window;
  }
-@@ -470,14 +978,31 @@ static NSData *makeWindowIcon() {
+@@ -470,14 +984,32 @@ static NSData *makeWindowIcon() {
      const char *text = [title cString];
      XStringListToTextProperty((char **) &text, 1, &prop);
      XSetWMName(_display, _window, &prop);
@@ -5118,10 +5146,11 @@ index f4925b66..af6df163 100644
 +            XSetWMSizeHints(_display, _window, &hints, XA_WM_NORMAL_HINTS);
 +        }
 +    }
++    [(X11Display *)[NSDisplay currentDisplay] updateMouseConfinementForWindow:self];
  }
  
  - (void) setHasShadow: (BOOL) value {
-@@ -488,6 +1013,25 @@ static NSData *makeWindowIcon() {
+@@ -488,6 +1020,25 @@ static NSData *makeWindowIcon() {
      _level = value;
  }
  
@@ -5147,7 +5176,7 @@ index f4925b66..af6df163 100644
  - (void) setOpaque: (BOOL) value {
      _isOpaque = value;
  }
-@@ -543,6 +1087,18 @@ static NSData *makeWindowIcon() {
+@@ -543,6 +1094,18 @@ static NSData *makeWindowIcon() {
  - (void) makeKey {
      [self ensureMapped];
      XRaiseWindow(_display, _window);
@@ -5166,7 +5195,7 @@ index f4925b66..af6df163 100644
  }
  
  - (void) makeMain {
-@@ -559,7 +1115,29 @@ static NSData *makeWindowIcon() {
+@@ -559,7 +1122,29 @@ static NSData *makeWindowIcon() {
      XRaiseWindow(_display, _window);
  }
  
@@ -5196,7 +5225,7 @@ index f4925b66..af6df163 100644
      Atom wmState = XInternAtom(_display, "_NET_WM_STATE", FALSE);
      Atom hiddenState = XInternAtom(_display, "_NET_WM_STATE_HIDDEN", FALSE);
  
-@@ -615,6 +1193,12 @@ static NSData *makeWindowIcon() {
+@@ -615,6 +1200,12 @@ static NSData *makeWindowIcon() {
  }
  
  - (void) openGLFlushBuffer {
@@ -5209,7 +5238,7 @@ index f4925b66..af6df163 100644
      CGLError error;
  
      CGLContextObj prevContext = CGLGetCurrentContext();
-@@ -652,7 +1236,7 @@ static NSData *makeWindowIcon() {
+@@ -652,7 +1243,7 @@ static NSData *makeWindowIcon() {
  }
  
  - (O2Rect) frame {
@@ -5218,7 +5247,7 @@ index f4925b66..af6df163 100644
  }
  
  static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
-@@ -666,6 +1250,7 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
+@@ -666,6 +1257,7 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
  }
  
  - (void) frameChanged {
@@ -5226,7 +5255,7 @@ index f4925b66..af6df163 100644
      XErrorHandler previousHandler = XSetErrorHandler(ignoreBadWindow);
      @try {
          Window root, parent;
-@@ -710,14 +1295,6 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
+@@ -710,14 +1302,6 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
      [_deviceDictionary addEntriesFromDictionary: entries];
  }
  
