@@ -22,3 +22,26 @@ except (OSError, StopIteration):
 if dead:
     os.replace(marker, prefix / f'.init.pid.stale-{pid}-{time.time_ns()}')
     print(f'Recovered stale Darling server marker for PID {pid}', flush=True)
+
+# Clean up stale Riot temporary files and shared memory frames from previous crashes
+try:
+    tmp_dir = prefix / 'private/tmp'
+    if tmp_dir.is_dir():
+        for f in tmp_dir.glob('.com.riotgames.*'):
+            try:
+                f.unlink(missing_ok=True)
+            except OSError:
+                pass
+except OSError:
+    pass
+
+try:
+    shm_dir = Path('/dev/shm')
+    if shm_dir.is_dir():
+        for f in shm_dir.glob('darling-*'):
+            try:
+                f.unlink(missing_ok=True)
+            except OSError:
+                pass
+except OSError:
+    pass
