@@ -7105,13 +7105,14 @@ index 5ad375f8..c8e83814 100644
 +- (BOOL) _treeHasAnimations;
  @end
 diff --git a/QuartzCore/CAMetalDrawable.mm b/QuartzCore/CAMetalDrawable.mm
-index d6f86b31..4d08ce26 100644
+index d6f86b31..2bdc198d 100644
 --- a/QuartzCore/CAMetalDrawable.mm
 +++ b/QuartzCore/CAMetalDrawable.mm
-@@ -31,6 +31,12 @@
+@@ -31,6 +31,13 @@
  #include <OpenGL/glext.h>
  #include <indium/indium.private.hpp>
  
++#include <atomic>
 +#include <cstdio>
 +#include <cstring>
 +#include <mutex>
@@ -7121,7 +7122,7 @@ index d6f86b31..4d08ce26 100644
  namespace DynamicVK = Indium::DynamicVK;
  
  static void reportGLErrors(void) {
-@@ -50,8 +56,86 @@ static void reportGLErrors(void) {
+@@ -50,8 +57,98 @@ static void reportGLErrors(void) {
  namespace Indium::DynamicVK {
  	static DynamicFunction<PFN_vkGetSemaphoreFdKHR> vkGetSemaphoreFdKHR("vkGetSemaphoreFdKHR");
  	static DynamicFunction<PFN_vkGetMemoryFdKHR> vkGetMemoryFdKHR("vkGetMemoryFdKHR");
@@ -7138,6 +7139,21 @@ index d6f86b31..4d08ce26 100644
 +// silently break. Record which GL renderer actually presents and whether its
 +// device UUID matches the Vulkan device's, once per process, in
 +// /tmp/metal-device.log (alongside the device list Indium logs at startup).
++// Clears pending GL errors (bounded: without a current context glGetError may never
++// report GL_NO_ERROR).
++static void drainGLErrors() {
++	for (int i = 0; i < 16 && glGetError() != GL_NO_ERROR; ++i) {
++	}
++}
++
++// Same line format as Indium's device log.
++static void appendDeviceLog(const std::string& line) {
++	if (FILE* log = fopen("/tmp/metal-device.log", "a")) {
++		fprintf(log, "[MetalDevice] pid=%d %s\n", getpid(), line.c_str());
++		fclose(log);
++	}
++}
++
 +static std::string darlingUuidString(const GLubyte* uuid) {
 +	static const char* digits = "0123456789abcdef";
 +	std::string out;
@@ -7198,17 +7214,104 @@ index d6f86b31..4d08ce26 100644
 +			line += " match=unknown";
 +		}
 +
-+		if (FILE* log = fopen("/tmp/metal-device.log", "a")) {
-+			fprintf(log, "[MetalDevice] pid=%d %s\n", getpid(), line.c_str());
-+			fclose(log);
-+		}
++		appendDeviceLog(line);
 +	});
 +}
 +
  //
  // helper classes
  //
-@@ -161,6 +245,11 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
+@@ -129,13 +226,39 @@ public:
+ // texture
+ //
+ 
+-static size_t findSharedMemory(const VkMemoryRequirements& reqs, std::shared_ptr<Indium::PrivateDevice> device, bool framebufferOnly) {
++static std::string memoryFlagsString(VkMemoryPropertyFlags flags) {
++	char buffer[16];
++	snprintf(buffer, sizeof(buffer), "0x%x(", (unsigned) flags);
++	std::string out = buffer;
++	if (flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) out += "DEVICE_LOCAL|";
++	if (flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) out += "HOST_VISIBLE|";
++	if (flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) out += "HOST_COHERENT|";
++	if (flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) out += "HOST_CACHED|";
++	if (flags & VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT) out += "LAZILY_ALLOCATED|";
++	if (flags & VK_MEMORY_PROPERTY_PROTECTED_BIT) out += "PROTECTED|";
++	if (flags & VK_MEMORY_PROPERTY_DEVICE_COHERENT_BIT_AMD) out += "DEVICE_COHERENT_AMD|";
++	if (flags & VK_MEMORY_PROPERTY_DEVICE_UNCACHED_BIT_AMD) out += "DEVICE_UNCACHED_AMD|";
++	if (out.back() == '|') out.back() = ')';
++	else out += "none)";
++	return out;
++}
++
++// Vulkan orders memory types so a flag-less type (system RAM, which NVIDIA
++// exposes) precedes every DEVICE_LOCAL type, and first fit put framebufferOnly
++// drawables there. Both images are only touched by the GPU then -- the internal
++// one is imported by the presenting OpenGL context, which runs on the same GPU
++// (see reportGpuDeviceMatch) -- so they take the first allowed DEVICE_LOCAL type,
++// falling back to first fit. Without framebufferOnly they still need host-visible,
++// coherent memory and keep first fit. On RADV type 0 is DEVICE_LOCAL: unchanged.
++static size_t findSharedMemory(const VkMemoryRequirements& reqs, std::shared_ptr<Indium::PrivateDevice> device, bool framebufferOnly, bool internal) {
++	const auto& memory = device->memoryProperties();
++	size_t firstFit = SIZE_MAX;
+ 	size_t targetIndex = SIZE_MAX;
+ 
+-	for (size_t i = 0; i < device->memoryProperties().memoryTypeCount; ++i) {
+-		const auto& type = device->memoryProperties().memoryTypes[i];
++	for (size_t i = 0; i < memory.memoryTypeCount; ++i) {
++		const auto& type = memory.memoryTypes[i];
+ 
+-		if ((reqs.memoryTypeBits & (1 << i)) == 0) {
++		if ((reqs.memoryTypeBits & (1u << i)) == 0) {
+ 			continue;
+ 		}
+ 
+@@ -147,9 +270,42 @@ static size_t findSharedMemory(const VkMemoryRequirements& reqs, std::shared_ptr
+ 			continue;
+ 		}
+ 
+-		// okay, this is good enough
+-		targetIndex = i;
+-		break;
++		if (firstFit == SIZE_MAX) {
++			firstFit = i;
++		}
++
++		if (!framebufferOnly || (type.propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0) {
++			targetIndex = i;
++			break;
++		}
++	}
++
++	if (targetIndex == SIZE_MAX) {
++		targetIndex = firstFit;
++	}
++	if (targetIndex == SIZE_MAX) {
++		return targetIndex;
++	}
++
++	// Once per (image, framebufferOnly, type) in the process, in Indium's device log.
++	static std::atomic<uint64_t> logged[2] {};
++	const size_t bit = ((internal ? 2u : 0u) + (framebufferOnly ? 1u : 0u)) * 32 + targetIndex;
++	const uint64_t mask = uint64_t(1) << (bit & 63);
++	if ((logged[bit >> 6].load(std::memory_order_relaxed) & mask) == 0 && (logged[bit >> 6].fetch_or(mask) & mask) == 0) {
++		auto describe = [&](size_t index) {
++			const auto& type = memory.memoryTypes[index];
++			return std::to_string(index) + " flags=" + memoryFlagsString(type.propertyFlags)
++				+ " heap=" + std::to_string(type.heapIndex)
++				+ " heapDeviceLocal=" + ((memory.memoryHeaps[type.heapIndex].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) ? "yes" : "no");
++		};
++		char typeBits[16];
++		snprintf(typeBits, sizeof(typeBits), "0x%08x", (unsigned) reqs.memoryTypeBits);
++		appendDeviceLog(std::string("memory alloc kind=") + (internal ? "drawable-internal" : "drawable")
++			+ " storage=" + (framebufferOnly ? "framebufferOnly" : "hostVisible")
++			+ " typeBits=" + typeBits
++			+ " type=" + describe(targetIndex)
++			+ " firstFit=" + describe(firstFit)
++			+ (targetIndex != firstFit ? " changed=yes" : " changed=no"));
+ 	}
+ 
+ 	return targetIndex;
+@@ -161,6 +317,11 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
  	_pixelFormat(pixelFormat),
  	_framebufferOnly(framebufferOnly)
  {
@@ -7220,18 +7323,93 @@ index d6f86b31..4d08ce26 100644
  	//
  	// create the images
  	//
-@@ -401,6 +490,10 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
+@@ -219,7 +380,7 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
+ 
+ 	DynamicVK::vkGetImageMemoryRequirements(_device->device(), _image, &reqs);
+ 
+-	size_t targetIndex = findSharedMemory(reqs, _device, _framebufferOnly);
++	size_t targetIndex = findSharedMemory(reqs, _device, _framebufferOnly, false);
+ 
+ 	if (targetIndex == SIZE_MAX) {
+ 		throw std::runtime_error("No suitable memory region found for image");
+@@ -242,7 +403,7 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
+ 
+ 	DynamicVK::vkGetImageMemoryRequirements(_device->device(), _internalImage, &reqs);
+ 
+-	targetIndex = findSharedMemory(reqs, _device, _framebufferOnly);
++	targetIndex = findSharedMemory(reqs, _device, _framebufferOnly, true);
+ 
+ 	if (targetIndex == SIZE_MAX) {
+ 		throw std::runtime_error("No suitable memory region found for internal image");
+@@ -380,16 +541,26 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
+ 		abort();
+ 	}
+ 
+-	reportGLErrors();
++	// reportGLErrors() is compiled out, so a failed import used to be silent (a black
++	// window). Clear errors left by earlier calls; the import is checked below.
++	drainGLErrors();
+ 
+ 	// import the memory into OpenGL
+ 	glCreateMemoryObjectsEXT(1, &_memoryObject);
+ 	reportGLErrors();
+ 
++	// _internalMemory is a dedicated allocation (VkMemoryDedicatedAllocateInfo above),
++	// and EXT_external_objects requires DEDICATED_MEMORY_OBJECT_EXT to be TRUE when the
++	// memory was created as one. Mesa ignores the flag; NVIDIA enforces it. It has to be
++	// set before the import, after which the memory object is immutable.
++	GLint dedicated = GL_TRUE;
++	glMemoryObjectParameterivEXT(_memoryObject, GL_DEDICATED_MEMORY_OBJECT_EXT, &dedicated);
++	const GLenum dedicatedError = glGetError();
++
+ 	// this transfers ownership of the FD to OpenGL
+ 	glImportMemoryFdEXT(_memoryObject, reqs.size, GL_HANDLE_TYPE_OPAQUE_FD_EXT, fd);
+ 	fd = -1;
+-	reportGLErrors();
++	const GLenum importError = glGetError();
+ 
+ 	GLint prevTex = 0;
+ 	glGetIntegerv(GL_TEXTURE_BINDING_2D, &prevTex);
+@@ -401,10 +572,36 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
  	glTextureParameteri(_textureID, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
  	glTextureParameteri(_textureID, GL_TEXTURE_WRAP_S, GL_REPEAT);
  	glTextureParameteri(_textureID, GL_TEXTURE_WRAP_T, GL_REPEAT);
+-	reportGLErrors();
 +	// A Metal layer is opaque: macOS ignores the drawable's alpha channel. The game's blended effects lower destination
 +	// alpha as a side effect, and the layer compositor (CARenderer: blending plus an alpha test against 0, over a
 +	// cleared-to-black window) then showed those regions as black quads. Always present alpha = 1.
 +	glTextureParameteri(_textureID, GL_TEXTURE_SWIZZLE_A, GL_ONE);
- 	reportGLErrors();
++	const GLenum setupError = glGetError();
  
  	glTextureStorageMem2DEXT(_textureID, 1, GL_RGBA8, _size.width, _size.height, _memoryObject, 0);
-@@ -605,35 +698,16 @@ void CAMetalDrawableActual::present() {
+-	reportGLErrors();
++	const GLenum storageError = glGetError();
++
++	// The first import in the process is always logged, so a working run on a new
++	// driver shows up too; after that only failed imports, at most five.
++	static std::atomic<unsigned> importCount {0};
++	static std::atomic<unsigned> importFailures {0};
++	const bool failed = dedicatedError != GL_NO_ERROR || importError != GL_NO_ERROR || setupError != GL_NO_ERROR || storageError != GL_NO_ERROR;
++	const bool first = importCount.fetch_add(1, std::memory_order_relaxed) == 0;
++	if (first || (failed && importFailures.fetch_add(1, std::memory_order_relaxed) < 5)) {
++		GLint dedicatedReadBack = -1;
++		GLint tiling = 0;
++		glGetMemoryObjectParameterivEXT(_memoryObject, GL_DEDICATED_MEMORY_OBJECT_EXT, &dedicatedReadBack);
++		glGetTextureParameteriv(_textureID, GL_TEXTURE_TILING_EXT, &tiling);
++		const GLenum queryError = glGetError();
++		char line[512];
++		snprintf(line, sizeof(line), "drawable GL import%s dedicated=%s size=%llu %dx%d memoryType=%zu tiling=linear glTiling=%s"
++			" dedicated_error=0x%x import_error=0x%x setup_error=0x%x storage_error=0x%x query_error=0x%x%s",
++			first ? " (first)" : "", dedicatedReadBack == GL_TRUE ? "yes" : (dedicatedReadBack == -1 ? "unknown" : "no"),
++			(unsigned long long) reqs.size, (int) _size.width, (int) _size.height, targetIndex,
++			tiling == GL_LINEAR_TILING_EXT ? "linear" : (tiling == GL_OPTIMAL_TILING_EXT ? "optimal" : "unknown"),
++			dedicatedError, importError, setupError, storageError, queryError, failed ? " FAILED" : " ok");
++		appendDeviceLog(line);
++	}
+ 
+ 	glBindTexture(GL_TEXTURE_2D, prevTex);
+ };
+@@ -605,35 +802,16 @@ void CAMetalDrawableActual::present() {
  			return;
  		}
  
@@ -7242,16 +7420,16 @@ index d6f86b31..4d08ce26 100644
 -		if (_semaphore) {
 -			int fd = -1;
 -			VkSemaphoreGetFdInfoKHR info {};
+-
+-			info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR;
+-			info.semaphore = _semaphore->semaphore;
+-			info.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
 +        // present() may run on the deferred encoding worker. The window's
 +        // EGL context remains current on the main thread, so attempting to
 +        // import a semaphore here fails and leaks the exported syncobj FD.
 +        // Import it in synchronizeRender(), with the compositor context
 +        // current, immediately before the GPU-side wait.
  
--			info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR;
--			info.semaphore = _semaphore->semaphore;
--			info.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
--
 -			if (DynamicVK::vkGetSemaphoreFdKHR(_semaphore->device->device(), &info, &fd) != VK_SUCCESS) {
 -				// TODO
 -				abort();
@@ -7273,7 +7451,7 @@ index d6f86b31..4d08ce26 100644
  	}
  }
  
-@@ -702,9 +776,24 @@ void CAMetalDrawableActual::reset() {
+@@ -702,9 +880,46 @@ void CAMetalDrawableActual::reset() {
  };
  
  void CAMetalDrawableActual::synchronizeRender() {
@@ -7281,6 +7459,11 @@ index d6f86b31..4d08ce26 100644
 -	GLenum layout = GL_LAYOUT_GENERAL_EXT;
 -	glWaitSemaphoreEXT(_glSemaphore, 0, NULL, 1, &tex, &layout);
 +    if (!_semaphore) return;
++    // GL errors of the import and wait are checked for the first imports of the
++    // process only: glGetError can stall a threaded GL driver, and this runs every frame.
++    static std::atomic<unsigned> checkedImports {0};
++    bool check = false;
++    GLenum importError = GL_NO_ERROR;
 +    if (_glSemaphore == 0) {
 +        // prepareRender() has made the layer's GL context current on this
 +        // thread. Never try to steal it from the submission worker.
@@ -7292,12 +7475,29 @@ index d6f86b31..4d08ce26 100644
 +        info.semaphore = _semaphore->semaphore;
 +        info.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
 +        if (DynamicVK::vkGetSemaphoreFdKHR(_semaphore->device->device(), &info, &fd) != VK_SUCCESS) abort();
++        check = checkedImports.fetch_add(1, std::memory_order_relaxed) < 600;
++        if (check) drainGLErrors();
 +        glImportSemaphoreFdEXT(_glSemaphore, GL_HANDLE_TYPE_OPAQUE_FD_EXT, fd);
 +        // A successful import transfers the native FD to the GL driver.
++        if (check) importError = glGetError();
 +    }
 +    GLuint tex = _texture->glTexture();
 +    GLenum layout = GL_LAYOUT_GENERAL_EXT;
 +    glWaitSemaphoreEXT(_glSemaphore, 0, NULL, 1, &tex, &layout);
++    if (check) {
++        // One line on first use, then only failures (at most five).
++        const GLenum waitError = glGetError();
++        const bool failed = importError != GL_NO_ERROR || waitError != GL_NO_ERROR;
++        static std::atomic<bool> loggedFirst {false};
++        static std::atomic<unsigned> failures {0};
++        const bool first = !loggedFirst.exchange(true, std::memory_order_relaxed);
++        if (first || (failed && failures.fetch_add(1, std::memory_order_relaxed) < 5)) {
++            char line[192];
++            snprintf(line, sizeof(line), "drawable GL semaphore%s import_error=0x%x wait_error=0x%x%s (checked for the first 600 imports)",
++                first ? " (first)" : "", importError, waitError, failed ? " FAILED" : " ok");
++            appendDeviceLog(line);
++        }
++    }
  };
  
  static void glDebugCallback(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar* message, const void* context) {
