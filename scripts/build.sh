@@ -14,7 +14,7 @@ python3 scripts/prepare.py
 # is required by objc4's debug-ness macro check.
 cmake -S build/darling-src -B build/darling-src/build -G 'Unix Makefiles' \
   -DCMAKE_BUILD_TYPE= -DTARGET_i386=OFF -DCMAKE_INSTALL_PREFIX=/usr/local -DENABLE_METAL=ON \
-  -DCMAKE_C_FLAGS_INIT="-O3 -march=native -mtune=native -pipe" \
-  -DCMAKE_CXX_FLAGS_INIT="-O3 -march=native -mtune=native -pipe"
+  -DCMAKE_C_FLAGS="-O3 -march=native -mtune=native -pipe" \
+  -DCMAKE_CXX_FLAGS="-O3 -march=native -mtune=native -pipe"
 cmake --build build/darling-src/build --parallel "${JOBS:-$(nproc)}"
 echo 'Build complete. Install the base runtime with: sudo cmake --install build/darling-src/build'
