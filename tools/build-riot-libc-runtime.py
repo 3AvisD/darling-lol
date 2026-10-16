@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rebuild libsystem_c (libc) with -O2.
+"""Rebuild libsystem_c (libc) with -O3 -march=native -mtune=generic.
 
 The CMake tree is configured with an empty build type, so the installed
 libsystem_c.dylib is clang's -O0 output except for the three string files
@@ -7,7 +7,7 @@ libplatform marks optimized. The game imports 122 functions from this library
 (stdio, string, stdlib, locale, time) and it is on the path of every frame;
 this builder takes each object's own compile command out of the generated
 build.make, keeps every define, include and per-file option it has, replaces
-the optimization level with -O2 and relinks the result with the configured
+the optimization level with -O3 and relinks the result with the configured
 link line. -fno-strict-aliasing matches what the existing optimized rebuilds
 use for this ten-year-old BSD C.
 
@@ -75,7 +75,7 @@ def source_of(head, relative):
 
 def compile_command(target_folder, source, object_path):
     """The configured compile command for one object, with the object path and
-    the dependency flags taken out and -O2 -fno-strict-aliasing added."""
+    the dependency flags taken out and -O3 -fno-strict-aliasing added."""
     for line in (target_folder / "build.make").read_text().splitlines():
         if "$(C_DEFINES)" not in line or " -c " not in line or str(source) not in line:
             continue
@@ -100,9 +100,8 @@ def compile_command(target_folder, source, object_path):
                 skip = True
                 continue
             cleaned.append(token)
-        if "-O2" not in cleaned:
-            cleaned.append("-O2")
-            cleaned.append("-fno-strict-aliasing")
+        cleaned = [t for t in cleaned if t not in ("-g", "-O0", "-O1", "-O2")]
+        cleaned.extend(["-O3", "-march=native", "-mtune=generic", "-fno-strict-aliasing"])
         return cleaned
     return None
 

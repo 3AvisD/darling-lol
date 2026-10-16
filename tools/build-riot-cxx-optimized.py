@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Rebuild libc++abi and libc++ with -O2. The CMake tree has no build type, so the stock objects (and the earlier
+"""Rebuild libc++abi and libc++ with -O3. The CMake tree has no build type, so the stock objects (and the earlier
 single-file libc++abi rebuild) are -O0: std::type_info::operator==, __dynamic_cast, shared_ptr internals ran 3-5x slower
 than they should (about 2% of the League main thread).  Outputs build/riot-opt-libc++abi.dylib / riot-opt-libc++.1.dylib.
 """
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-import re, shlex, subprocess, sys
+import os, re, shlex, subprocess, sys
 root = Path(__file__).resolve().parent.parent
 resource_dir = subprocess.check_output(['clang', '-print-resource-dir'], text=True).strip()
 def current_clang(values):
@@ -26,9 +26,9 @@ def build(lib, objdir, linkdir, output):
             jobs.append((rel, obj)); link[i] = str(obj)
     def compile_one(job):
         rel, obj = job
-        subprocess.run(['clang++', *flags['CXX_DEFINES'], *flags['CXX_INCLUDES'], *flags['CXX_FLAGS'], '-O2', '-DNDEBUG',
+        subprocess.run(['clang++', *flags['CXX_DEFINES'], *flags['CXX_INCLUDES'], *flags['CXX_FLAGS'], '-O3', '-march=native', '-mtune=generic', '-DNDEBUG',
                         '-c', str(src / rel), '-o', str(obj)], check=True)
-    with ThreadPoolExecutor(max_workers=8) as pool:
+    with ThreadPoolExecutor(max_workers=os.cpu_count() or 8) as pool:
         list(pool.map(compile_one, jobs))
     link[link.index('-o') + 1] = str(root / 'build' / output)
     subprocess.run(link, cwd=folder, check=True)

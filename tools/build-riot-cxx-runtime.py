@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rebuild libc++ and libc++abi with -O2.
+"""Rebuild libc++ and libc++abi with -O3 -march=native -mtune=generic.
 
 The CMake tree has no build type, so both libraries are clang's -O0 output: the
 game imports 131 functions from libc++.1.dylib (out-of-line std::string,
@@ -15,6 +15,7 @@ generation only. Outputs build/riot-libc++.1.dylib and build/riot-libc++abi.dyli
 """
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import os
 import re
 import shlex
 import subprocess
@@ -47,20 +48,22 @@ def build(library, object_dir, link_dir, output):
             obj = root / ("build/riot-opt-%s-%s.o" % (library, relative.replace("/", "_")))
             jobs.append((relative, obj))
             link[index] = str(obj)
-    print(library, "recompiling", len(jobs), "objects at -O2", flush=True)
+    print(library, "recompiling", len(jobs), "objects at -O3", flush=True)
 
     def compile_one(job):
         relative, obj = job
-        subprocess.run(["clang++", *flags["CXX_DEFINES"], *flags["CXX_INCLUDES"], *flags["CXX_FLAGS"],
-                        "-O2", "-fno-strict-aliasing", "-c", str(source / relative), "-o", str(obj)],
+        cxx_flags = [f for f in flags["CXX_FLAGS"] if f not in ("-g", "-O0", "-O1", "-O2")]
+        subprocess.run(["clang++", *flags["CXX_DEFINES"], *flags["CXX_INCLUDES"], *cxx_flags,
+                        "-O3", "-march=native", "-mtune=generic", "-fno-strict-aliasing",
+                        "-c", str(source / relative), "-o", str(obj)],
                        check=True, capture_output=True)
 
     riot_build_gate.wait_until_free()
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    with ThreadPoolExecutor(max_workers=os.cpu_count() or 8) as pool:
         list(pool.map(compile_one, jobs))
     link[link.index("-o") + 1] = str(root / "build" / output)
     subprocess.run(link, cwd=folder, check=True)
-    print("built build/" + output, len(jobs), "objects at -O2", flush=True)
+    print("built build/" + output, len(jobs), "objects at -O3", flush=True)
 
 
 if __name__ == "__main__":

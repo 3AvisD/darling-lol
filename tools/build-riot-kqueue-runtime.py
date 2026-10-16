@@ -19,6 +19,7 @@ def configured_flags(directory):
         if line.startswith('C_') and ' = ' in line:
             key,value=line.split(' = ',1)
             result[key]=[re.sub(r'/usr/lib/clang/\d+/include',resource_dir+'/include',v) for v in shlex.split(value)]
+            if key == 'C_FLAGS': result[key].append('-mtune=generic')
     return result
 kqueue_flags=configured_flags(build/'src/external/libkqueue/CMakeFiles/kqueue.dir')
 emulation_flags=configured_flags(kernel/'emulation/CMakeFiles/emulation.dir')
@@ -29,8 +30,8 @@ syscall_flags=configured_flags(kernel/'libsyscall/CMakeFiles/libsyscall.dir')
 kqueue_flags={**kqueue_flags,'C_FLAGS':[*kqueue_flags['C_FLAGS'],'-O2','-fno-strict-aliasing']}
 kqueue_sources=[value.split('/kqueue.dir/',1)[1][:-2] for value in objects if '/kqueue.dir/' in value and value.endswith('.c.o')]
 assert kqueue_sources, 'Configured kqueue objects missing'
-# The configured emulation target is a plain development build: its flags.make
-# carries no -O flag, so every object recompiled with `emulation_flags` is -O0.
+# The configured emulation flags carry scripts/build.sh's -O3; the -O2 appended below
+# comes last and wins, and the stack-layout-dependent files below pin -O0.
 # These files are on the per-call path of the guest (BSD trap dispatch, read/
 # write, network, kqueue, psynch/ulock, clocks, madvise), so rebuild them
 # optimized. -fno-strict-aliasing matches the other optimized rebuilds in this
@@ -56,13 +57,16 @@ repairs += [('src/xnu_syscall/bsd/impl/'+name,repair_flags,
 # configured forced-include header, without changing unrelated kernel objects.
 emulation_root=project/'build/darling-src/src/external/xnu/darling/src/libsystem_kernel/emulation'
 rpc_flags={**emulation_flags,'C_FLAGS':[*emulation_flags['C_FLAGS'],'-O2','-fno-omit-frame-pointer']}
-# bsdthread_register.c keeps emulation_flags (-O0): its pthread/wqueue entry
+# bsdthread_register.c stays at -O0: its pthread/wqueue entry
 # wrappers jump into _thread_start/_start_wqthread through inline assembly that
 # sets %rsp from the thread argument, i.e. it depends on the stack layout.
 # Signal entry with stack-layout-dependent frame walking stays unoptimized on
-# purpose (emulation_flags): it runs on the fault/suspend signal stacks.
-repairs += [('src/xnu_syscall/bsd/impl/bsdthread/bsdthread_register.c',emulation_flags,emulation_root)]
-repairs += [('src/linux_premigration/signal/sigexc.c',emulation_flags,emulation_root)]
+# purpose: it runs on the fault/suspend signal stacks.
+# The configured flags are optimized now (scripts/build.sh), so pin -O0 explicitly, as the
+# emulation CMakeLists does for these two files.
+unoptimized_flags={**emulation_flags,'C_FLAGS':[*emulation_flags['C_FLAGS'],'-O0']}
+repairs += [('src/xnu_syscall/bsd/impl/bsdthread/bsdthread_register.c',unoptimized_flags,emulation_root)]
+repairs += [('src/linux_premigration/signal/sigexc.c',unoptimized_flags,emulation_root)]
 repairs += [('src/xnu_syscall/mach/impl/mach_traps.c',rpc_flags,emulation_root)]
 # User-space clock (per-CPU TSC calibration), its gettimeofday entry and the cached kern.boottime.
 repairs += [('src/linux_premigration/ext/clock_gettime.c',rpc_flags,emulation_root)]

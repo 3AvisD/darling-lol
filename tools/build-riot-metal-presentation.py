@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Build the Metal layer presentation bridge and its window regression check."""
 from pathlib import Path
+import json
 import shlex
 import subprocess
 root = Path(__file__).resolve().parent.parent
+config_path = root / 'build/config.json'
+sdk = json.loads(config_path.read_text())['sdk'] if config_path.exists() else '/usr/local/libexec/darling'
 folder = root / 'build/darling-src/build/src/external/cocotron/QuartzCore'
 source = root / 'build/darling-src/src/external/cocotron/QuartzCore'
 flags = {}
@@ -28,6 +31,6 @@ obj = root / 'build/riot-metal-presentation-check.o'
 subprocess.run(['clang++', *flags['CXX_DEFINES'], *flags['CXX_INCLUDES'], *flags['CXX_FLAGS'],
                 '-c', str(root / 'tools/riot-metal-presentation-check.mm'), '-o', str(obj)], check=True)
 subprocess.run(['clang++', '-target', 'x86_64-apple-macosx11.0', '-fuse-ld=lld', '-nostdlib',
-                '-isysroot', '@DARLING_SDK@', str(obj), '-lSystem', '-lc++', '-lobjc',
+                '-isysroot', sdk, str(obj), '-lSystem', '-lc++', '-lobjc',
                 '-framework', 'AppKit', '-framework', 'OpenGL', '-framework', 'Foundation', str(root / 'build/riot-Metal'),
                 str(root / 'build/riot-QuartzCore'), '-o', str(root / 'build/riot-metal-presentation-check')], check=True)

@@ -41,7 +41,8 @@ subprocess.run(['clang', *flags_for(frameworks / 'AppKit', 'X11_backend'),
 subprocess.run(['clang', '-target', 'x86_64-apple-macosx11.0', '-fuse-ld=lld',
                 '-nostdlib', '-isysroot', config['sdk'], str(probe) + '.o',
                 '-lSystem', '-framework', 'AppKit', '-framework', 'Foundation',
-                '-framework', 'CoreGraphics', '-lobjc', '-o', str(probe)], check=True)
+                '-framework', 'CoreGraphics', '-lobjc',
+                '-L' + str(Path(config['sdk']) / 'usr/lib/native'), '-lX11', '-o', str(probe)], check=True)
 
 original = Path(config['prefix']) / config['guest_home'].lstrip('/') / 'RuntimeFrameworks'
 with tempfile.TemporaryDirectory(prefix='pr12-display-frameworks-', dir=root / 'build') as directory:
@@ -66,5 +67,5 @@ with tempfile.TemporaryDirectory(prefix='pr12-display-frameworks-', dir=root / '
         output.seek(0)
         lines = [line.rstrip() for line in output if line.startswith('DISPLAY_GEOMETRY')]
         print('\n'.join(lines))
-        if result.returncode or len(lines) != 6:
+        if result.returncode or len(lines) != 7:
             raise SystemExit(f'Display probe failed ({result.returncode}); inspect {log}')
