@@ -2326,7 +2326,16 @@ index 5ae29bf4..358e606b 100644
      NSLog(@"missing color for %@", colorName);
      return [NSColor redColor];
  }
-@@ -921,15 +1037,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -754,4 +870,7 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+         XDefineCursor(_display, w, c);
+-        XSync(_display, False);
++        /* Send cursor changes immediately without waiting for an X server
++         * reply on the input thread. X requests on this connection remain
++         * ordered; no server result is consumed here. */
++        XFlush(_display);
+     }
+ }
+@@ -921,15 +1040,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  }
  
  - (NSPoint) mouseLocation {
@@ -2344,7 +2353,7 @@ index 5ae29bf4..358e606b 100644
  }
  
  - (void) setWindow: (id) window forID: (XID) i {
-@@ -962,20 +1072,82 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -962,20 +1075,82 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  {
  #ifndef DARLING
      [[NSRunLoop currentRunLoop] addInputSource: _inputSource forMode: mode];
@@ -2432,7 +2441,7 @@ index 5ae29bf4..358e606b 100644
  }
  
  - (NSEventModifierFlags) modifierFlagsForState: (unsigned int) state {
-@@ -1010,17 +1182,93 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1010,17 +1185,93 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
      return result;
  }
  
@@ -2526,7 +2535,7 @@ index 5ae29bf4..358e606b 100644
          NSEventModifierFlags modifierFlags = [self modifierFlagsForState: ev->xkey.state];
          char buf[20] = {0};
          KeySym keySym;
-@@ -1038,6 +1286,18 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1038,6 +1289,18 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
              buf[strLen] = 0;
          }
  
@@ -2545,7 +2554,7 @@ index 5ae29bf4..358e606b 100644
          id str = [[NSString alloc] initWithCString: buf
                                            encoding: NSUTF8StringEncoding];
          NSPoint pos =
-@@ -1077,6 +1337,29 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1077,6 +1340,29 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case ButtonPress:;
@@ -2575,7 +2584,7 @@ index 5ae29bf4..358e606b 100644
          NSTimeInterval now = [[NSDate date] timeIntervalSinceReferenceDate];
  
          if (now - lastClickTimeStamp < [self doubleClickInterval]) {
-@@ -1096,10 +1379,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1096,10 +1382,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          case Button3:
              type = NSRightMouseDown;
              break;
@@ -2586,7 +2595,7 @@ index 5ae29bf4..358e606b 100644
          default:
              type = NSOtherMouseDown;
          }
-@@ -1113,14 +1392,22 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1113,14 +1395,22 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                          clickCount: clickCount
                              deltaX: 0.0
                              deltaY: 0.0];
@@ -2610,7 +2619,7 @@ index 5ae29bf4..358e606b 100644
          CGFloat deltaY = 0.0;
  
          switch (ev->xbutton.button) {
-@@ -1130,14 +1417,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1130,14 +1420,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          case Button3:
              type = NSRightMouseUp;
              break;
@@ -2625,7 +2634,7 @@ index 5ae29bf4..358e606b 100644
          default:
              type = NSOtherMouseUp;
          }
-@@ -1151,11 +1430,13 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1151,11 +1433,13 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                          clickCount: clickCount
                              deltaX: 0.0
                              deltaY: deltaY];
@@ -2640,7 +2649,7 @@ index 5ae29bf4..358e606b 100644
              // NSLog(@"MotionNotify, x=%d, y=%d, xroot=%d, yroot=%d\n",
              // ev->xmotion.x, ev->xmotion.y, ev->xmotion.x_root,
              // ev->xmotion.y_root);
-@@ -1195,14 +1476,29 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1195,14 +1479,29 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  
 +            [self pointerMoved];
              if (ev->xmotion.state & Button1Mask) {
@@ -2674,7 +2683,7 @@ index 5ae29bf4..358e606b 100644
                      mouseEventWithType: type
                                location: pos
                           modifierFlags:
-@@ -1211,25 +1507,40 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1211,25 +1510,40 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                              clickCount: 1
                                  deltaX: deltaX
                                  deltaY: deltaY];
@@ -2716,7 +2725,7 @@ index 5ae29bf4..358e606b 100644
          break;
  
      case FocusIn:
-@@ -1243,28 +1554,42 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1243,28 +1557,42 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                                   checkForAppDeactivation: NO];
              lastFocusedWindow = nil;
          }
@@ -2759,7 +2768,7 @@ index 5ae29bf4..358e606b 100644
          O2Rect rect = NSMakeRect(ev->xexpose.x, ev->xexpose.y,
                                   ev->xexpose.width, ev->xexpose.height);
  
-@@ -1301,11 +1626,20 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1301,11 +1629,20 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case UnmapNotify:
@@ -2784,7 +2793,7 @@ index 5ae29bf4..358e606b 100644
          break;
  
      case MapRequest:
-@@ -1321,6 +1655,7 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1321,6 +1658,7 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          [delegate platformWindow: window
                      frameChanged: [window frame]
                           didSize: YES];
@@ -2792,7 +2801,7 @@ index 5ae29bf4..358e606b 100644
          break;
  
      case ConfigureRequest:
-@@ -1344,6 +1679,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1344,6 +1682,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case PropertyNotify:
@@ -2801,7 +2810,7 @@ index 5ae29bf4..358e606b 100644
          if ([window respondsToSelector: @selector(propertyNotify:)]) {
              [window propertyNotify: &ev->xproperty];
          }
-@@ -1483,6 +1820,64 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
+@@ -1483,6 +1823,64 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
      XSync(_display, False);
  }
  
@@ -2866,7 +2875,7 @@ index 5ae29bf4..358e606b 100644
  - (void) grabMouse: (BOOL) doGrab {
      if (doGrab) {
          NSWindow *nswin = [NSApp keyWindow];
-@@ -1495,9 +1890,10 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
+@@ -1495,9 +1893,10 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
          const unsigned int mask = ButtonPressMask | ButtonReleaseMask |
                                    PointerMotionMask | FocusChangeMask;
          int result = XGrabPointer(_display, win, False, mask, GrabModeAsync,
@@ -2878,7 +2887,7 @@ index 5ae29bf4..358e606b 100644
              NSLog(@"XGrabPointer() succeeded for window %lu\n", win);
  
              NSRect frame = [xwin transformFrame: nswin.frame];
-@@ -1522,6 +1918,9 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
+@@ -1522,6 +1921,9 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
      } else {
          XUngrabPointer(_display, CurrentTime);
          _cursorGrabbed = NO;
