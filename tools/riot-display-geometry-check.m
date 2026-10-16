@@ -8,6 +8,7 @@
 #import "../build/darling-src/src/external/cocotron/AppKit/X11.backend/X11Display.h"
 #import "../build/darling-src/src/external/cocotron/AppKit/X11.backend/X11Window.h"
 #include <X11/extensions/Xrandr.h>
+#include <X11/Xatom.h>
 #include <assert.h>
 #include <string.h>
 
@@ -19,6 +20,27 @@ extern CGError CGWarpMouseCursorPosition(CGPoint position);
 - (NSArray *)_rootScreenFallback;
 - (void)postXEvent:(XEvent *)event;
 @end
+
+@interface X11Window (FullscreenProbe)
+- (BOOL)wantsFullscreenWithStyleMask:(NSUInteger)mask rootFrame:(O2Rect)frame;
+@end
+@interface FullscreenProbeWindow : NSWindow
+@end
+@implementation FullscreenProbeWindow
+- (BOOL)canBecomeKeyWindow { return YES; }
+@end
+static BOOL fullscreenProperty(X11Display *display, X11Window *window) {
+    Display *d = [display display];
+    Atom actual, fs = XInternAtom(d,"_NET_WM_STATE_FULLSCREEN",False);
+    int format; unsigned long count, remaining; unsigned char *data = NULL;
+    assert(XGetWindowProperty(d,[window windowHandle],XInternAtom(d,"_NET_WM_STATE",False),
+        0,32,False,XA_ATOM,&actual,&format,&count,&remaining,&data) == Success);
+    BOOL found = NO;
+    assert(actual == XA_ATOM && format == 32 && remaining == 0);
+    for (unsigned long i=0; i<count; ++i) if (((Atom *)data)[i] == fs) found=YES;
+    if (data) XFree(data);
+    return found;
+}
 
 static void *slot(id obj, const char *name) {
     Ivar ivar = class_getInstanceVariable([obj class], name);
@@ -101,6 +123,29 @@ int main(void) {
     assert(CGGetDisplaysWithPoint(CGPointMake(-100,-50),4,ids,&count) == 0 && count == 1 && ids[0] == 1);
     assert(CGGetDisplaysWithRect(CGRectMake(3900,-800,10,10),4,ids,&count) == 0 && count == 1 && ids[0] == 3);
     puts("DISPLAY_GEOMETRY reordered_ids_bounds_enumeration_queries=pass");
+
+    // Use cached monitor frames so the policy is tested for the reporter's layout.
+    FullscreenProbeWindow *game = [[FullscreenProbeWindow alloc]
+        initWithContentRect:NSMakeRect(0,0,3840,2160) styleMask:NSBorderlessWindowMask
+        backing:NSBackingStoreBuffered defer:NO];
+    X11Window *gameNative = (id)[game platformWindow];
+    assert(!*(BOOL *)slot(gameNative,"_overrideRedirect"));
+    assert(fullscreenProperty(d,gameNative));
+    [gameNative setFrame:NSMakeRect(0,0,3840,2100)]; // panel-sized work area is not a monitor
+    assert(!fullscreenProperty(d,gameNative));
+    [gameNative setFrame:NSMakeRect(-3840,102,3840,2160)]; // secondary monitor
+    assert(fullscreenProperty(d,gameNative));
+    NSRect full = [d rootRectForFrame:NSMakeRect(0,0,3840,2160)];
+    assert(![gameNative wantsFullscreenWithStyleMask:NSTitledWindowMask rootFrame:full]);
+    assert([gameNative wantsFullscreenWithStyleMask:NSWindowStyleMaskFullScreen
+        rootFrame:NSMakeRect(1,2,640,480)]);
+    *(BOOL *)slot(gameNative,"_overrideRedirect") = YES;
+    assert(![gameNative wantsFullscreenWithStyleMask:0 rootFrame:full]);
+    *(BOOL *)slot(gameNative,"_overrideRedirect") = NO;
+    [gameNative setFrame:NSMakeRect(20,30,800,600)];
+    assert(!fullscreenProperty(d,gameNative));
+    [game release];
+    puts("DISPLAY_GEOMETRY borderless_fullscreen_monitor_and_resize_policy=pass");
 
     Method method = class_getInstanceMethod([d class],@selector(warpPointerToRootX:y:));
     assert(method);
