@@ -2327,7 +2327,16 @@ index 5ae29bf4..358e606b 100644
      NSLog(@"missing color for %@", colorName);
      return [NSColor redColor];
  }
-@@ -921,15 +1037,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -754,4 +870,7 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+         XDefineCursor(_display, w, c);
+-        XSync(_display, False);
++        /* Send cursor changes immediately without waiting for an X server
++         * reply on the input thread. X requests on this connection remain
++         * ordered; no server result is consumed here. */
++        XFlush(_display);
+     }
+ }
+@@ -921,15 +1040,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  }
  
  - (NSPoint) mouseLocation {
@@ -2345,7 +2354,8 @@ index 5ae29bf4..358e606b 100644
  }
  
  - (void) setWindow: (id) window forID: (XID) i {
-@@ -962,20 +1072,85 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -962,20 +1075,85 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+
  {
  #ifndef DARLING
      [[NSRunLoop currentRunLoop] addInputSource: _inputSource forMode: mode];
@@ -2436,7 +2446,7 @@ index 5ae29bf4..358e606b 100644
  }
  
  - (NSEventModifierFlags) modifierFlagsForState: (unsigned int) state {
-@@ -1010,17 +1182,93 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1010,17 +1185,93 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
      return result;
  }
  
@@ -2530,7 +2540,7 @@ index 5ae29bf4..358e606b 100644
          NSEventModifierFlags modifierFlags = [self modifierFlagsForState: ev->xkey.state];
          char buf[20] = {0};
          KeySym keySym;
-@@ -1038,6 +1286,18 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1038,6 +1289,18 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
              buf[strLen] = 0;
          }
  
@@ -2549,7 +2559,7 @@ index 5ae29bf4..358e606b 100644
          id str = [[NSString alloc] initWithCString: buf
                                            encoding: NSUTF8StringEncoding];
          NSPoint pos =
-@@ -1077,6 +1337,29 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1077,6 +1340,29 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case ButtonPress:;
@@ -2579,7 +2589,7 @@ index 5ae29bf4..358e606b 100644
          NSTimeInterval now = [[NSDate date] timeIntervalSinceReferenceDate];
  
          if (now - lastClickTimeStamp < [self doubleClickInterval]) {
-@@ -1096,10 +1379,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1096,10 +1382,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          case Button3:
              type = NSRightMouseDown;
              break;
@@ -2590,7 +2600,7 @@ index 5ae29bf4..358e606b 100644
          default:
              type = NSOtherMouseDown;
          }
-@@ -1113,14 +1392,22 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1113,14 +1395,22 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                          clickCount: clickCount
                              deltaX: 0.0
                              deltaY: 0.0];
@@ -2614,7 +2624,7 @@ index 5ae29bf4..358e606b 100644
          CGFloat deltaY = 0.0;
  
          switch (ev->xbutton.button) {
-@@ -1130,14 +1417,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1130,14 +1420,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          case Button3:
              type = NSRightMouseUp;
              break;
@@ -2629,7 +2639,7 @@ index 5ae29bf4..358e606b 100644
          default:
              type = NSOtherMouseUp;
          }
-@@ -1151,14 +1430,24 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1151,14 +1433,24 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                          clickCount: clickCount
                              deltaX: 0.0
                              deltaY: deltaY];
@@ -2655,7 +2665,7 @@ index 5ae29bf4..358e606b 100644
  
              CGPoint lastMotionPos = [window mouseLocationOutsideOfEventStream];
              pos = [window
-@@ -1195,14 +1476,29 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1195,14 +1479,29 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  
 +            [self pointerMoved];
              if (ev->xmotion.state & Button1Mask) {
@@ -2689,7 +2699,7 @@ index 5ae29bf4..358e606b 100644
                      mouseEventWithType: type
                                location: pos
                           modifierFlags:
-@@ -1211,25 +1507,40 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1211,25 +1510,40 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                              clickCount: 1
                                  deltaX: deltaX
                                  deltaY: deltaY];
@@ -2731,7 +2741,7 @@ index 5ae29bf4..358e606b 100644
          break;
  
      case FocusIn:
-@@ -1243,28 +1554,42 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1243,28 +1557,42 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                                   checkForAppDeactivation: NO];
              lastFocusedWindow = nil;
          }
@@ -2774,7 +2784,7 @@ index 5ae29bf4..358e606b 100644
          O2Rect rect = NSMakeRect(ev->xexpose.x, ev->xexpose.y,
                                   ev->xexpose.width, ev->xexpose.height);
  
-@@ -1301,11 +1626,20 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1301,11 +1629,20 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case UnmapNotify:
@@ -2799,7 +2809,7 @@ index 5ae29bf4..358e606b 100644
          break;
  
      case MapRequest:
-@@ -1321,6 +1655,7 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1321,6 +1658,7 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          [delegate platformWindow: window
                      frameChanged: [window frame]
                           didSize: YES];
@@ -2807,7 +2817,7 @@ index 5ae29bf4..358e606b 100644
          break;
  
      case ConfigureRequest:
-@@ -1344,6 +1679,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1344,6 +1682,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case PropertyNotify:
@@ -2816,7 +2826,7 @@ index 5ae29bf4..358e606b 100644
          if ([window respondsToSelector: @selector(propertyNotify:)]) {
              [window propertyNotify: &ev->xproperty];
          }
-@@ -1483,6 +1820,64 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
+@@ -1483,6 +1823,64 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
      XSync(_display, False);
  }
  
@@ -2881,7 +2891,7 @@ index 5ae29bf4..358e606b 100644
  - (void) grabMouse: (BOOL) doGrab {
      if (doGrab) {
          NSWindow *nswin = [NSApp keyWindow];
-@@ -1495,9 +1890,10 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
+@@ -1495,9 +1893,10 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
          const unsigned int mask = ButtonPressMask | ButtonReleaseMask |
                                    PointerMotionMask | FocusChangeMask;
          int result = XGrabPointer(_display, win, False, mask, GrabModeAsync,
@@ -2893,7 +2903,7 @@ index 5ae29bf4..358e606b 100644
              NSLog(@"XGrabPointer() succeeded for window %lu\n", win);
  
              NSRect frame = [xwin transformFrame: nswin.frame];
-@@ -1522,6 +1918,9 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
+@@ -1522,6 +1921,9 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
      } else {
          XUngrabPointer(_display, CurrentTime);
          _cursorGrabbed = NO;
@@ -6877,7 +6887,7 @@ index 5dcac115..5de4f03f 100644
 +
  @end
 diff --git a/QuartzCore/CALayerContext.m b/QuartzCore/CALayerContext.m
-index 5dce8c56..e329b5f8 100644
+index 5dce8c56..dee2b80c 100644
 --- a/QuartzCore/CALayerContext.m
 +++ b/QuartzCore/CALayerContext.m
 @@ -1,47 +1,58 @@
@@ -7033,18 +7043,30 @@ index 5dce8c56..e329b5f8 100644
  }
  
  - (void) assignTextureIdsToLayerTree: (CALayer *) layer {
-@@ -93,7 +148,10 @@
+@@ -93,7 +148,22 @@
          [self assignTextureIdsToLayerTree: child];
  }
  
 +extern void darlingQCTiming(const char* what, double seconds);
++
++- (void) prepareMetalLayers: (CALayer *) layer {
++    // Metal layers may be nested beneath ordinary backing layers. Every queued
++    // drawable must be consumed before CARenderer samples the layer tree.
++    if ([[layer class] isSubclassOfClass: [CAMetalLayerInternal class]]) {
++        CFTimeInterval prepStart = CACurrentMediaTime();
++        [(CAMetalLayerInternal*)layer prepareRender];
++        darlingQCTiming("prepareRenderTotal", CACurrentMediaTime() - prepStart);
++    }
++    for (CALayer *child in layer.sublayers)
++        [self prepareMetalLayers: child];
++}
 +
  - (void) renderLayer: (CALayer *) layer {
 +    CFTimeInterval renderLayerStart = CACurrentMediaTime();
      CGLContextMakeCurrentAndAttachToWindow(_glContext, _cglWindow);
  
      glEnable(GL_DEPTH_TEST);
-@@ -118,27 +176,69 @@
+@@ -118,27 +188,63 @@
  
      [_deleteTextureIds removeAllObjects];
  
@@ -7053,13 +7075,12 @@ index 5dce8c56..e329b5f8 100644
      [self assignTextureIdsToLayerTree: layer];
 +    darlingQCTiming("assignTextureIds", CACurrentMediaTime() - assignStart);
  
-     // this is where the Metal layer renders to an internal texture for us to use
-     if ([[layer class] isSubclassOfClass: [CAMetalLayerInternal class]]) {
-         CAMetalLayerInternal* mtl = (CAMetalLayerInternal*)layer;
-+        CFTimeInterval prepStart = CACurrentMediaTime();
-         [mtl prepareRender];
-+        darlingQCTiming("prepareRenderTotal", CACurrentMediaTime() - prepStart);
-     }
+-    // this is where the Metal layer renders to an internal texture for us to use
+-    if ([[layer class] isSubclassOfClass: [CAMetalLayerInternal class]]) {
+-        CAMetalLayerInternal* mtl = (CAMetalLayerInternal*)layer;
+-        [mtl prepareRender];
+-    }
++    [self prepareMetalLayers: layer];
  
 +    CFTimeInterval rendererStart = CACurrentMediaTime();
      [_renderer render];
@@ -7114,7 +7135,7 @@ index 5dce8c56..e329b5f8 100644
  }
  
  - (void) startTimerIfNeeded {
-@@ -147,7 +247,7 @@
+@@ -147,7 +253,7 @@
                                                     target: self
                                                   selector: @selector(timer:)
                                                   userInfo: nil
@@ -7123,7 +7144,7 @@ index 5dce8c56..e329b5f8 100644
  }
  
  - (void) deleteTextureId: (NSNumber *) textureId {
-@@ -155,7 +255,10 @@
+@@ -155,7 +261,10 @@
  }
  
  - (void) flush {
