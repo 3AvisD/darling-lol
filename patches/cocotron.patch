@@ -2826,29 +2826,20 @@ index 5ae29bf4..358e606b 100644
          if ([window respondsToSelector: @selector(propertyNotify:)]) {
              [window propertyNotify: &ev->xproperty];
          }
-@@ -1483,6 +1823,64 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
+@@ -1483,6 +1823,113 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
      XSync(_display, False);
  }
- 
+
 +/* Confinement preserves absolute motion and edge panning. Relative-mode
 + * capture remains separate: it deliberately warps to the center. */
 +- (void) updateMouseConfinementForWindow:(X11Window *)window {
 +    if (getenv("RCLOL_INPUT_TRACE")) fprintf(stderr,"CONFINEMENT check window=%p delegate=%p focused=%p relative=%d\n",window,[window delegate],lastFocusedWindow,_cursorGrabbed);
 +    if (!window || _cursorGrabbed) return;
++    if (getenv("RCLOL_MOUSE_CONFINEMENT") && strcmp(getenv("RCLOL_MOUSE_CONFINEMENT"), "0") == 0) return;
 +    Window win = [window windowHandle];
-+    Window focus; int revert;
-+    XGetInputFocus(_display, &focus, &revert);
-+    Window ancestor = focus;
-+    while (ancestor != win && ancestor != None && ancestor != PointerRoot && ancestor != DefaultRootWindow(_display)) {
-+        Window root, parent, *children=NULL; unsigned nchildren;
-+        if (!XQueryTree(_display, ancestor, &root, &parent, &children, &nchildren)) break;
-+        if (children) XFree(children);
-+        ancestor=parent;
-+    }
-+    if (getenv("RCLOL_INPUT_TRACE")) fprintf(stderr,"CONFINEMENT focus=%lu target=%lu ancestor=%lu\n",focus,win,ancestor);
-+    if (ancestor != win) return;
 +    XWindowAttributes attrs;
 +    if (!XGetWindowAttributes(_display, win, &attrs)) return;
++
 +    BOOL fullscreen = NO;
 +    Atom actual; int format; unsigned long count, remaining; unsigned char *data = NULL;
 +    Atom state = XInternAtom(_display, "_NET_WM_STATE", False);
@@ -2858,25 +2849,83 @@ index 5ae29bf4..358e606b 100644
 +        for (unsigned long i=0; i<count; ++i) if (((Atom *)data)[i] == fs) fullscreen = YES;
 +    }
 +    if (data) XFree(data);
++
 +    /* League's borderless fullscreen does not set the EWMH fullscreen bit.
-+     * Recognize a borderless window covering one monitor, including monitor 2. */
-+    if (!fullscreen && !([[window delegate] styleMask] & NSTitledWindowMask)) {
-+        Window child; int x, y;
++     * Recognize a borderless window covering a monitor, including multi-monitor
++     * setups and Wayland/GNOME top panel offsets. */
++    NSWindow *delegate = [window delegate];
++    BOOL isBorderless = delegate ? !([delegate styleMask] & NSTitledWindowMask) : YES;
++    BOOL isAppWindow = delegate ? !([delegate isKindOfClass:[NSMenuWindow class]] ||
++                                   [delegate isKindOfClass:[NSPopUpWindow class]] ||
++                                   ![delegate canBecomeKeyWindow]) : YES;
++
++    if (isBorderless && isAppWindow) {
++        Window child; int x = 0, y = 0;
 +        XTranslateCoordinates(_display, win, DefaultRootWindow(_display), 0, 0, &x, &y, &child);
++        NSRect delegateFrame = delegate ? [delegate frame] : NSZeroRect;
 +        XRRScreenResources *resources = XRRGetScreenResourcesCurrent(_display, DefaultRootWindow(_display));
 +        if (resources) {
 +            for (int i=0; i<resources->ncrtc; ++i) {
 +                XRRCrtcInfo *crtc = XRRGetCrtcInfo(_display, resources, resources->crtcs[i]);
 +                if (crtc) {
-+                    if (crtc->mode && abs(x-crtc->x)<=2 && abs(y-crtc->y)<=2 &&
-+                        abs(attrs.width-(int)crtc->width)<=2 && abs(attrs.height-(int)crtc->height)<=2) fullscreen=YES;
++                    if (crtc->mode) {
++                        BOOL sizeMatchesCrtc =
++                            (abs(attrs.width - (int)crtc->width) <= 4 &&
++                             (abs(attrs.height - (int)crtc->height) <= 4 ||
++                              attrs.height >= (int)crtc->height - 60)) ||
++                            (delegateFrame.size.width > 0 &&
++                             abs((int)delegateFrame.size.width - (int)crtc->width) <= 4 &&
++                             abs((int)delegateFrame.size.height - (int)crtc->height) <= 4);
++
++                        BOOL posMatchesCrtc =
++                            abs(x - crtc->x) <= 4 &&
++                            (y >= crtc->y - 4 && y <= crtc->y + 60);
++
++                        if (sizeMatchesCrtc && (posMatchesCrtc || delegateFrame.size.width > 0)) {
++                            if (!fullscreen) {
++                                fullscreen = YES;
++                                /* Inform GNOME Shell / Mutter / EWMH to make this window fullscreen.
++                                 * This hides the GNOME top bar, sizes the window to fill the entire monitor,
++                                 * and enables Wayland pointer confinement (zwp_confined_pointer_v1). */
++                                XClientMessageEvent cme = {0};
++                                cme.type = ClientMessage;
++                                cme.window = win;
++                                cme.message_type = state;
++                                cme.format = 32;
++                                cme.data.l[0] = 1; /* _NET_WM_STATE_ADD */
++                                cme.data.l[1] = (long)fs;
++                                cme.data.l[2] = 0;
++                                cme.data.l[3] = 1; /* normal application */
++                                cme.data.l[4] = 0;
++                                XSendEvent(_display, DefaultRootWindow(_display), False,
++                                           SubstructureNotifyMask | SubstructureRedirectMask,
++                                           (XEvent *)&cme);
++                                XFlush(_display);
++                                if (getenv("RCLOL_INPUT_TRACE")) fprintf(stderr,"CONFINEMENT promoted to EWMH FULLSCREEN for window %lu\n",win);
++                            }
++                        }
++                    }
 +                    XRRFreeCrtcInfo(crtc);
++                    if (fullscreen) break;
 +                }
 +            }
 +            XRRFreeScreenResources(resources);
 +        }
 +    }
-+    if (!fullscreen || attrs.map_state != IsViewable) {
++
++    /* Check focus to determine whether mouse confinement should be active. */
++    Window focus; int revert;
++    XGetInputFocus(_display, &focus, &revert);
++    Window ancestor = focus;
++    while (ancestor != win && ancestor != None && ancestor != PointerRoot && ancestor != DefaultRootWindow(_display)) {
++        Window root, parent, *children=NULL; unsigned nchildren;
++        if (!XQueryTree(_display, ancestor, &root, &parent, &children, &nchildren)) break;
++        if (children) XFree(children);
++        ancestor=parent;
++    }
++    if (getenv("RCLOL_INPUT_TRACE")) fprintf(stderr,"CONFINEMENT focus=%lu target=%lu ancestor=%lu fullscreen=%d\n",focus,win,ancestor,fullscreen);
++
++    if (!fullscreen || attrs.map_state != IsViewable || ancestor != win) {
 +        if (_confinedWindow == win) { XUngrabPointer(_display, CurrentTime); _confinedWindow=None; }
 +        return;
 +    }
@@ -2891,7 +2940,7 @@ index 5ae29bf4..358e606b 100644
  - (void) grabMouse: (BOOL) doGrab {
      if (doGrab) {
          NSWindow *nswin = [NSApp keyWindow];
-@@ -1495,9 +1893,10 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
+@@ -1495,9 +1942,10 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
          const unsigned int mask = ButtonPressMask | ButtonReleaseMask |
                                    PointerMotionMask | FocusChangeMask;
          int result = XGrabPointer(_display, win, False, mask, GrabModeAsync,
@@ -2903,7 +2952,7 @@ index 5ae29bf4..358e606b 100644
              NSLog(@"XGrabPointer() succeeded for window %lu\n", win);
  
              NSRect frame = [xwin transformFrame: nswin.frame];
-@@ -1522,6 +1921,9 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
+@@ -1522,6 +1970,9 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
      } else {
          XUngrabPointer(_display, CurrentTime);
          _cursorGrabbed = NO;
