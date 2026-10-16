@@ -3557,7 +3557,7 @@ diff --git a/src/frameworks/CoreVideo/src/CVDisplayLink.mm b/src/frameworks/Core
 index 3e9cba226..99e0a5494 100644
 --- a/src/frameworks/CoreVideo/src/CVDisplayLink.mm
 +++ b/src/frameworks/CoreVideo/src/CVDisplayLink.mm
-@@ -1,38 +1,884 @@
+@@ -1,38 +1,887 @@
  #include <CoreVideo/CVDisplayLink.h>
 +#include <stdint.h>
 +#include <string.h>
@@ -4381,7 +4381,7 @@ index 3e9cba226..99e0a5494 100644
 +    if (!cvIntervalNS) {
 +        const char *hz = getenv("RCLOL_REFRESH_HZ");
 +        int rate = hz ? atoi(hz) : 0;
-+        cvIntervalNS = (rate > 0 && rate <= 1000) ? 1000000000ull / (uint64_t)rate : (1000000000ull / 144ull);
++        cvIntervalNS = (rate > 0 && rate <= 1000) ? 1000000000ull / (uint64_t)rate : (1000000000ull / 60ull);
 +    }
 +    for (;;) {
 +        deadline.nsec += cvIntervalNS;
@@ -4453,7 +4453,7 @@ index 3e9cba226..99e0a5494 100644
  	*displayLinkOut = (CVDisplayLinkRef) self;
  	return kCVReturnSuccess;
  }
-@@ -41,35 +881,128 @@ CVReturn CVDisplayLinkStart(CVDisplayLinkRef displayLink)
+@@ -41,35 +890,128 @@ CVReturn CVDisplayLinkStart(CVDisplayLinkRef displayLink)
  {
  	if (!displayLink)
  		return kCVReturnInvalidArgument;
@@ -4593,7 +4593,7 @@ index 3e9cba226..99e0a5494 100644
  	return kCVReturnSuccess;
  }
  
-@@ -91,7 +1024,7 @@ CVReturn CVDisplayLinkSetCurrentCGDisplayFromOpenGLContext(CVDisplayLinkRef disp
+@@ -91,7 +1033,7 @@ CVReturn CVDisplayLinkSetCurrentCGDisplayFromOpenGLContext(CVDisplayLinkRef disp
  			CGDirectDisplayID displayID = [window.screen cgDirectDisplayID];
  			NSMutableDictionary* self = (NSMutableDictionary*) displayLink;
  
@@ -4602,7 +4602,7 @@ index 3e9cba226..99e0a5494 100644
  					forKey: kDirectDisplayArray];
  			return kCVReturnSuccess;
  		}
-@@ -117,14 +1050,31 @@ CVReturn CVDisplayLinkCreateWithCGDisplay(
+@@ -117,14 +1059,31 @@ CVReturn CVDisplayLinkCreateWithCGDisplay(
      CGDirectDisplayID displayID,
      CV_RETURNS_RETAINED_PARAMETER CVDisplayLinkRef CV_NULLABLE * CV_NONNULL displayLinkOut )
  {
@@ -6257,7 +6257,7 @@ index deca16b87..d75d5e22d 100644
  
  set_property(TARGET OpenGL APPEND_STRING PROPERTY LINK_FLAGS
 diff --git a/src/frameworks/OpenGL/OpenGL.c b/src/frameworks/OpenGL/OpenGL.c
-index ffd7fe054..a74ffc63f 100644
+index ffd7fe054..1ff212d34 100644
 --- a/src/frameworks/OpenGL/OpenGL.c
 +++ b/src/frameworks/OpenGL/OpenGL.c
 @@ -2,11 +2,22 @@
@@ -6734,7 +6734,7 @@ index ffd7fe054..a74ffc63f 100644
  
      free(context);
  }
-@@ -383,9 +608,331 @@ CGLError CGLUnlockContext(CGLContextObj context) {
+@@ -383,9 +608,330 @@ CGLError CGLUnlockContext(CGLContextObj context) {
      return kCGLNoError;
  }
  
@@ -6957,8 +6957,7 @@ index ffd7fe054..a74ffc63f 100644
 +        if(__lolsys_syscall(1,(long)&now,0,0,0,0,228)==0){
 +            uint64_t current=(uint64_t)now.tv_sec*1000000000ull+now.tv_nsec;
 +            uint64_t deadline=ctx->native_next_present_ns;
-+            static uint64_t paceNS = 0;
-+            if (!paceNS) { const char *hz = getenv("RCLOL_REFRESH_HZ"); int r = hz ? atoi(hz) : 0; paceNS = (r > 0 && r <= 1000) ? 1000000000ull / (uint64_t)r : 1000000ull; if (paceNS < 1000000ull) paceNS = 1000000ull; }
++            uint64_t paceNS=nativeRefreshIntervalNS();
 +            if(!deadline || (current>deadline && current-deadline>paceNS))deadline=current;
 +            if(deadline>current){
 +                struct timespec wake={deadline/1000000000ull,deadline%1000000000ull};
@@ -7068,7 +7067,7 @@ index ffd7fe054..a74ffc63f 100644
  }
  
  CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, const GLint *value) {
-@@ -394,8 +939,9 @@ CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, c
+@@ -394,8 +940,9 @@ CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, c
  
      if (parameter == kCGLCPSwapInterval)
      {
@@ -7079,7 +7078,7 @@ index ffd7fe054..a74ffc63f 100644
          if (success)
              context->swap_interval = v;
          return success ? kCGLNoError : kCGLBadValue;
-@@ -417,14 +963,19 @@ CGLError CGLGetParameter(CGLContextObj context, CGLContextParameter parameter, G
+@@ -417,14 +964,19 @@ CGLError CGLGetParameter(CGLContextObj context, CGLContextParameter parameter, G
      return kCGLNoError;
  }
  
@@ -8429,12 +8428,26 @@ new file mode 100644
 +}
 diff --git a/src/frameworks/OpenGL/CGLAsyncPresent.inc b/src/frameworks/OpenGL/CGLAsyncPresent.inc
 new file mode 100644
+index 000000000..e5363c06a
 --- /dev/null
 +++ b/src/frameworks/OpenGL/CGLAsyncPresent.inc
-@@ -0,0 +1,197 @@
+@@ -0,0 +1,204 @@
 +/* Bounded GPU-only staging: the producer never waits for display cadence.
 + * Three textures cover the currently displayed, pending, and writing frames.
 + * GPU fences order both the completed producer copy and subsequent reuse. */
++
++/* darling-lol: software refresh period for the paced paths, from RCLOL_REFRESH_HZ
++ * (1-1000 Hz). Unset or out of range keeps the previous 60 Hz period. */
++static uint64_t nativeRefreshIntervalNS(void){
++    static uint64_t interval;
++    if(!interval){
++        const char *hz=getenv("RCLOL_REFRESH_HZ");
++        long rate=hz?strtol(hz,NULL,10):0;
++        interval=(rate>0&&rate<=1000)?1000000000ull/(uint64_t)rate:16666667ull;
++    }
++    return interval;
++}
++
 +struct DarlingAsyncPresent {
 +    CGLContextObj owner;
 +    pthread_mutex_t mutex;
@@ -8537,15 +8550,7 @@ new file mode 100644
 +        /* Native VSync owns the refresh cadence; avoid a second clock that
 +         * can miss the compositor's next refresh after a variable swap wait. */
 +        if(nativeVSync)continue;
-+        /* darling-lol perf: use dynamic refresh interval from RCLOL_REFRESH_HZ
-+         * or default to uncapped (1ms minimum interval) when VSync is off. */
-+        static uint64_t refreshNS = 0;
-+        if (!refreshNS) {
-+            const char *hz = getenv("RCLOL_REFRESH_HZ");
-+            int rate = hz ? atoi(hz) : 0;
-+            refreshNS = (rate > 0 && rate <= 1000) ? 1000000000ull / (uint64_t)rate : 1000000ull;
-+            if (refreshNS < 1000000ull) refreshNS = 1000000ull;
-+        }
++        uint64_t refreshNS=nativeRefreshIntervalNS();
 +        deadline += refreshNS;
 +        uint64_t now=nativeMonotonicNS();
 +        /* Preserve the refresh phase across small scheduling delays. Reset only

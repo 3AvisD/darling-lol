@@ -26,7 +26,7 @@ def build(lib, objdir, linkdir, output):
             jobs.append((rel, obj)); link[i] = str(obj)
     def compile_one(job):
         rel, obj = job
-        subprocess.run(['clang++', *flags['CXX_DEFINES'], *flags['CXX_INCLUDES'], *flags['CXX_FLAGS'], '-O3', '-march=native', '-mtune=native', '-fomit-frame-pointer', '-DNDEBUG',
+        subprocess.run(['clang++', *flags['CXX_DEFINES'], *flags['CXX_INCLUDES'], *flags['CXX_FLAGS'], '-O3', '-march=native', '-mtune=generic', '-DNDEBUG',
                         '-c', str(src / rel), '-o', str(obj)], check=True)
     with ThreadPoolExecutor(max_workers=os.cpu_count() or 8) as pool:
         list(pool.map(compile_one, jobs))

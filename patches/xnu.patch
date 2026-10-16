@@ -29,7 +29,7 @@ index e14e7ea..024981b 100644
  #target_link_libraries(system_kernel system_duct platform_static32 platform_static64)
  make_fat(system_kernel)
 diff --git a/darling/src/libsystem_kernel/emulation/CMakeLists.txt b/darling/src/libsystem_kernel/emulation/CMakeLists.txt
-index 5b2e765..64d35f5 100644
+index 5b2e765..40308eb 100644
 --- a/darling/src/libsystem_kernel/emulation/CMakeLists.txt
 +++ b/darling/src/libsystem_kernel/emulation/CMakeLists.txt
 @@ -6,13 +6,12 @@ enable_language(ASM)
@@ -68,6 +68,18 @@ index 5b2e765..64d35f5 100644
  	src/xnu_syscall/bsd/impl/misc/proc_info.c
  	src/xnu_syscall/bsd/impl/misc/ptrace.c
  	src/xnu_syscall/bsd/impl/misc/reboot.c
+@@ -359,6 +360,11 @@ set(emulation_sources
+ 	${CMAKE_BINARY_DIR}/src/external/darlingserver/src/rpc.c
+ )
+ 
++# darling-lol: keep these at -O0 even when the tree is built optimized. bsdthread_register.c
++# sets %rsp from the thread argument in inline assembly and sigexc.c runs on the fault and
++# suspend signal stacks; both depend on the unoptimized stack layout.
++set_source_files_properties(src/xnu_syscall/bsd/impl/bsdthread/bsdthread_register.c
++	src/linux_premigration/signal/sigexc.c PROPERTIES COMPILE_OPTIONS "-O0")
+ set_source_files_properties(src/legacy_path/signal/duct_signals.c PROPERTIES COMPILE_FLAGS "-nostdinc")
+ set_source_files_properties(src/legacy_path/signal/sigexc.c PROPERTIES OBJECT_DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/src/legacy_path/signal/exc.h)
+ set_source_files_properties(${CMAKE_BINARY_DIR}/src/external/darlingserver/src/rpc.c PROPERTIES
 diff --git a/darling/src/libsystem_kernel/emulation/include/common/base.h b/darling/src/libsystem_kernel/emulation/include/common/base.h
 index 207dae6..f5e96db 100644
 --- a/darling/src/libsystem_kernel/emulation/include/common/base.h
@@ -4812,7 +4824,7 @@ index c1b2d50..4e19963 100644
  	return ret;
  }
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/mach/impl/mach_traps.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/mach/impl/mach_traps.c
-index b998456..2783a4a 100644
+index b998456..c6281e6 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/mach/impl/mach_traps.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/mach/impl/mach_traps.c
 @@ -12,9 +12,28 @@
@@ -5893,15 +5905,20 @@ index b998456..2783a4a 100644
 +	__linux_sched_yield_site("SWTCH");
  	return 0;
  }
-@@ -693,11 +1610,53 @@ kern_return_t syscall_thread_switch_impl(
+ 
+@@ -692,12 +1609,53 @@ kern_return_t syscall_thread_switch_impl(
+ 				int option,
  				mach_msg_timeout_t option_time)
  {
++	/* option_time is in milliseconds (mach_msg_timeout_t). */
  	struct timespec tv = {
 -		.tv_sec = 0,
 -		.tv_nsec = 1000000
-+		.tv_sec = option_time > 0 ? (time_t)(option_time / 1000000) : 0,
-+		.tv_nsec = option_time > 0 ? (long)((option_time % 1000000) * 1000) : 1000000
++		.tv_sec = option_time / 1000,
++		.tv_nsec = (long) (option_time % 1000) * 1000000
  	};
+-	// Sleep for 1ms
+-	__linux_nanosleep(&tv, &tv);
 +
 +	/* darling-lol: opt-in trace (host file /tmp/rclol-select-trace) of who calls thread_switch and with which option:
 +	 * every 50th call writes thread id, option, time and up to 6 caller addresses (frame-pointer walk) to
@@ -5937,18 +5954,16 @@ index b998456..2783a4a 100644
 +		}
 +	}
 +
--	// Sleep for 1ms
--	__linux_nanosleep(&tv, &tv);
-+	/* darling-lol perf: cooperative yield (option_time == 0) should not sleep
-+	 * for a full millisecond — that is longer than many frame budgets at high
-+	 * refresh rates.  Use sched_yield for cooperative yields, and only sleep
-+	 * when a timed wait was explicitly requested. */
-+	if (option_time == 0) {
-+		__linux_sched_yield_site("THRSWT");
-+	} else {
++	/* darling-lol perf: a plain yield (option_time == 0) only gives up the CPU; sleeping a
++	 * full millisecond there is longer than a frame budget at high refresh rates. Timed
++	 * switches (spin locks pass 1 ms) keep sleeping for the requested time. */
++	if (option_time == 0)
++		__linux_sched_yield_site("THRSW");
++	else
 +		__linux_nanosleep(&tv, &tv);
-+	}
  
+ 	// TODO: we could implement this with yield_to() in LKM
+ 	return KERN_SUCCESS;
 diff --git a/libsyscall/CMakeLists.txt b/libsyscall/CMakeLists.txt
 index 57cebad..3014255 100755
 --- a/libsyscall/CMakeLists.txt

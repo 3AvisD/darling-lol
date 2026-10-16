@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Optimize configured string helpers, preserving every other platform object.
 
-Every src/string/generic source is recompiled at -O2 -fno-builtin (and
+Every src/string/generic source is recompiled at -O3 -fno-builtin (and
 -fno-strict-aliasing for this old BSD C) with the object library's own defines
 and includes, then relinked into build/riot-libsystem_platform.dylib. The AVX2
 and REP paths for memcpy/memmove/memset/bzero/memcmp/memchr live in those same
@@ -28,7 +28,7 @@ for original in list(link):
  relative=original.split('platform_obj.dir/',1)[1].removesuffix('.o')
  obj=root/('build/riot-platform-'+Path(relative).name+'.o')
  c_flags = [f for f in flags['C_FLAGS'] if f not in ('-g', '-O0', '-O1', '-O2')]
- subprocess.run(['clang',*flags['C_DEFINES'],*flags['C_INCLUDES'],*c_flags,'-O3','-march=native','-mtune=native','-fomit-frame-pointer','-fno-builtin','-fno-strict-aliasing','-c',str(root/'build/darling-src/src/external/libplatform'/relative),'-o',str(obj)],check=True)
+ subprocess.run(['clang',*flags['C_DEFINES'],*flags['C_INCLUDES'],*c_flags,'-O3','-march=native','-mtune=generic','-fno-builtin','-fno-strict-aliasing','-c',str(root/'build/darling-src/src/external/libplatform'/relative),'-o',str(obj)],check=True)
  link[link.index(original)]=str(obj)
  recompiled+=1
 link[link.index('-o')+1]=str(root/'build/riot-libsystem_platform.dylib')

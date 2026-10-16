@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rebuild libc++ and libc++abi with -O2.
+"""Rebuild libc++ and libc++abi with -O3 -march=native -mtune=generic.
 
 The CMake tree has no build type, so both libraries are clang's -O0 output: the
 game imports 131 functions from libc++.1.dylib (out-of-line std::string,
@@ -54,7 +54,7 @@ def build(library, object_dir, link_dir, output):
         relative, obj = job
         cxx_flags = [f for f in flags["CXX_FLAGS"] if f not in ("-g", "-O0", "-O1", "-O2")]
         subprocess.run(["clang++", *flags["CXX_DEFINES"], *flags["CXX_INCLUDES"], *cxx_flags,
-                        "-O3", "-march=native", "-mtune=native", "-fomit-frame-pointer", "-fno-strict-aliasing",
+                        "-O3", "-march=native", "-mtune=generic", "-fno-strict-aliasing",
                         "-c", str(source / relative), "-o", str(obj)],
                        check=True, capture_output=True)
 

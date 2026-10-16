@@ -1,7 +1,7 @@
 #!/bin/sh
 # Build every overlay of the optimized library batch, in order.
 #
-# Each builder recompiles the component's own objects at -O2 with the flags
+# Each builder recompiles the component's own objects at -O3 -march=native -mtune=generic with the flags
 # the configured build gives them and relinks with the configured link line;
 # none of them runs a full cmake build. The builders stop while a League game
 # process is running, because a compile job would skew the FPS the user is

@@ -61,8 +61,16 @@ else
  fi
 fi
 # --- darling-lol perf: scheduling & driver latency hints ---
-# Refresh rate for display link, async presenter, and frame pacing (default 144Hz)
-export RCLOL_REFRESH_HZ="${RCLOL_REFRESH_HZ:-144}"
+# Refresh rate for display link, async presenter, and frame pacing: the primary monitor's
+# current mode (the first monitor without a primary); unset falls back to 60 Hz.
+if [ -z "${RCLOL_REFRESH_HZ-}" ] && command -v xrandr >/dev/null 2>&1; then
+  RCLOL_REFRESH_HZ=$(xrandr --current 2>/dev/null | awk '
+    / connected/ { primary = / primary / }
+    /\*/ { for (i = 2; i <= NF; i++) if ($i ~ /\*/) { rate = $i; sub(/[*+]+/, "", rate)
+            if (primary) { print int(rate + 0.5); found = 1; exit } else if (first == "") first = int(rate + 0.5) } }
+    END { if (!found && first != "") print first }')
+fi
+if [ -n "${RCLOL_REFRESH_HZ-}" ]; then export RCLOL_REFRESH_HZ; fi
 # Vulkan WSI & Mesa optimizations
 export MESA_NO_ERROR="${MESA_NO_ERROR:-1}"
 # NVIDIA proprietary driver: limit pre-rendered frames.
