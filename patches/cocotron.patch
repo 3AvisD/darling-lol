@@ -3130,7 +3130,7 @@ index bfe3839a..2521ffd5 100644
  - (void) frameChanged;
  - (void) setLastKnownCursorPosition: (CGPoint) point;
 diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
-index f4925b66..67b084a0 100644
+index f4925b66..5ad2d1f7 100644
 --- a/AppKit/X11.backend/X11Window.m
 +++ b/AppKit/X11.backend/X11Window.m
 @@ -38,6 +38,34 @@
@@ -3692,7 +3692,33 @@ index f4925b66..67b084a0 100644
  }
  
  - (void) setHasShadow: (BOOL) value {
-@@ -559,7 +1028,29 @@ static NSData *makeWindowIcon() {
+@@ -488,6 +957,25 @@ static NSData *makeWindowIcon() {
+     _level = value;
+ }
+ 
++/* NSApplication's attention timer calls this for requestUserAttention:. The
++ * CGWindow base class raises an abstract-invocation exception, which aborted
++ * the whole LeagueClientUx process. Ask the window manager to mark the window
++ * as demanding attention instead. */
++- (void) flashWindow {
++    XClientMessageEvent event = {0};
++    event.type = ClientMessage;
++    event.window = _window;
++    event.message_type = XInternAtom(_display, "_NET_WM_STATE", False);
++    event.format = 32;
++    event.data.l[0] = 1; /* _NET_WM_STATE_ADD */
++    event.data.l[1] = (long) XInternAtom(_display, "_NET_WM_STATE_DEMANDS_ATTENTION", False);
++    event.data.l[3] = 1;
++    XSendEvent(_display, DefaultRootWindow(_display), False,
++               SubstructureNotifyMask | SubstructureRedirectMask,
++               (XEvent *) &event);
++    XFlush(_display);
++}
++
+ - (void) setOpaque: (BOOL) value {
+     _isOpaque = value;
+ }
+@@ -559,7 +1047,29 @@ static NSData *makeWindowIcon() {
      XRaiseWindow(_display, _window);
  }
  
@@ -3722,7 +3748,7 @@ index f4925b66..67b084a0 100644
      Atom wmState = XInternAtom(_display, "_NET_WM_STATE", FALSE);
      Atom hiddenState = XInternAtom(_display, "_NET_WM_STATE_HIDDEN", FALSE);
  
-@@ -615,6 +1106,12 @@ static NSData *makeWindowIcon() {
+@@ -615,6 +1125,12 @@ static NSData *makeWindowIcon() {
  }
  
  - (void) openGLFlushBuffer {
@@ -3735,7 +3761,7 @@ index f4925b66..67b084a0 100644
      CGLError error;
  
      CGLContextObj prevContext = CGLGetCurrentContext();
-@@ -666,6 +1163,7 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
+@@ -666,6 +1182,7 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
  }
  
  - (void) frameChanged {
