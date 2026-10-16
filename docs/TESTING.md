@@ -412,3 +412,34 @@ and exercises 100 cancellations with both retained and early-released caller
 references, without launching or inspecting Riot. A failure prints
 `CFHOST_CANCEL_CHECK fail stage=...`; `unexpected-callback` means a completed
 lookup arrived instead of the cancellation.
+
+## Primary-monitor geometry regression
+
+After preparing the sources and configuring/building Darling, run:
+
+```sh
+python3 scripts/prepare.py --check-only
+python3 tools/check-x11-display-geometry.py
+cc -std=c11 -Wall -Wextra -Werror tools/test-x11-relative-mouse.c -o build/test-x11-relative-mouse
+build/test-x11-relative-mouse
+```
+
+The native probe requires the existing per-user AppKit and CoreGraphics overlays
+and a running X11/Xwayland display. It rebuilds the changed X11 and CoreGraphics
+objects and tests them in a temporary framework overlay, without installing them.
+Six `DISPLAY_GEOMETRY ...=pass` lines are required; full output is saved in
+`build/pr12-display-check.log`.
+
+It checks the live primary screen's origin, synthetic single-monitor and offset
+layouts (including vertically arranged screens and negative Cocoa coordinates),
+unmapped window creation/resizing, display IDs after primary-first ordering,
+CoreGraphics bounds and spatial queries, absolute and relative warp translation,
+relative deltas, both RandR cache-invalidation events, and the root-screen fallback.
+Warps are intercepted: the probe does not move the desktop pointer or send game
+input. Synthetic layouts exercise coordinate conversion and display API behavior;
+they do not simulate physical monitor hotplug or validate League rendering.
+Fullscreen policy is unchanged. Manually verify game launch, window placement,
+click alignment and edge panning on the affected monitor layout before rollout.
+
+After installing the tested X11 and CoreGraphics binaries locally, the user
+reported that everything was working (2026-10-16). Fullscreen policy was unchanged.

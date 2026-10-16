@@ -2242,7 +2242,7 @@ index bdc97bdf..139c91eb 100644
          _cursor = XcursorLibraryLoadCursor(display, "left_ptr");
      return self;
 diff --git a/AppKit/X11.backend/X11Display.h b/AppKit/X11.backend/X11Display.h
-index 18189404..0eff2187 100644
+index 18189404..5b3a34bc 100644
 --- a/AppKit/X11.backend/X11Display.h
 +++ b/AppKit/X11.backend/X11Display.h
 @@ -10,13 +10,14 @@
@@ -2261,7 +2261,7 @@ index 18189404..0eff2187 100644
  
  @interface X11Display : NSDisplay {
      Display *_display;
-@@ -36,8 +37,20 @@
+@@ -36,19 +37,41 @@
      NSTimeInterval lastClickTimeStamp;
      int clickCount;
      X11Cursor *_blankCursor, *_defaultCursor;
@@ -2282,8 +2282,11 @@ index 18189404..0eff2187 100644
 +    unsigned char _modifierKeysDown[256];
      int _rrEventBase;
      NSArray* _lastScreens;
++    // Root-window rectangle of the primary monitor (macOS's global origin).
++    NSRect _primaryRootFrame;
++    BOOL _primaryRootFrameValid;
  
-@@ -45,7 +58,9 @@
+ @public
      XIM _xim;
  }
  
@@ -2293,8 +2296,16 @@ index 18189404..0eff2187 100644
  
  - (void) setWindow: (id) window forID: (XID) i;
  
+ - (CGFloat) doubleClickInterval;
+ - (int) handleError: (XErrorEvent *) errorEvent;
++
++// Conversions between X root coordinates (top-left of the root window, y down)
++// and Cocoa global coordinates (bottom-left of the primary screen, y up).
++- (NSRect) rootRectForFrame: (NSRect) frame;
++- (NSRect) frameForRootRect: (NSRect) rect;
+ @end
 diff --git a/AppKit/X11.backend/X11Display.m b/AppKit/X11.backend/X11Display.m
-index 5ae29bf4..8a66b921 100644
+index 5ae29bf4..5105e7d8 100644
 --- a/AppKit/X11.backend/X11Display.m
 +++ b/AppKit/X11.backend/X11Display.m
 @@ -48,12 +48,271 @@
@@ -2675,7 +2686,183 @@ index 5ae29bf4..8a66b921 100644
  - (void) _enableDetectableAutoRepeat {
      int major = XkbMajorVersion, minor = XkbMinorVersion;
      XkbStateRec state;
-@@ -536,12 +861,53 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -190,6 +515,35 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+         [_lastScreens release];
+         _lastScreens = nil;
+     }
++    _primaryRootFrameValid = NO;
++}
++
++/* Cocoa's global origin is the bottom-left corner of the primary screen, with
++ * y up; X's is the top-left corner of the root window, with y down. Screen
++ * frames and window frames are both expressed relative to the primary
++ * monitor's root rectangle. On a single monitor (or any layout whose primary
++ * sits at the root origin and is as tall as the root) this is the plain
++ * root-height flip with no offset. */
++- (NSRect) _primaryRootFrame {
++    if (!_primaryRootFrameValid)
++        [self screens];
++    return _primaryRootFrame;
++}
++
++- (NSRect) rootRectForFrame: (NSRect) frame {
++    NSRect primary = [self _primaryRootFrame];
++    return NSMakeRect(frame.origin.x + NSMinX(primary),
++                      NSMaxY(primary) - frame.origin.y - frame.size.height,
++                      fmax(frame.size.width, 1.0),
++                      fmax(frame.size.height, 1.0));
++}
++
++- (NSRect) frameForRootRect: (NSRect) rect {
++    NSRect primary = [self _primaryRootFrame];
++    return NSMakeRect(rect.origin.x - NSMinX(primary),
++                      NSMaxY(primary) - rect.origin.y - rect.size.height,
++                      fmax(rect.size.width, 1.0),
++                      fmax(rect.size.height, 1.0));
+ }
+ 
+ - (NSArray *) screens {
+@@ -201,25 +555,60 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+ 
+     int eventBase, errorBase;
+ 
+-    if (XRRQueryExtension(_display, &eventBase, &errorBase)) {
+-        XRRScreenResources *screen;
+-
++    XRRScreenResources *screen = NULL;
++    if (XRRQueryExtension(_display, &eventBase, &errorBase))
+         screen = XRRGetScreenResources(_display, DefaultRootWindow(_display));
++
++    if (screen) {
++        RROutput primaryOutput =
++                XRRGetOutputPrimary(_display, DefaultRootWindow(_display));
++        NSRect *rootFrames = calloc(screen->noutput ? screen->noutput : 1,
++                                    sizeof(NSRect));
++        if (!rootFrames) {
++            XRRFreeScreenResources(screen);
++            return [self _rootScreenFallback];
++        }
++        int primary = -1;
++
++        for (int i = 0; i < screen->noutput; i++) {
++            XRROutputInfo *oinfo =
++                    XRRGetOutputInfo(_display, screen, screen->outputs[i]);
++            if (oinfo && oinfo->crtc) {
++                XRRCrtcInfo *crtc =
++                        XRRGetCrtcInfo(_display, screen, oinfo->crtc);
++                if (crtc) {
++                    rootFrames[i] =
++                            NSMakeRect(crtc->x, crtc->y, crtc->width, crtc->height);
++                    XRRFreeCrtcInfo(crtc);
++                }
++            }
++            // The XRandR primary, otherwise the first active output.
++            if (!NSIsEmptyRect(rootFrames[i]) &&
++                (primary < 0 || screen->outputs[i] == primaryOutput))
++                primary = i;
++            if (oinfo) XRRFreeOutputInfo(oinfo);
++        }
++
++        // Without any active output, keep the root-height flip.
++        _primaryRootFrame = primary >= 0
++                ? rootFrames[primary]
++                : NSMakeRect(0, 0, DisplayWidth(_display, DefaultScreen(_display)),
++                             DisplayHeight(_display, DefaultScreen(_display)));
++        _primaryRootFrameValid = YES;
++
++        // [NSScreen screens] starts with the primary screen, as on macOS.
++        // Display IDs stay tied to the XRandR output index.
+         NSMutableArray<NSScreen *> *retval =
+                 [NSMutableArray arrayWithCapacity: screen->noutput];
++        NSMutableArray<NSScreen *> *inactive = [NSMutableArray array];
+ 
+         Atom edidAtom = XInternAtom(_display, "EDID", FALSE);
+ 
+         for (int i = 0; i < screen->noutput; i++) {
+-            XRROutputInfo *oinfo =
+-                    XRRGetOutputInfo(_display, screen, screen->outputs[i]);
+             NSScreen *nsscreen;
+ 
+-            if (oinfo->crtc) {
+-                XRRCrtcInfo *crtc =
+-                        XRRGetCrtcInfo(_display, screen, oinfo->crtc);
+-                NSRect frame =
+-                        NSMakeRect(crtc->x, crtc->y, crtc->width, crtc->height);
++            if (!NSIsEmptyRect(rootFrames[i])) {
++                NSRect frame = [self frameForRootRect: rootFrames[i]];
+ 
+                 nsscreen =
+                         [[[NSScreen alloc] initWithFrame: frame
+@@ -228,18 +617,17 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+                 Atom actualType;
+                 unsigned long nitems, bytesAfter;
+                 int actualFormat;
+-                unsigned char *prop;
++                unsigned char *prop = NULL;
+ 
+                 if (XRRGetOutputProperty(_display, screen->outputs[i], edidAtom,
+                                          0, 100, FALSE, FALSE, AnyPropertyType,
+                                          &actualType, &actualFormat, &nitems,
+                                          &bytesAfter, &prop) == Success) {
+-                    if (prop && nitems > 0)
++                    if (prop && actualFormat == 8 && nitems > 0)
+                         [nsscreen setEdid: [NSData dataWithBytes: prop
+                                                           length: nitems]];
+                 }
+-
+-                XRRFreeCrtcInfo(crtc);
++                if (prop) XFree(prop);
+             } else {
+                 nsscreen = [[[NSScreen alloc] initWithFrame: NSZeroRect
+                                                visibleFrame: NSZeroRect]
+@@ -247,25 +635,35 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+             }
+             [nsscreen setCgDirectDisplayID: (i + 1)];
+ 
+-            [retval addObject: nsscreen];
+-
+-            XRRFreeOutputInfo(oinfo);
++            if (i == primary)
++                [retval insertObject: nsscreen atIndex: 0];
++            else if (!NSIsEmptyRect(rootFrames[i]))
++                [retval addObject: nsscreen];
++            else
++                [inactive addObject: nsscreen];
+         }
++        [retval addObjectsFromArray: inactive];
+ 
++        free(rootFrames);
+         XRRFreeScreenResources(screen);
+ 
+         NSArray* array = [NSArray arrayWithArray: retval];
+         _lastScreens = [array retain];
+         return array;
+-    } else {
+-        NSRect frame = NSMakeRect(
+-                0, 0, DisplayWidth(_display, DefaultScreen(_display)),
+-                DisplayHeight(_display, DefaultScreen(_display)));
+-        return [NSArray
+-                arrayWithObject: [[[NSScreen alloc] initWithFrame: frame
+-                                                     visibleFrame: frame]
+-                                         autorelease]];
+     }
++    return [self _rootScreenFallback];
++}
++
++- (NSArray *) _rootScreenFallback {
++    NSRect frame = NSMakeRect(
++            0, 0, DisplayWidth(_display, DefaultScreen(_display)),
++            DisplayHeight(_display, DefaultScreen(_display)));
++    _primaryRootFrame = frame;
++    _primaryRootFrameValid = YES;
++    NSScreen *nsscreen = [[[NSScreen alloc] initWithFrame: frame
++                                             visibleFrame: frame] autorelease];
++    [nsscreen setCgDirectDisplayID: 1];
++    return [NSArray arrayWithObject: nsscreen];
+ }
+ 
+ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -536,12 +934,53 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
      return &layout->layout;
  }
  
@@ -2731,7 +2918,7 @@ index 5ae29bf4..8a66b921 100644
  }
  
  - (NSPasteboard *) pasteboardWithName: (NSString *) name {
-@@ -675,6 +1041,15 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -675,6 +1114,15 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                                      blue: 0.60f
                                      alpha: 1.0f];
  
@@ -2747,7 +2934,7 @@ index 5ae29bf4..8a66b921 100644
      NSLog(@"missing color for %@", colorName);
      return [NSColor redColor];
  }
-@@ -688,6 +1063,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -688,6 +1136,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  }
  
  - (void) hideCursor {
@@ -2758,7 +2945,7 @@ index 5ae29bf4..8a66b921 100644
      if (!_blankCursor)
          _blankCursor = [[X11Cursor alloc] initBlank];
      [self setCursor: _blankCursor];
-@@ -695,6 +1074,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -695,6 +1147,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  
  - (void) unhideCursor {
      NSCursor *current = [NSCursor currentCursor];
@@ -2769,7 +2956,7 @@ index 5ae29bf4..8a66b921 100644
      if (current != nil) {
          [current push];
          [current pop];
-@@ -747,12 +1130,28 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -747,12 +1203,28 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  
  - (void) setCursor: (id) cursor {
      CGWindow *window = [[NSApp keyWindow] platformWindow];
@@ -2803,7 +2990,7 @@ index 5ae29bf4..8a66b921 100644
      }
  }
  
-@@ -921,15 +1320,22 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -921,15 +1393,22 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  }
  
  - (NSPoint) mouseLocation {
@@ -2814,19 +3001,20 @@ index 5ae29bf4..8a66b921 100644
 -
 -    XQueryPointer(_display, root, &root, &child, &root_x, &root_y, &win_x,
 -                  &win_y, &mask);
+-    int height = DisplayHeight(_display, DefaultScreen(_display));
+-    return NSMakePoint(root_x, height - root_y);
++    NSRect primary = [self _primaryRootFrame];
 +    if (_relativeMouse.active) {
 +        /* The cursor is disassociated: report the frozen (virtual) position, as macOS does. */
-+        NSPoint result = NSMakePoint(_relativeMouse.virtualX,
-+                                     DisplayHeight(_display, DefaultScreen(_display)) - _relativeMouse.virtualY);
++        NSPoint result = NSMakePoint(_relativeMouse.virtualX - NSMinX(primary),
++                                     NSMaxY(primary) - _relativeMouse.virtualY);
 +        if (rclolTraceOn())
 +            rclolTraceMouseLocation(result, YES, YES, (int) _relativeMouse.virtualX, (int) _relativeMouse.virtualY, YES);
 +        return result;
 +    }
 +    uint64_t rclolStampBefore = rclolPointerStamp;
 +    BOOL rclolQueried = rclolQueryPointer(_display);
-     int height = DisplayHeight(_display, DefaultScreen(_display));
--    return NSMakePoint(root_x, height - root_y);
-+    NSPoint result = NSMakePoint(rclolRootX, height - rclolRootY);
++    NSPoint result = NSMakePoint(rclolRootX - NSMinX(primary), NSMaxY(primary) - rclolRootY);
 +    if (rclolTraceOn())
 +        rclolTraceMouseLocation(result, rclolQueried, rclolStampBefore != 0 && rclolPointerStamp == rclolStampBefore,
 +                                rclolRootX, rclolRootY, NO);
@@ -2834,7 +3022,7 @@ index 5ae29bf4..8a66b921 100644
  }
  
  - (void) setWindow: (id) window forID: (XID) i {
-@@ -948,6 +1354,16 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -948,6 +1427,16 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          // retaining the window causes it to keep popping back up endlessly even after dismissing it
          if (lastFocusedWindow && [[lastFocusedWindow platformWindow] windowHandle] == i)
              lastFocusedWindow = nil;
@@ -2851,7 +3039,7 @@ index 5ae29bf4..8a66b921 100644
      }
  }
  
-@@ -962,20 +1378,85 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -962,20 +1451,85 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  {
  #ifndef DARLING
      [[NSRunLoop currentRunLoop] addInputSource: _inputSource forMode: mode];
@@ -2942,7 +3130,7 @@ index 5ae29bf4..8a66b921 100644
  }
  
  - (NSEventModifierFlags) modifierFlagsForState: (unsigned int) state {
-@@ -1010,17 +1491,96 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1010,17 +1564,96 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
      return result;
  }
  
@@ -3039,7 +3227,7 @@ index 5ae29bf4..8a66b921 100644
          NSEventModifierFlags modifierFlags = [self modifierFlagsForState: ev->xkey.state];
          char buf[20] = {0};
          KeySym keySym;
-@@ -1038,6 +1598,18 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1038,6 +1671,18 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
              buf[strLen] = 0;
          }
  
@@ -3058,10 +3246,13 @@ index 5ae29bf4..8a66b921 100644
          id str = [[NSString alloc] initWithCString: buf
                                            encoding: NSUTF8StringEncoding];
          NSPoint pos =
-@@ -1077,6 +1649,30 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1077,6 +1722,33 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case ButtonPress:;
++        if (window && !_confinedWindow) {
++            [self updateMouseConfinementForWindow: window];
++        }
 +        if (ev->xbutton.button >= Button4 && ev->xbutton.button <= 7) {
 +            pos = [self locationInWindow: window x: ev->xbutton.x y: ev->xbutton.y
 +                                   rootX: ev->xbutton.x_root rootY: ev->xbutton.y_root];
@@ -3089,7 +3280,7 @@ index 5ae29bf4..8a66b921 100644
          NSTimeInterval now = [[NSDate date] timeIntervalSinceReferenceDate];
  
          if (now - lastClickTimeStamp < [self doubleClickInterval]) {
-@@ -1086,8 +1682,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1086,8 +1758,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          }
          lastClickTimeStamp = now;
  
@@ -3100,7 +3291,7 @@ index 5ae29bf4..8a66b921 100644
  
          switch (ev->xbutton.button) {
          case Button1:
-@@ -1096,10 +1692,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1096,10 +1768,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          case Button3:
              type = NSRightMouseDown;
              break;
@@ -3111,7 +3302,7 @@ index 5ae29bf4..8a66b921 100644
          default:
              type = NSOtherMouseDown;
          }
-@@ -1113,14 +1705,22 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1113,14 +1781,22 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                          clickCount: clickCount
                              deltaX: 0.0
                              deltaY: 0.0];
@@ -3138,7 +3329,7 @@ index 5ae29bf4..8a66b921 100644
          CGFloat deltaY = 0.0;
  
          switch (ev->xbutton.button) {
-@@ -1130,14 +1730,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1130,14 +1806,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          case Button3:
              type = NSRightMouseUp;
              break;
@@ -3153,7 +3344,7 @@ index 5ae29bf4..8a66b921 100644
          default:
              type = NSOtherMouseUp;
          }
-@@ -1151,7 +1743,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1151,7 +1819,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                          clickCount: clickCount
                              deltaX: 0.0
                              deltaY: deltaY];
@@ -3164,7 +3355,7 @@ index 5ae29bf4..8a66b921 100644
          [self postEvent: event atStart: NO];
          break;
  
-@@ -1164,45 +1758,82 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1164,45 +1834,82 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
              pos = [window
                      transformPoint: NSMakePoint(ev->xmotion.x, ev->xmotion.y)];
  
@@ -3273,7 +3464,7 @@ index 5ae29bf4..8a66b921 100644
                      mouseEventWithType: type
                                location: pos
                           modifierFlags:
-@@ -1211,28 +1842,49 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1211,28 +1918,49 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                              clickCount: 1
                                  deltaX: deltaX
                                  deltaY: deltaY];
@@ -3325,7 +3516,7 @@ index 5ae29bf4..8a66b921 100644
          NSLog(@"FocusIn");
          if ([delegate attachedSheet]) {
              [[delegate attachedSheet] makeKeyAndOrderFront: delegate];
-@@ -1243,28 +1895,55 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1243,28 +1971,55 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                                   checkForAppDeactivation: NO];
              lastFocusedWindow = nil;
          }
@@ -3383,7 +3574,7 @@ index 5ae29bf4..8a66b921 100644
          O2Rect rect = NSMakeRect(ev->xexpose.x, ev->xexpose.y,
                                   ev->xexpose.width, ev->xexpose.height);
  
-@@ -1301,11 +1980,23 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1301,11 +2056,23 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case UnmapNotify:
@@ -3411,7 +3602,7 @@ index 5ae29bf4..8a66b921 100644
          break;
  
      case MapRequest:
-@@ -1321,6 +2012,7 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1321,6 +2088,7 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          [delegate platformWindow: window
                      frameChanged: [window frame]
                           didSize: YES];
@@ -3419,7 +3610,7 @@ index 5ae29bf4..8a66b921 100644
          break;
  
      case ConfigureRequest:
-@@ -1344,6 +2036,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1344,6 +2112,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case PropertyNotify:
@@ -3428,7 +3619,18 @@ index 5ae29bf4..8a66b921 100644
          if ([window respondsToSelector: @selector(propertyNotify:)]) {
              [window propertyNotify: &ev->xproperty];
          }
-@@ -1433,6 +2127,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1399,7 +2169,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+         break;
+ 
+     default:
+-        if (ev->type == _rrEventBase + RRNotify) {
++        if (_rrEventBase && (ev->type == _rrEventBase + RRNotify ||
++                             ev->type == _rrEventBase + RRScreenChangeNotify)) {
++            XRRUpdateConfiguration(ev);
+             [self _invalidateRRCache];
+             break;
+         }
+@@ -1433,6 +2205,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
      NSLog(@"Request code: %d:%d", errorEvent->request_code,
            errorEvent->minor_code);
      NSLog(@"Error code: %d", errorEvent->error_code);
@@ -3439,7 +3641,7 @@ index 5ae29bf4..8a66b921 100644
      return 0;
  }
  
-@@ -1476,54 +2174,238 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
+@@ -1476,54 +2252,271 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
      return frame;
  }
  
@@ -3461,7 +3663,11 @@ index 5ae29bf4..8a66b921 100644
 +    return [window transformPoint: NSMakePoint(x, y)];
 +}
 +
++// CGWarpMouseCursorPosition uses the primary screen's top-left, with y down.
  - (void) warpMouse: (NSPoint) position {
++    NSRect primary = [self _primaryRootFrame];
++    position.x += NSMinX(primary);
++    position.y += NSMinY(primary);
 +    if (rclolTraceOn())
 +        rclolTraceRated(&rclolWarpAppChannel, "target=%.1f,%.1f relative=%d/%d virtual=%.1f,%.1f physical=%d,%d "
 +                        "honoured=%d confined=%lu cachedRoot=%d,%d appActive=%d",
@@ -3481,8 +3687,8 @@ index 5ae29bf4..8a66b921 100644
 -                 position.x, position.y);
 -    XSync(_display, False);
 +    [self warpPointerToRootX: x y: y];
- }
- 
++}
++
 +/* Confinement preserves absolute motion and edge panning. Relative mode holds
 + * its own grab and is left alone while requested. */
 +- (void) updateMouseConfinementForWindow:(X11Window *)window {
@@ -3528,6 +3734,16 @@ index 5ae29bf4..8a66b921 100644
 +    if (winTitle && [winTitle rangeOfString:@"(TM) Client" options:NSCaseInsensitiveSearch].location != NSNotFound) {
 +        isGame = YES;
 +    }
++    if (!isGame) {
++        XTextProperty prop;
++        if (XGetWMName(_display, win, &prop) && prop.value) {
++            NSString *xtitle = [NSString stringWithUTF8String:(const char *)prop.value];
++            if (xtitle && [xtitle rangeOfString:@"(TM) Client" options:NSCaseInsensitiveSearch].location != NSNotFound) {
++                isGame = YES;
++            }
++            XFree(prop.value);
++        }
++    }
 +
 +    if (isBorderless && isGame) {
 +        if (!fullscreen) {
@@ -3555,9 +3771,24 @@ index 5ae29bf4..8a66b921 100644
 +            unsigned long bypass = 1;
 +            XChangeProperty(_display, win, XInternAtom(_display, "_NET_WM_BYPASS_COMPOSITOR", False),
 +                            XA_CARDINAL, 32, PropModeReplace, (unsigned char *)&bypass, 1);
-+            XFlush(_display);
-+            if (getenv("RCLOL_INPUT_TRACE")) fprintf(stderr,"CONFINEMENT promoted to EWMH FULLSCREEN for window %lu\n",win);
 +        }
++
++        /* Ensure window is marked active in Mutter so top bar is hidden and pointer is confined */
++        Atom activeAtom = XInternAtom(_display, "_NET_ACTIVE_WINDOW", False);
++        XClientMessageEvent act = {0};
++        act.type = ClientMessage;
++        act.window = win;
++        act.message_type = activeAtom;
++        act.format = 32;
++        act.data.l[0] = 1;
++        act.data.l[1] = CurrentTime;
++        XSendEvent(_display, DefaultRootWindow(_display), False,
++                   SubstructureNotifyMask | SubstructureRedirectMask,
++                   (XEvent *)&act);
++        XRaiseWindow(_display, win);
++        XSetInputFocus(_display, win, RevertToPointerRoot, CurrentTime);
++        XFlush(_display);
++        if (getenv("RCLOL_INPUT_TRACE")) fprintf(stderr,"CONFINEMENT promoted to EWMH FULLSCREEN and ACTIVE for window %lu\n",win);
 +    }
 +
 +    /* Check focus to determine whether mouse confinement should be active. */
@@ -3572,7 +3803,7 @@ index 5ae29bf4..8a66b921 100644
 +    }
 +    if (getenv("RCLOL_INPUT_TRACE")) fprintf(stderr,"CONFINEMENT focus=%lu target=%lu ancestor=%lu fullscreen=%d\n",focus,win,ancestor,fullscreen);
 +
-+    BOOL isFocused = (ancestor == win || focus == win || (isGame && (focus == PointerRoot || focus == None)));
++    BOOL isFocused = (ancestor == win || focus == win || (isGame && (focus == PointerRoot || focus == None || focus == DefaultRootWindow(_display))));
 +    if ((!fullscreen && !isGame) || attrs.map_state != IsViewable || !isFocused) {
 +        if (rclolTraceOn())
 +            rclolTraceRated(&rclolConfineChannel, "no confinement window=%lu fullscreen=%d ewmh=%d titled=%d size=%dx%d map_state=%d %s",
@@ -3588,12 +3819,16 @@ index 5ae29bf4..8a66b921 100644
 +        return;
 +    }
 +    unsigned mask = ButtonPressMask | ButtonReleaseMask | PointerMotionMask;
-+    int status=XGrabPointer(_display, win, True, mask, GrabModeAsync, GrabModeAsync,
++    int status=XGrabPointer(_display, win, False, mask, GrabModeAsync, GrabModeAsync,
 +        win, None, CurrentTime);
 +    if (getenv("RCLOL_INPUT_TRACE")) fprintf(stderr,"CONFINEMENT fullscreen=%d window=%lu result=%d\n",fullscreen,win,status);
++    if (rclolTraceOn())
++        rclolTraceRated(&rclolConfineChannel, "confine window=%lu fullscreen=%d ewmh=%d size=%dx%d XGrabPointer=%d(%s)",
++                        (unsigned long) win, fullscreen, rclolEwmhFullscreen, attrs.width, attrs.height, status,
++                        rclolGrabResultName(status));
 +    if (status == GrabSuccess) _confinedWindow=win;
-+}
-+
+ }
+ 
 +/* Takes the relative-mode pointer grab on the key (else main) window, starting with the virtual cursor at the
 + * current pointer position. Returns the XGrabPointer result, or -1 without a window. */
 +- (int) beginRelativeMouseWithWindow: (NSWindow **) outWindow pick: (const char **) outPick {
@@ -4063,7 +4298,7 @@ index 00000000..7fc39cc4
 +
 +#endif
 diff --git a/AppKit/X11.backend/X11Window.h b/AppKit/X11.backend/X11Window.h
-index bfe3839a..2521ffd5 100644
+index bfe3839a..dbc974a0 100644
 --- a/AppKit/X11.backend/X11Window.h
 +++ b/AppKit/X11.backend/X11Window.h
 @@ -26,7 +26,7 @@
@@ -4102,8 +4337,11 @@ index bfe3839a..2521ffd5 100644
  
  @public
      XIC _xic;
-@@ -63,6 +83,7 @@
- - (O2Rect) transformFrame: (O2Rect) frame;
+@@ -60,9 +80,9 @@
+ - (Visual *) visual;
+ - (Drawable) drawable;
+ - (NSPoint) transformPoint: (NSPoint) pos;
+-- (O2Rect) transformFrame: (O2Rect) frame;
  
  - (Window) windowHandle;
 +- (BOOL) handleRemoteFrameExpose: (Window) window;
@@ -4111,7 +4349,7 @@ index bfe3839a..2521ffd5 100644
  - (void) frameChanged;
  - (void) setLastKnownCursorPosition: (CGPoint) point;
 diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
-index f4925b66..22e7e9fd 100644
+index f4925b66..12a75854 100644
 --- a/AppKit/X11.backend/X11Window.m
 +++ b/AppKit/X11.backend/X11Window.m
 @@ -38,6 +38,34 @@
@@ -4149,6 +4387,15 @@ index f4925b66..22e7e9fd 100644
  
  @implementation X11Window
  
+@@ -158,7 +186,7 @@ static NSData *makeWindowIcon() {
+     X11Display* x11disp = (X11Display *) [NSDisplay currentDisplay];
+     _display = [x11disp display];
+ 
+-    _frame = [self transformFrame: [delegate frame]];
++    _frame = [x11disp rootRectForFrame: [delegate frame]];
+     BOOL isPanel = [delegate isKindOfClass: [NSPanel class]];
+     if (isPanel && _styleMask & NSDocModalWindowMask)
+         _styleMask = NSBorderlessWindowMask;
 @@ -193,8 +221,32 @@ static NSData *makeWindowIcon() {
  
      XSetWindowAttributes xattr;
@@ -4717,7 +4964,19 @@ index f4925b66..22e7e9fd 100644
  - (Window) windowHandle {
      return _window;
  }
-@@ -478,6 +976,20 @@ static NSData *makeWindowIcon() {
+@@ -470,14 +968,31 @@ static NSData *makeWindowIcon() {
+     const char *text = [title cString];
+     XStringListToTextProperty((char **) &text, 1, &prop);
+     XSetWMName(_display, _window, &prop);
++    if (title && [title rangeOfString:@"(TM) Client" options:NSCaseInsensitiveSearch].location != NSNotFound) {
++        [(X11Display *)[NSDisplay currentDisplay] updateMouseConfinementForWindow:self];
++    }
+ }
+ 
+ - (void) setFrame: (O2Rect) frame {
+-    frame = [self transformFrame: frame];
++    frame = [(X11Display *) [NSDisplay currentDisplay] rootRectForFrame: frame];
+     XMoveResizeWindow(_display, _window, frame.origin.x, frame.origin.y,
                        frame.size.width, frame.size.height);
      [self invalidateContextWithNewSize: frame.size];
      _frame = frame;
@@ -4738,7 +4997,7 @@ index f4925b66..22e7e9fd 100644
  }
  
  - (void) setHasShadow: (BOOL) value {
-@@ -488,6 +1000,25 @@ static NSData *makeWindowIcon() {
+@@ -488,6 +1003,25 @@ static NSData *makeWindowIcon() {
      _level = value;
  }
  
@@ -4764,7 +5023,26 @@ index f4925b66..22e7e9fd 100644
  - (void) setOpaque: (BOOL) value {
      _isOpaque = value;
  }
-@@ -559,7 +1090,29 @@ static NSData *makeWindowIcon() {
+@@ -543,6 +1077,18 @@ static NSData *makeWindowIcon() {
+ - (void) makeKey {
+     [self ensureMapped];
+     XRaiseWindow(_display, _window);
++    Atom activeAtom = XInternAtom(_display, "_NET_ACTIVE_WINDOW", False);
++    XEvent act = {0};
++    act.xclient.type = ClientMessage;
++    act.xclient.window = _window;
++    act.xclient.message_type = activeAtom;
++    act.xclient.format = 32;
++    act.xclient.data.l[0] = 1;
++    act.xclient.data.l[1] = CurrentTime;
++    XSendEvent(_display, DefaultRootWindow(_display), False,
++               SubstructureRedirectMask | SubstructureNotifyMask, &act);
++    XSetInputFocus(_display, _window, RevertToPointerRoot, CurrentTime);
++    XFlush(_display);
+ }
+ 
+ - (void) makeMain {
+@@ -559,7 +1105,29 @@ static NSData *makeWindowIcon() {
      XRaiseWindow(_display, _window);
  }
  
@@ -4794,7 +5072,7 @@ index f4925b66..22e7e9fd 100644
      Atom wmState = XInternAtom(_display, "_NET_WM_STATE", FALSE);
      Atom hiddenState = XInternAtom(_display, "_NET_WM_STATE_HIDDEN", FALSE);
  
-@@ -615,6 +1168,12 @@ static NSData *makeWindowIcon() {
+@@ -615,6 +1183,12 @@ static NSData *makeWindowIcon() {
  }
  
  - (void) openGLFlushBuffer {
@@ -4807,7 +5085,16 @@ index f4925b66..22e7e9fd 100644
      CGLError error;
  
      CGLContextObj prevContext = CGLGetCurrentContext();
-@@ -666,6 +1225,7 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
+@@ -652,7 +1226,7 @@ static NSData *makeWindowIcon() {
+ }
+ 
+ - (O2Rect) frame {
+-    return [self transformFrame: _frame];
++    return [(X11Display *) [NSDisplay currentDisplay] frameForRootRect: _frame];
+ }
+ 
+ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
+@@ -666,6 +1240,7 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
  }
  
  - (void) frameChanged {
@@ -4815,6 +5102,21 @@ index f4925b66..22e7e9fd 100644
      XErrorHandler previousHandler = XSetErrorHandler(ignoreBadWindow);
      @try {
          Window root, parent;
+@@ -710,14 +1285,6 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
+     [_deviceDictionary addEntriesFromDictionary: entries];
+ }
+ 
+-- (O2Rect) transformFrame: (O2Rect) frame {
+-    return NSMakeRect(frame.origin.x,
+-                      DisplayHeight(_display, DefaultScreen(_display)) -
+-                              frame.origin.y - frame.size.height,
+-                      fmax(frame.size.width, 1.0),
+-                      fmax(frame.size.height, 1.0));
+-}
+-
+ - (NSPoint) transformPoint: (NSPoint) pos; {
+     return NSMakePoint(pos.x, _frame.size.height - pos.y);
+ }
 diff --git a/AppKit/include/AppKit/NSAccessibilityConstants.h b/AppKit/include/AppKit/NSAccessibilityConstants.h
 index 282312de..03c75b2b 100644
 --- a/AppKit/include/AppKit/NSAccessibilityConstants.h
@@ -5396,10 +5698,179 @@ index db8869c8..6fea5107 100644
 +    CGContextSetTextPosition(c, savedPosition.x, savedPosition.y);
  }
 diff --git a/CoreGraphics/CGDirectDisplay.m b/CoreGraphics/CGDirectDisplay.m
-index e213b066..94d5c7bb 100644
+index e213b066..569d77f2 100644
 --- a/CoreGraphics/CGDirectDisplay.m
 +++ b/CoreGraphics/CGDirectDisplay.m
-@@ -474,7 +474,9 @@ CGError CGAssociateMouseAndMouseCursorPosition(boolean_t connected) {
+@@ -53,6 +53,29 @@ static NSDisplay *currentDisplay(void) {
+     return [cls currentDisplay];
+ }
+ 
++/* Display IDs belong to the screens themselves; [NSScreen screens] lists the
++ * primary screen first, so array positions are not IDs. */
++static NSScreen *screenForDisplayID(NSArray<NSScreen *> *screens,
++                                    CGDirectDisplayID displayID)
++{
++    for (NSScreen *screen in screens) {
++        if ([screen cgDirectDisplayID] == displayID)
++            return screen;
++    }
++    return nil;
++}
++
++/* NSScreen frames have y up from the primary's bottom edge; CoreGraphics
++ * global coordinates have y down from the primary's top edge. */
++static CGRect globalRectForFrame(NSArray<NSScreen *> *screens, NSRect frame) {
++    if (NSIsEmptyRect(frame) || [screens count] == 0)
++        return frame;
++    CGFloat primaryHeight = NSHeight([[screens objectAtIndex: 0] frame]);
++    return CGRectMake(frame.origin.x,
++                      primaryHeight - frame.origin.y - frame.size.height,
++                      frame.size.width, frame.size.height);
++}
++
+ CGDirectDisplayID CGMainDisplayID(void) {
+     NSDisplay *display = currentDisplay();
+     if (!display)
+@@ -60,9 +83,9 @@ CGDirectDisplayID CGMainDisplayID(void) {
+ 
+     NSArray<NSScreen *> *screens = [display screens];
+ 
+-    for (int i = 0; i < [screens count]; i++) {
+-        if (!NSIsEmptyRect([[screens objectAtIndex: i] frame])) {
+-            return i + 1;
++    for (NSScreen *screen in screens) {
++        if (!NSIsEmptyRect([screen frame])) {
++            return [screen cgDirectDisplayID];
+         }
+     }
+ 
+@@ -89,10 +112,11 @@ CGError CGGetOnlineDisplayList(uint32_t maxDisplays,
+             onlineDisplays[0] = mainDisplay;
+     }
+ 
+-    for (int i = 0; i < [screens count]; i++) {
+-        if ((i + 1) != mainDisplay) {
++    for (NSScreen *screen in screens) {
++        CGDirectDisplayID displayID = [screen cgDirectDisplayID];
++        if (displayID != mainDisplay) {
+             if (*displayCount < maxDisplays)
+-                onlineDisplays[*displayCount] = i + 1;
++                onlineDisplays[*displayCount] = displayID;
+             (*displayCount)++;
+         }
+     }
+@@ -105,11 +129,11 @@ size_t CGDisplayPixelsHigh(CGDirectDisplayID displayIndex) {
+     if (!display)
+         return kCGErrorInvalidConnection;
+ 
+-    NSArray<NSScreen *> *screens = [display screens];
+-    if (displayIndex > [screens count] || displayIndex <= 0)
++    NSScreen *screen = screenForDisplayID([display screens], displayIndex);
++    if (!screen)
+         return 0;
+ 
+-    return NSHeight([[screens objectAtIndex: displayIndex - 1] frame]);
++    return NSHeight([screen frame]);
+ }
+ 
+ size_t CGDisplayPixelsWide(CGDirectDisplayID displayIndex) {
+@@ -117,11 +141,11 @@ size_t CGDisplayPixelsWide(CGDirectDisplayID displayIndex) {
+     if (!display)
+         return kCGErrorInvalidConnection;
+ 
+-    NSArray<NSScreen *> *screens = [display screens];
+-    if (displayIndex > [screens count] || displayIndex <= 0)
++    NSScreen *screen = screenForDisplayID([display screens], displayIndex);
++    if (!screen)
+         return 0;
+ 
+-    return NSWidth([[screens objectAtIndex: displayIndex - 1] frame]);
++    return NSWidth([screen frame]);
+ }
+ 
+ CGError CGGetActiveDisplayList(uint32_t maxDisplays,
+@@ -135,10 +159,10 @@ CGError CGGetActiveDisplayList(uint32_t maxDisplays,
+     NSArray<NSScreen *> *screens = [display screens];
+ 
+     *displayCount = 0;
+-    for (int i = 0; i < [screens count]; i++) {
+-        if (!NSIsEmptyRect([[screens objectAtIndex: i] frame])) {
++    for (NSScreen *screen in screens) {
++        if (!NSIsEmptyRect([screen frame])) {
+             if (*displayCount < maxDisplays)
+-                activeDisplays[*displayCount] = i + 1;
++                activeDisplays[*displayCount] = [screen cgDirectDisplayID];
+             (*displayCount)++;
+         }
+     }
+@@ -169,11 +193,11 @@ CGError CGGetDisplaysWithPoint(CGPoint point, uint32_t maxDisplays,
+     NSArray<NSScreen *> *screens = [display screens];
+     *matchingDisplayCount = 0;
+ 
+-    for (int i = 0; i < [screens count]; i++) {
+-        NSRect rect = [[screens objectAtIndex: i] frame];
++    for (NSScreen *screen in screens) {
++        NSRect rect = globalRectForFrame(screens, [screen frame]);
+         if (NSPointInRect(point, rect)) {
+             if (*matchingDisplayCount < maxDisplays)
+-                displays[*matchingDisplayCount] = i + 1;
++                displays[*matchingDisplayCount] = [screen cgDirectDisplayID];
+             (*matchingDisplayCount)++;
+         }
+     }
+@@ -192,11 +216,11 @@ CGError CGGetDisplaysWithRect(CGRect rect, uint32_t maxDisplays,
+     NSArray<NSScreen *> *screens = [display screens];
+     *matchingDisplayCount = 0;
+ 
+-    for (int i = 0; i < [screens count]; i++) {
+-        NSRect screenRect = [[screens objectAtIndex: i] frame];
++    for (NSScreen *screen in screens) {
++        NSRect screenRect = globalRectForFrame(screens, [screen frame]);
+         if (NSIntersectsRect(rect, screenRect)) {
+             if (*matchingDisplayCount < maxDisplays)
+-                displays[*matchingDisplayCount] = i + 1;
++                displays[*matchingDisplayCount] = [screen cgDirectDisplayID];
+             (*matchingDisplayCount)++;
+         }
+     }
+@@ -218,10 +242,11 @@ CGRect CGDisplayBounds(CGDirectDisplayID displayIndex) {
+         return NSZeroRect;
+ 
+     NSArray<NSScreen *> *screens = [display screens];
+-    if (displayIndex > [screens count] || displayIndex <= 0)
++    NSScreen *screen = screenForDisplayID(screens, displayIndex);
++    if (!screen)
+         return NSZeroRect;
+ 
+-    return [[screens objectAtIndex: displayIndex - 1] frame];
++    return globalRectForFrame(screens, [screen frame]);
+ }
+ 
+ CGError CGDisplayHideCursor(CGDirectDisplayID displayIndex) {
+@@ -256,7 +281,7 @@ boolean_t CGDisplayIsInMirrorSet(CGDirectDisplayID display) {
+ }
+ 
+ Boolean CGDisplayIsMain(CGDirectDisplayID display) {
+-    return display == 1;
++    return display != kCGNullDirectDisplay && display == CGMainDisplayID();
+ }
+ 
+ CGDirectDisplayID CGDisplayMirrorsDisplay(CGDirectDisplayID display) {
+@@ -341,11 +366,10 @@ static NSData *edidForDisplay(CGDirectDisplayID displayId) {
+     if (!display)
+         return nil;
+ 
+-    NSArray<NSScreen *> *screens = [display screens];
+-    if (displayId <= 0 || displayId > [screens count])
++    NSScreen *screen = screenForDisplayID([display screens], displayId);
++    if (!screen)
+         return nil;
+ 
+-    NSScreen *screen = [screens objectAtIndex: displayId - 1];
+     NSData *edid = [screen edid];
+     if (edid && [edid length] >= 16)
+         return edid;
+@@ -474,7 +498,9 @@ CGError CGAssociateMouseAndMouseCursorPosition(boolean_t connected) {
      if (!display)
          return kCGErrorInvalidConnection;
  
@@ -5410,7 +5881,7 @@ index e213b066..94d5c7bb 100644
      return kCGErrorSuccess;
  }
  
-@@ -500,3 +502,38 @@ CFDictionaryRef CGDisplayCurrentMode(CGDirectDisplayID display) {
+@@ -500,3 +526,38 @@ CFDictionaryRef CGDisplayCurrentMode(CGDirectDisplayID display) {
  size_t CGDisplayModeGetPixelWidth(CGDisplayModeRef mode) {
      return 0;
  }
