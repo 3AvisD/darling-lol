@@ -40,7 +40,18 @@ int main() {
         layer.frame = CGRectMake(0,0,160,96);
         NSView* view = [[NSView alloc] initWithFrame:NSMakeRect(0,0,160,96)];
         view.wantsLayer = YES;
-        view.layer = layer;
+        const bool nested = getenv("RIOT_PRESENTATION_NESTED") != nullptr;
+        if (nested) {
+            CALayer* root = [CALayer layer];
+            root.frame = layer.frame;
+            CALayer* container = [CALayer layer];
+            container.frame = layer.frame;
+            [container addSublayer:layer];
+            [root addSublayer:container];
+            view.layer = root;
+        } else {
+            view.layer = layer;
+        }
         NSWindow* window = [[NSWindow alloc] initWithContentRect:NSMakeRect(50,50,160,96)
           styleMask:NSTitledWindowMask backing:NSBackingStoreBuffered defer:NO];
         window.title = @"Metal presentation check";
@@ -92,7 +103,8 @@ int main() {
             fprintf(stderr, "PASS: bounded presentation capture rearmed without restarting\n");
         }
         fprintf(stderr, "PASS: Vulkan-to-OpenGL presentation pixels\n");
-        fprintf(stderr, "PASS: late context attachment and %u Metal drawable presentations\n", frameCount);
+        fprintf(stderr, "PASS: %s layer, late context attachment and %u Metal drawable presentations\n",
+                nested ? "nested" : "root", frameCount);
         [window orderOut:nil];
         [queue release]; [view release]; [window release]; [device release];
     }

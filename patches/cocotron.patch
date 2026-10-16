@@ -6871,7 +6871,7 @@ index 5dcac115..5de4f03f 100644
 +
  @end
 diff --git a/QuartzCore/CALayerContext.m b/QuartzCore/CALayerContext.m
-index 5dce8c56..e329b5f8 100644
+index 5dce8c56..dee2b80c 100644
 --- a/QuartzCore/CALayerContext.m
 +++ b/QuartzCore/CALayerContext.m
 @@ -1,47 +1,58 @@
@@ -7027,18 +7027,30 @@ index 5dce8c56..e329b5f8 100644
  }
  
  - (void) assignTextureIdsToLayerTree: (CALayer *) layer {
-@@ -93,7 +148,10 @@
+@@ -93,7 +148,22 @@
          [self assignTextureIdsToLayerTree: child];
  }
  
 +extern void darlingQCTiming(const char* what, double seconds);
++
++- (void) prepareMetalLayers: (CALayer *) layer {
++    // Metal layers may be nested beneath ordinary backing layers. Every queued
++    // drawable must be consumed before CARenderer samples the layer tree.
++    if ([[layer class] isSubclassOfClass: [CAMetalLayerInternal class]]) {
++        CFTimeInterval prepStart = CACurrentMediaTime();
++        [(CAMetalLayerInternal*)layer prepareRender];
++        darlingQCTiming("prepareRenderTotal", CACurrentMediaTime() - prepStart);
++    }
++    for (CALayer *child in layer.sublayers)
++        [self prepareMetalLayers: child];
++}
 +
  - (void) renderLayer: (CALayer *) layer {
 +    CFTimeInterval renderLayerStart = CACurrentMediaTime();
      CGLContextMakeCurrentAndAttachToWindow(_glContext, _cglWindow);
  
      glEnable(GL_DEPTH_TEST);
-@@ -118,27 +176,69 @@
+@@ -118,27 +188,63 @@
  
      [_deleteTextureIds removeAllObjects];
  
@@ -7047,13 +7059,12 @@ index 5dce8c56..e329b5f8 100644
      [self assignTextureIdsToLayerTree: layer];
 +    darlingQCTiming("assignTextureIds", CACurrentMediaTime() - assignStart);
  
-     // this is where the Metal layer renders to an internal texture for us to use
-     if ([[layer class] isSubclassOfClass: [CAMetalLayerInternal class]]) {
-         CAMetalLayerInternal* mtl = (CAMetalLayerInternal*)layer;
-+        CFTimeInterval prepStart = CACurrentMediaTime();
-         [mtl prepareRender];
-+        darlingQCTiming("prepareRenderTotal", CACurrentMediaTime() - prepStart);
-     }
+-    // this is where the Metal layer renders to an internal texture for us to use
+-    if ([[layer class] isSubclassOfClass: [CAMetalLayerInternal class]]) {
+-        CAMetalLayerInternal* mtl = (CAMetalLayerInternal*)layer;
+-        [mtl prepareRender];
+-    }
++    [self prepareMetalLayers: layer];
  
 +    CFTimeInterval rendererStart = CACurrentMediaTime();
      [_renderer render];
@@ -7108,7 +7119,7 @@ index 5dce8c56..e329b5f8 100644
  }
  
  - (void) startTimerIfNeeded {
-@@ -147,7 +247,7 @@
+@@ -147,7 +253,7 @@
                                                     target: self
                                                   selector: @selector(timer:)
                                                   userInfo: nil
@@ -7117,7 +7128,7 @@ index 5dce8c56..e329b5f8 100644
  }
  
  - (void) deleteTextureId: (NSNumber *) textureId {
-@@ -155,7 +255,10 @@
+@@ -155,7 +261,10 @@
  }
  
  - (void) flush {
