@@ -61,6 +61,12 @@ else
  fi
 fi
 # --- darling-lol perf: scheduling & driver latency hints ---
+# Refresh rate for display link, async presenter, and frame pacing (default 144Hz)
+export RCLOL_REFRESH_HZ="${RCLOL_REFRESH_HZ:-144}"
+# Vulkan WSI & Mesa low-latency overrides
+export MESA_VK_WSI_PRESENT_MODE="${MESA_VK_WSI_PRESENT_MODE:-immediate}"
+export vblank_mode="${vblank_mode:-0}"
+export MESA_NO_ERROR="${MESA_NO_ERROR:-1}"
 # NVIDIA proprietary driver: limit pre-rendered frames.
 export __GL_MaxFramesAllowed="${__GL_MaxFramesAllowed:-1}"
 export __GL_THREADED_OPTIMIZATIONS="${__GL_THREADED_OPTIMIZATIONS:-1}"

@@ -2,6 +2,7 @@
 """Clear only a dead Darling server's stale PID marker and buffers before startup."""
 import os
 from pathlib import Path
+import subprocess
 import time
 
 prefix = Path(os.environ.get('DPREFIX', str(Path.home() / '.darling')))
@@ -31,6 +32,11 @@ if marker.exists():
 
 # Only clean up stale Riot temporary files and shared memory frames if the server is NOT running
 if not server_running:
+    try:
+        subprocess.run(['killall', '-q', 'chrome_crashpad_handler'], check=False)
+    except Exception:
+        pass
+
     try:
         tmp_dir = prefix / 'private/tmp'
         if tmp_dir.is_dir():
