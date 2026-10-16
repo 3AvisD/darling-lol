@@ -1,5 +1,23 @@
 # darling-lol
 
+> [!IMPORTANT]
+> ## Announcement
+>
+> This project has gained a lot of attention, so a few things need to be said clearly.
+>
+> **1. Maintenance.** I built this mainly as a technical challenge, because everyone kept telling me it was impossible. I don't have the time to maintain it fully. Apart from open issues that block you completely, I will only review and merge pull requests.
+>
+> **2. Bans.** This project can get you permanently banned, as I have said many times. I am not responsible for your actions. You alone are responsible for launching the game in a modified environment (Darling). If you use it:
+> - don't cheat;
+> - don't play ranked;
+> - don't use your main account.
+>
+> Even with all of that, you will probably still get permabanned.
+>
+> **3. Takedown.** Riot may well shut this project down. If that happens, I will publish a fork of Darling containing only the changes made here (none of them breach anything), and release the small script as a gist or similar.
+>
+> **4. To Riot.** If you are reading this, it means a lot of people want to play your game on Linux and are disappointed that they currently can't. As with macOS for your other games (TFT, Valorant), it feels like Riot doesn't care about a part of its players who have been waiting the longest. If you want to fix this, make LoL Next compatible with Linux, either natively or through a layer like Proton. Yes, that includes your kernel anticheat: Epic Games did it with Easy Anti-Cheat. Follow the trend. This is the year of Linux, and people shouldn't be locked out of a platform or forced to dual boot for a single game.
+
 https://github.com/user-attachments/assets/140df3e0-3790-46b6-bab5-578139b84a7c
 
 Experimental source patches and tools for running the **macOS League of Legends client on x86-64 Linux through Darling**.
