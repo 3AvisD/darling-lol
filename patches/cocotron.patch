@@ -2312,7 +2312,7 @@ index 18189404..12cde429 100644
 +- (NSRect) frameForRootRect: (NSRect) rect;
  @end
 diff --git a/AppKit/X11.backend/X11Display.m b/AppKit/X11.backend/X11Display.m
-index 5ae29bf4..cc166d41 100644
+index 5ae29bf4..203913cf 100644
 --- a/AppKit/X11.backend/X11Display.m
 +++ b/AppKit/X11.backend/X11Display.m
 @@ -48,12 +48,271 @@
@@ -3766,7 +3766,7 @@ index 5ae29bf4..cc166d41 100644
      return 0;
  }
  
-@@ -1476,54 +2351,312 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
+@@ -1476,54 +2351,279 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
      return frame;
  }
  
@@ -3819,8 +3819,8 @@ index 5ae29bf4..cc166d41 100644
 -                 position.x, position.y);
 -    XSync(_display, False);
 +    [self warpPointerToRootX: x y: y];
- }
- 
++}
++
 +/* Confinement preserves absolute motion and edge panning. Relative mode holds
 + * its own grab and is left alone while requested. */
 +- (void) updateMouseConfinementForWindow:(X11Window *)window {
@@ -3878,41 +3878,8 @@ index 5ae29bf4..cc166d41 100644
 +        XTranslateCoordinates(_display, win, DefaultRootWindow(_display), 0, 0, &x, &y, &child);
 +        fullscreen = X11RootRectCoversMonitor(_display, NSMakeRect(x, y, attrs.width, attrs.height));
 +    }
-+    /* GNOME keeps its top bar and dock above a borderless window that merely covers the monitor.
-+     * Ask the WM once per window for real EWMH fullscreen on League's game window, and never let
-+     * the compositor scan out this parent window directly: Metal/OpenGL draw into a child window. */
-+    static Window rclolPromotedWindow;
-+    if (fullscreen && borderless && !rclolEwmhFullscreen && win != rclolPromotedWindow && X11IsLeagueGameWindow(_display, win, [window delegate])) {
-+        rclolPromotedWindow = win;
-+        fullscreen = YES;
-+        unsigned long bypass = 2; /* _NET_WM_BYPASS_COMPOSITOR: never */
-+        XChangeProperty(_display, win, XInternAtom(_display, "_NET_WM_BYPASS_COMPOSITOR", False),
-+                        XA_CARDINAL, 32, PropModeReplace, (unsigned char *)&bypass, 1);
-+        XClientMessageEvent cme = {0};
-+        cme.type = ClientMessage;
-+        cme.window = win;
-+        cme.message_type = state;
-+        cme.format = 32;
-+        cme.data.l[0] = 1; /* _NET_WM_STATE_ADD */
-+        cme.data.l[1] = (long)fs;
-+        cme.data.l[3] = 1; /* source: normal application */
-+        XSendEvent(_display, DefaultRootWindow(_display), False,
-+                   SubstructureNotifyMask | SubstructureRedirectMask, (XEvent *)&cme);
-+        /* Mutter only hides its top bar over the active fullscreen window. The window already
-+         * holds focus here, so marking it active and raising it cannot steal focus. */
-+        XClientMessageEvent act = {0};
-+        act.type = ClientMessage;
-+        act.window = win;
-+        act.message_type = XInternAtom(_display, "_NET_ACTIVE_WINDOW", False);
-+        act.format = 32;
-+        act.data.l[0] = 1; /* source: normal application */
-+        act.data.l[1] = CurrentTime;
-+        XSendEvent(_display, DefaultRootWindow(_display), False,
-+                   SubstructureNotifyMask | SubstructureRedirectMask, (XEvent *)&act);
-+        XRaiseWindow(_display, win);
-+        XFlush(_display);
-+        if (getenv("RCLOL_INPUT_TRACE")) fprintf(stderr,"CONFINEMENT requested EWMH fullscreen for window %lu\n",win);
-+    }
++    /* X11Window owns EWMH requests on frame/style changes. Confinement only observes the
++     * resulting state; issuing another fullscreen request here races WM resize decisions. */
 +    if (!fullscreen || attrs.map_state != IsViewable) {
 +        if (rclolTraceOn())
 +            rclolTraceRated(&rclolConfineChannel, "no confinement window=%lu fullscreen=%d ewmh=%d titled=%d size=%dx%d map_state=%d %s",
@@ -4040,8 +4007,8 @@ index 5ae29bf4..cc166d41 100644
 +    X11RelativeMouseEnd(&_relativeMouse);
 +    _relativeWindow = None;
 +    rclolPointerStamp = 0;
-+}
-+
+ }
+ 
 +/* CGAssociateMouseAndMouseCursorPosition(!doGrab). */
  - (void) grabMouse: (BOOL) doGrab {
 +    BOOL rclolRelativeBefore = _relativeMouse.active;
@@ -4500,7 +4467,7 @@ index 0000000..e558e1f
 +
 +#endif
 diff --git a/AppKit/X11.backend/X11Window.h b/AppKit/X11.backend/X11Window.h
-index bfe3839a..dbc974a0 100644
+index bfe3839a..e8c8828f 100644
 --- a/AppKit/X11.backend/X11Window.h
 +++ b/AppKit/X11.backend/X11Window.h
 @@ -26,7 +26,7 @@
@@ -4512,8 +4479,12 @@ index bfe3839a..dbc974a0 100644
  
  @interface X11Window : CGWindow {
      int _level; // TODO: care about this value
-@@ -49,6 +49,26 @@
+@@ -47,8 +47,30 @@
+     BOOL _mapped;
+     CGPoint _lastMotionPos;
      BOOL _isModal;
++    BOOL _overrideRedirect;
++    BOOL _fullscreenRequested;
      BOOL _isOpaque;
      BOOL _hasShadow;
 +    NSTimer *_remoteFrameTimer;
@@ -4539,7 +4510,7 @@ index bfe3839a..dbc974a0 100644
  
  @public
      XIC _xic;
-@@ -60,9 +80,9 @@
+@@ -60,9 +82,9 @@
  - (Visual *) visual;
  - (Drawable) drawable;
  - (NSPoint) transformPoint: (NSPoint) pos;
@@ -4551,10 +4522,18 @@ index bfe3839a..dbc974a0 100644
  - (void) frameChanged;
  - (void) setLastKnownCursorPosition: (CGPoint) point;
 diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
-index f4925b66..e827c28e 100644
+index f4925b66..f9dd38cc 100644
 --- a/AppKit/X11.backend/X11Window.m
 +++ b/AppKit/X11.backend/X11Window.m
-@@ -38,6 +38,34 @@
+@@ -23,6 +23,7 @@
+ #import <AppKit/NSPopUpWindow.h>
+ #import <AppKit/NSRaise.h>
+ #import <AppKit/NSWindow.h>
++#import <AppKit/NSScreen.h>
+ #import <Foundation/NSBundle.h>
+ #import <Foundation/NSException.h>
+ #import <Foundation/NSMutableData.h>
+@@ -38,6 +39,34 @@
  #import "X11Window.h"
  #import <X11/Xatom.h>
  #import <X11/Xutil.h>
@@ -4589,7 +4568,7 @@ index f4925b66..e827c28e 100644
  
  @implementation X11Window
  
-@@ -158,7 +186,7 @@ static NSData *makeWindowIcon() {
+@@ -158,7 +187,7 @@ static NSData *makeWindowIcon() {
      X11Display* x11disp = (X11Display *) [NSDisplay currentDisplay];
      _display = [x11disp display];
  
@@ -4598,7 +4577,7 @@ index f4925b66..e827c28e 100644
      BOOL isPanel = [delegate isKindOfClass: [NSPanel class]];
      if (isPanel && _styleMask & NSDocModalWindowMask)
          _styleMask = NSBorderlessWindowMask;
-@@ -193,8 +221,15 @@ static NSData *makeWindowIcon() {
+@@ -193,8 +222,16 @@ static NSData *makeWindowIcon() {
  
      XSetWindowAttributes xattr;
      unsigned long xattr_mask;
@@ -4613,10 +4592,11 @@ index f4925b66..e827c28e 100644
 +            ([delegate isKindOfClass:[NSMenuWindow class]] ||
 +             [delegate isKindOfClass:[NSPopUpWindow class]] ||
 +             ![delegate canBecomeKeyWindow]) ? True : False;
++    _overrideRedirect = xattr.override_redirect;
      xattr_mask = CWOverrideRedirect | CWColormap;
      xattr.colormap = cmap;
  
-@@ -206,6 +241,12 @@ static NSData *makeWindowIcon() {
+@@ -206,6 +243,12 @@ static NSData *makeWindowIcon() {
              (_visualInfo == NULL) ? CopyFromParent : _visualInfo->visual,
              xattr_mask, &xattr);
  
@@ -4629,7 +4609,7 @@ index f4925b66..e827c28e 100644
      [self syncDelegateProperties];
  
      Atom atm = XInternAtom(_display, "WM_DELETE_WINDOW", False);
-@@ -217,6 +258,15 @@ static NSData *makeWindowIcon() {
+@@ -217,6 +260,15 @@ static NSData *makeWindowIcon() {
                              .res_class = (char *) name};
      XSetClassHint(_display, _window, &classHint);
  
@@ -4645,7 +4625,7 @@ index f4925b66..e827c28e 100644
      XSetWindowBackgroundPixmap(_display, _window, None);
  
      _isModal = [delegate isSheet] || [NSApp modalWindow] == delegate;
-@@ -266,6 +316,13 @@ static NSData *makeWindowIcon() {
+@@ -266,6 +318,13 @@ static NSData *makeWindowIcon() {
  
      [self setWindowIcon];
  
@@ -4659,14 +4639,95 @@ index f4925b66..e827c28e 100644
      return self;
  }
  
-@@ -287,16 +344,32 @@ static NSData *makeWindowIcon() {
-             // Make resizable
-             sh->flags = 0;
-         } else {
+@@ -279,24 +338,30 @@ static NSData *makeWindowIcon() {
+     return _styleMask;
+ }
+ 
+-- (void) setStyleMaskInternal: (NSUInteger) mask force: (BOOL) force {
+-    if (force || (mask & NSWindowStyleMaskResizable) !=
+-                         (_styleMask & NSWindowStyleMaskResizable)) {
+-        XSizeHints *sh = XAllocSizeHints();
+-        if (mask & NSWindowStyleMaskResizable) {
+-            // Make resizable
+-            sh->flags = 0;
+-        } else {
 -            // Make non-resizable
 -            sh->flags = PMinSize | PMaxSize;
 -            sh->min_width = sh->max_width = _frame.size.width;
 -            sh->min_height = sh->max_height = _frame.size.height;
+-        }
+-
+-        XSetWMSizeHints(_display, _window, sh, XA_WM_NORMAL_HINTS);
+-        XFree(sh);
++/* A borderless application covering a monitor needs EWMH fullscreen so the
++ * compositor places it above desktop panels. Compare full monitor bounds,
++ * never the work area, and leave unmanaged menus/popups alone. */
++- (BOOL) wantsFullscreenWithStyleMask: (NSUInteger) mask rootFrame: (O2Rect) frame {
++    if (_overrideRedirect || [_delegate isKindOfClass:[NSPanel class]] ||
++        [_delegate isKindOfClass:[NSMenuWindow class]] || [_delegate isKindOfClass:[NSPopUpWindow class]] ||
++        [_delegate isKindOfClass:NSClassFromString(@"NSToolTipWindow")]) return NO;
++    if (mask & NSWindowStyleMaskFullScreen) return YES;
++    if (mask & NSTitledWindowMask) return NO;
++    X11Display *display = (X11Display *) [NSDisplay currentDisplay];
++    for (NSScreen *screen in [display screens]) {
++        if (!NSIsEmptyRect([screen frame]) &&
++            NSEqualRects([display rootRectForFrame: [screen frame]], frame))
++            return YES;
+     }
++    return NO;
++}
+ 
++- (void) requestFullscreen: (BOOL) fullscreen force: (BOOL) force {
++    if (fullscreen) {
++        unsigned long bypass = 2;
++        XChangeProperty(_display, _window, XInternAtom(_display,"_NET_WM_BYPASS_COMPOSITOR",False),
++                        XA_CARDINAL,32,PropModeReplace,(unsigned char *)&bypass,1);
++    }
+     if (!_mapped) {
+         long states[2];
+         int states_cnt = 0;
+@@ -304,7 +369,7 @@ static NSData *makeWindowIcon() {
+             states[states_cnt++] =
+                     (long) XInternAtom(_display, "_NET_WM_STATE_MODAL", False);
+         }
+-        if (mask & NSWindowStyleMaskFullScreen) {
++        if (fullscreen) {
+             states[states_cnt++] = (long) XInternAtom(
+                     _display, "_NET_WM_STATE_FULLSCREEN", False);
+         }
+@@ -312,14 +377,13 @@ static NSData *makeWindowIcon() {
+                         XInternAtom(_display, "_NET_WM_STATE", False), XA_ATOM,
+                         32, PropModeReplace, (const unsigned char *) states,
+                         states_cnt);
+-    } else if (force || ((mask & NSWindowStyleMaskFullScreen) !=
+-                         (_styleMask & NSWindowStyleMaskFullScreen))) {
++    } else if (force || fullscreen != _fullscreenRequested) {
+         XClientMessageEvent event = {0};
+         event.type = ClientMessage;
+         event.window = _window;
+         event.message_type = XInternAtom(_display, "_NET_WM_STATE", False);
+         event.format = 32;
+-        event.data.l[0] = (mask & NSWindowStyleMaskFullScreen) ? 1 : 2;
++        event.data.l[0] = fullscreen ? 1 : 0; /* EWMH ADD / REMOVE, not TOGGLE */
+         event.data.l[1] =
+                 (long) XInternAtom(_display, "_NET_WM_STATE_FULLSCREEN", False);
+         event.data.l[3] = 1;
+@@ -327,6 +391,35 @@ static NSData *makeWindowIcon() {
+                    SubstructureNotifyMask | SubstructureRedirectMask,
+                    (XEvent *) &event);
+     }
++    _fullscreenRequested = fullscreen;
++    XFlush(_display);
++}
++
++- (void) setStyleMaskInternal: (NSUInteger) mask force: (BOOL) force {
++    if (force || (mask & NSWindowStyleMaskResizable) !=
++                         (_styleMask & NSWindowStyleMaskResizable)) {
++        XSizeHints *sh = XAllocSizeHints();
++        if (mask & NSWindowStyleMaskResizable) {
++            // Make resizable
++            sh->flags = 0;
++        } else {
 +            if (X11IsLeagueGameWindow(_display, _window, _delegate)) {
 +                // A fixed-size window cannot be made EWMH fullscreen by Mutter,
 +                // and a stale minimum would block switching to a smaller mode.
@@ -4677,64 +4738,17 @@ index f4925b66..e827c28e 100644
 +                sh->min_width = sh->max_width = _frame.size.width;
 +                sh->min_height = sh->max_height = _frame.size.height;
 +            }
-         }
- 
-         XSetWMSizeHints(_display, _window, sh, XA_WM_NORMAL_HINTS);
-         XFree(sh);
-     }
- 
-+    BOOL isGame = X11IsLeagueGameWindow(_display, _window, _delegate);
-+    /* Do not put a temporary startup window into fullscreen before its native drawable has
-+     * the final geometry. A real monitor-sized borderless window is promoted after mapping
-+     * and focus in updateMouseConfinementForWindow; explicit Cocoa fullscreen is preserved. */
-+    BOOL monitorSized = isGame && X11RootRectCoversMonitor(_display, _frame);
-+    BOOL wasFullscreen = (_styleMask & NSWindowStyleMaskFullScreen) != 0 ||
-+                         (monitorSized && !(_styleMask & NSTitledWindowMask));
-+    BOOL makeFullscreen = (mask & NSWindowStyleMaskFullScreen) != 0 ||
-+                          (monitorSized && !(mask & NSTitledWindowMask));
-+
-     if (!_mapped) {
-         long states[2];
-         int states_cnt = 0;
-@@ -304,7 +377,7 @@ static NSData *makeWindowIcon() {
-             states[states_cnt++] =
-                     (long) XInternAtom(_display, "_NET_WM_STATE_MODAL", False);
-         }
--        if (mask & NSWindowStyleMaskFullScreen) {
-+        if (makeFullscreen) {
-             states[states_cnt++] = (long) XInternAtom(
-                     _display, "_NET_WM_STATE_FULLSCREEN", False);
-         }
-@@ -312,20 +385,25 @@ static NSData *makeWindowIcon() {
-                         XInternAtom(_display, "_NET_WM_STATE", False), XA_ATOM,
-                         32, PropModeReplace, (const unsigned char *) states,
-                         states_cnt);
--    } else if (force || ((mask & NSWindowStyleMaskFullScreen) !=
--                         (_styleMask & NSWindowStyleMaskFullScreen))) {
-+    } else if (force || (makeFullscreen != wasFullscreen)) {
-         XClientMessageEvent event = {0};
-         event.type = ClientMessage;
-         event.window = _window;
-         event.message_type = XInternAtom(_display, "_NET_WM_STATE", False);
-         event.format = 32;
--        event.data.l[0] = (mask & NSWindowStyleMaskFullScreen) ? 1 : 2;
-+        event.data.l[0] = makeFullscreen ? 1 : 2;
-         event.data.l[1] =
-                 (long) XInternAtom(_display, "_NET_WM_STATE_FULLSCREEN", False);
-         event.data.l[3] = 1;
-         XSendEvent(_display, DefaultRootWindow(_display), False,
-                    SubstructureNotifyMask | SubstructureRedirectMask,
-                    (XEvent *) &event);
-+        if (makeFullscreen) {
-+            unsigned long bypass = 2;
-+            XChangeProperty(_display, _window, XInternAtom(_display, "_NET_WM_BYPASS_COMPOSITOR", False),
-+                            XA_CARDINAL, 32, PropModeReplace, (unsigned char *)&bypass, 1);
 +        }
-+        XFlush(_display);
-     }
++
++        XSetWMSizeHints(_display, _window, sh, XA_WM_NORMAL_HINTS);
++        XFree(sh);
++    }
++
++    [self requestFullscreen:[self wantsFullscreenWithStyleMask:mask rootFrame:_frame] force:force];
  }
  
-@@ -338,7 +416,6 @@ static NSData *makeWindowIcon() {
+ - (void) setStyleMask: (NSUInteger) mask {
+@@ -338,7 +431,6 @@ static NSData *makeWindowIcon() {
  }
  
  + (void) removeDecorationForWindow: (Window) w onDisplay: (Display *) dpy {
@@ -4742,7 +4756,7 @@ index f4925b66..e827c28e 100644
      struct {
          unsigned long flags;
          unsigned long functions;
-@@ -358,6 +435,7 @@ static NSData *makeWindowIcon() {
+@@ -358,6 +450,7 @@ static NSData *makeWindowIcon() {
      if (!_mapped) {
          XMapWindow(_display, _window);
          _mapped = YES;
@@ -4750,7 +4764,7 @@ index f4925b66..e827c28e 100644
      }
  }
  
-@@ -377,15 +455,27 @@ static NSData *makeWindowIcon() {
+@@ -377,15 +470,27 @@ static NSData *makeWindowIcon() {
  - (void) syncDelegateProperties {
      long mask = KeyPressMask | KeyReleaseMask | ExposureMask |
                  StructureNotifyMask | EnterWindowMask | LeaveWindowMask |
@@ -4783,7 +4797,7 @@ index f4925b66..e827c28e 100644
      // TODO: background color
  }
  
-@@ -393,6 +483,28 @@ static NSData *makeWindowIcon() {
+@@ -393,6 +498,28 @@ static NSData *makeWindowIcon() {
      // This is essentially dealloc; we release our contexts
      // and windows, but unlike dealloc, this method can be called
      // several times, so set everything to nil/NULL/0.
@@ -4812,7 +4826,7 @@ index f4925b66..e827c28e 100644
      [_context release];
      _context = nil;
  
-@@ -421,6 +533,392 @@ static NSData *makeWindowIcon() {
+@@ -421,6 +548,392 @@ static NSData *makeWindowIcon() {
      }
  }
  
@@ -5205,7 +5219,7 @@ index f4925b66..e827c28e 100644
  - (Window) windowHandle {
      return _window;
  }
-@@ -470,14 +968,29 @@ static NSData *makeWindowIcon() {
+@@ -470,14 +983,32 @@ static NSData *makeWindowIcon() {
      const char *text = [title cString];
      XStringListToTextProperty((char **) &text, 1, &prop);
      XSetWMName(_display, _window, &prop);
@@ -5217,6 +5231,8 @@ index f4925b66..e827c28e 100644
  - (void) setFrame: (O2Rect) frame {
 -    frame = [self transformFrame: frame];
 +    frame = [(X11Display *) [NSDisplay currentDisplay] rootRectForFrame: frame];
++    BOOL fullscreen = [self wantsFullscreenWithStyleMask:_styleMask rootFrame:frame];
++    if (!fullscreen) [self requestFullscreen:NO force:NO];
      XMoveResizeWindow(_display, _window, frame.origin.x, frame.origin.y,
                        frame.size.width, frame.size.height);
      [self invalidateContextWithNewSize: frame.size];
@@ -5232,11 +5248,12 @@ index f4925b66..e827c28e 100644
 +            XSetWMSizeHints(_display, _window, &hints, XA_WM_NORMAL_HINTS);
 +        }
 +    }
++    if (fullscreen) [self requestFullscreen:YES force:NO];
 +    [(X11Display *)[NSDisplay currentDisplay] updateMouseConfinementForWindow:self];
  }
  
  - (void) setHasShadow: (BOOL) value {
-@@ -488,6 +1001,25 @@ static NSData *makeWindowIcon() {
+@@ -488,6 +1019,25 @@ static NSData *makeWindowIcon() {
      _level = value;
  }
  
@@ -5262,7 +5279,7 @@ index f4925b66..e827c28e 100644
  - (void) setOpaque: (BOOL) value {
      _isOpaque = value;
  }
-@@ -543,6 +1075,21 @@ static NSData *makeWindowIcon() {
+@@ -543,6 +1093,21 @@ static NSData *makeWindowIcon() {
  - (void) makeKey {
      [self ensureMapped];
      XRaiseWindow(_display, _window);
@@ -5284,7 +5301,7 @@ index f4925b66..e827c28e 100644
  }
  
  - (void) makeMain {
-@@ -559,7 +1106,29 @@ static NSData *makeWindowIcon() {
+@@ -559,7 +1124,29 @@ static NSData *makeWindowIcon() {
      XRaiseWindow(_display, _window);
  }
  
@@ -5314,7 +5331,7 @@ index f4925b66..e827c28e 100644
      Atom wmState = XInternAtom(_display, "_NET_WM_STATE", FALSE);
      Atom hiddenState = XInternAtom(_display, "_NET_WM_STATE_HIDDEN", FALSE);
  
-@@ -615,6 +1184,12 @@ static NSData *makeWindowIcon() {
+@@ -615,6 +1202,12 @@ static NSData *makeWindowIcon() {
  }
  
  - (void) openGLFlushBuffer {
@@ -5327,7 +5344,7 @@ index f4925b66..e827c28e 100644
      CGLError error;
  
      CGLContextObj prevContext = CGLGetCurrentContext();
-@@ -652,7 +1227,7 @@ static NSData *makeWindowIcon() {
+@@ -652,7 +1245,7 @@ static NSData *makeWindowIcon() {
  }
  
  - (O2Rect) frame {
@@ -5336,7 +5353,7 @@ index f4925b66..e827c28e 100644
  }
  
  static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
-@@ -666,6 +1241,7 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
+@@ -666,6 +1259,7 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
  }
  
  - (void) frameChanged {
@@ -5344,7 +5361,7 @@ index f4925b66..e827c28e 100644
      XErrorHandler previousHandler = XSetErrorHandler(ignoreBadWindow);
      @try {
          Window root, parent;
-@@ -710,14 +1286,6 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
+@@ -710,14 +1304,6 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
      [_deviceDictionary addEntriesFromDictionary: entries];
  }
  

@@ -434,7 +434,7 @@ build/test-x11-relative-mouse
 The native probe requires the existing per-user AppKit and CoreGraphics overlays
 and a running X11/Xwayland display. It rebuilds the changed X11 and CoreGraphics
 objects and tests them in a temporary framework overlay, without installing them.
-Six `DISPLAY_GEOMETRY ...=pass` lines are required; full output is saved in
+Seven `DISPLAY_GEOMETRY ...=pass` lines are required; full output is saved in
 `build/pr12-display-check.log`.
 
 It checks the live primary screen's origin, synthetic single-monitor and offset
@@ -445,8 +445,12 @@ relative deltas, both RandR cache-invalidation events, and the root-screen fallb
 Warps are intercepted: the probe does not move the desktop pointer or send game
 input. Synthetic layouts exercise coordinate conversion and display API behavior;
 they do not simulate physical monitor hotplug or validate League rendering.
-Fullscreen policy is unchanged. Manually verify game launch, window placement,
-click alignment and edge panning on the affected monitor layout before rollout.
+The probe also checks that managed borderless windows covering a whole monitor
+request EWMH fullscreen, including on secondary monitors, and clear the property
+when resized before mapping. Titled windows, unmanaged popups and windows sized
+to the panel-reduced work area are excluded. Mapped-window transitions and panel
+stacking require manual verification under KDE Plasma/Xwayland. Also verify game
+launch, window placement, click alignment and edge panning before rollout.
 
 After installing the tested X11 and CoreGraphics binaries locally, the user
 reported that everything was working (2026-10-16). Fullscreen policy was unchanged.
