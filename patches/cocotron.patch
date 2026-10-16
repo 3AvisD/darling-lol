@@ -2307,7 +2307,7 @@ index 18189404..c683f96a 100644
 +- (NSRect) frameForRootRect: (NSRect) rect;
  @end
 diff --git a/AppKit/X11.backend/X11Display.m b/AppKit/X11.backend/X11Display.m
-index 5ae29bf4..516decf3 100644
+index 5ae29bf4..d7fb09fc 100644
 --- a/AppKit/X11.backend/X11Display.m
 +++ b/AppKit/X11.backend/X11Display.m
 @@ -48,12 +48,271 @@
@@ -3125,7 +3125,7 @@ index 5ae29bf4..516decf3 100644
 +            int xfd = ConnectionNumber(_display);
 +            struct pollfd pfd = { .fd = xfd, .events = POLLIN };
 +            int timeout_ms = (int)(slice * 1000.0);
-+            if (timeout_ms < 1) timeout_ms = 1;
++            if (timeout_ms < 0) timeout_ms = 0;
 +            extern long __lolsys_syscall(long, long, long, long, long, long, int);
 +            __lolsys_syscall((long)&pfd, 1, timeout_ms, 0, 0, 0, 7 /* Linux poll */);
 +        }
@@ -3391,7 +3391,7 @@ index 5ae29bf4..516decf3 100644
          [self postEvent: event atStart: NO];
          break;
  
-@@ -1160,49 +1855,113 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1160,49 +1855,111 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
              // ev->xmotion.x, ev->xmotion.y, ev->xmotion.x_root,
              // ev->xmotion.y_root);
  
@@ -3418,8 +3418,6 @@ index 5ae29bf4..516decf3 100644
 +                    ev->xmotion.x = clampedX;
 +                    ev->xmotion.y = clampedY;
 +                }
-+            } else if (!_relativeMouse.active && window != nil && !_confinedWindow) {
-+                [self updateMouseConfinementForWindow: window];
 +            }
 +
              CGPoint lastMotionPos = [window mouseLocationOutsideOfEventStream];
@@ -3531,7 +3529,7 @@ index 5ae29bf4..516decf3 100644
                      mouseEventWithType: type
                                location: pos
                           modifierFlags:
-@@ -1211,28 +1970,58 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1211,28 +1968,58 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                              clickCount: 1
                                  deltaX: deltaX
                                  deltaY: deltaY];
@@ -3592,7 +3590,7 @@ index 5ae29bf4..516decf3 100644
          NSLog(@"FocusIn");
          if ([delegate attachedSheet]) {
              [[delegate attachedSheet] makeKeyAndOrderFront: delegate];
-@@ -1243,28 +2032,59 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1243,28 +2030,61 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                                   checkForAppDeactivation: NO];
              lastFocusedWindow = nil;
          }
@@ -3620,7 +3618,7 @@ index 5ae29bf4..516decf3 100644
 +                            rclolFocusDetailName(ev->xfocus.detail), _relativeRequested, _relativeMouse.active,
 +                            (unsigned long) _confinedWindow,
 +                            [NSApp isActive]);
-+        if (ev->xfocus.detail == NotifyPointer || ev->xfocus.mode == NotifyGrab || ev->xfocus.mode == NotifyUngrab) {
++        if (ev->xfocus.detail == NotifyPointer || ev->xfocus.detail == NotifyInferior || ev->xfocus.mode == NotifyGrab || ev->xfocus.mode == NotifyUngrab) {
 +            /* Pointer boundary crossing or grab transition in XWayland: do NOT release confinement or deactivate window */
 +            break;
 +        }
@@ -3637,6 +3635,8 @@ index 5ae29bf4..516decf3 100644
 +        if (_confinedWindow) {
 +            XUngrabPointer(_display, CurrentTime);
 +            _confinedWindow = None;
++            _confinedWidth = 0;
++            _confinedHeight = 0;
 +        }
 +        _otherButtonsDown = 0;
          if (window != nil)

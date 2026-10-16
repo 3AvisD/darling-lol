@@ -135,10 +135,8 @@ static int drawFrame(Frame *f, Drawable target, GC gc, const void *pixels,
            (const char *)pixels + y * stride, f->width * 4);
   int result = XShmPutImage(f->display, target, f->privateGC, f->image, 0, 0, 0,
                             0, f->width, f->height, False);
-  /* darling-lol perf: XFlush is non-blocking - sends the request without waiting
-   * for the server round-trip. The SHM segment is reused on the next tick anyway,
-   * and the server processes requests in order. Saves 0.2-1.0ms per frame. */
-  XFlush(f->display);
+  /* Wait for server consumption before reusing the segment on the next tick. */
+  XSync(f->display, False);
   pthread_mutex_unlock(&f->render);
   return result;
 }
@@ -152,7 +150,7 @@ DarlingXShmPut(void *handle, Drawable target, GC gc, const void *pixels,
     pthread_mutex_lock(&f->render);
     int result = XShmPutImage(f->display, target, f->privateGC, f->image, 0, 0,
                               0, 0, f->width, f->height, False);
-    XFlush(f->display);
+    XSync(f->display, False);
     pthread_mutex_unlock(&f->render);
     return result;
   }
