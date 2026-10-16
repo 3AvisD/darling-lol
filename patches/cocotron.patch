@@ -5781,7 +5781,7 @@ index db8869c8..6fea5107 100644
 +    CGContextSetTextPosition(c, savedPosition.x, savedPosition.y);
  }
 diff --git a/CoreGraphics/CGDirectDisplay.m b/CoreGraphics/CGDirectDisplay.m
-index e213b066..ea0bc264 100644
+index e213b066..9dc3da02 100644
 --- a/CoreGraphics/CGDirectDisplay.m
 +++ b/CoreGraphics/CGDirectDisplay.m
 @@ -53,6 +53,29 @@ static NSDisplay *currentDisplay(void) {
