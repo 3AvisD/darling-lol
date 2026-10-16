@@ -406,7 +406,9 @@ python3 build/runtime/tools/run-riot-native-check.py riot-cfhost-cancel-check
 
 Run against the installed CFNetwork override. Expect
 `CFHOST_CANCEL_CHECK cancel callback lifetime repeated pass=1`. The unpatched
-library traps in `CFRetain(NULL)`; the runner checks the success marker because
+library traps in `CFRetain(NULL)`; the runner requires the exact success line because
 Darling can return status zero even when the guest traps. The probe uses localhost
 and exercises 100 cancellations with both retained and early-released caller
-references, without launching or inspecting Riot.
+references, without launching or inspecting Riot. A failure prints
+`CFHOST_CANCEL_CHECK fail stage=...`; `unexpected-callback` means a completed
+lookup arrived instead of the cancellation.
