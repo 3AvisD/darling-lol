@@ -15,7 +15,7 @@ link = shlex.split((framework / 'CMakeFiles/AppKit.dir/link.txt').read_text())
 for name in ['NSResponder', 'NSApplication', 'NSWindow', 'NSDisplay', 'NSView', 'NSThemeFrame', 'NSTextInput', 'NSBitmapImageRep', 'NSEvent.subproj/NSEvent_mouse']:
     obj = project / f'build/riot-{Path(name).name}.o'
     subprocess.run(['clang', *flags['C_DEFINES'], *flags['C_INCLUDES'], *flags['C_FLAGS'],
-                    '-O3', '-march=native', '-mtune=native', '-fvisibility=hidden', '-Wno-macro-redefined', '-c',
+                    '-O3', '-march=native', '-mtune=native', '-Wno-macro-redefined', '-c',
                     str(project / f'build/darling-src/src/external/cocotron/AppKit/{name}.m'),
                     '-o', str(obj)], check=True)
     link[link.index(f'CMakeFiles/AppKit.dir/{name}.m.o')] = str(obj)
