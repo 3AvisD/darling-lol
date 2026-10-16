@@ -142,13 +142,14 @@ def main():
     # 3. Create .desktop file
     run_script = PROJECT_ROOT / "scripts/run.sh"
     exec_path = str(run_script).replace("%", "%%")
+    exec_cmd = f'"{exec_path}"' if " " in exec_path else exec_path
     desktop_content = f"""[Desktop Entry]
 Version=1.0
 Type=Application
 Name=League of Legends
 GenericName=MOBA Game
 Comment=Play League of Legends on Linux with darling-lol
-Exec="{exec_path}"
+Exec={exec_cmd}
 Path={PROJECT_ROOT}
 Icon=league-of-legends
 Terminal=false

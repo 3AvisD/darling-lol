@@ -3557,7 +3557,7 @@ diff --git a/src/frameworks/CoreVideo/src/CVDisplayLink.mm b/src/frameworks/Core
 index 3e9cba226..99e0a5494 100644
 --- a/src/frameworks/CoreVideo/src/CVDisplayLink.mm
 +++ b/src/frameworks/CoreVideo/src/CVDisplayLink.mm
-@@ -1,38 +1,878 @@
+@@ -1,38 +1,884 @@
  #include <CoreVideo/CVDisplayLink.h>
 +#include <stdint.h>
 +#include <string.h>
@@ -4377,8 +4377,14 @@ index 3e9cba226..99e0a5494 100644
 +static void *displayClockThread(void *) {
 +    struct { long sec, nsec; } deadline;
 +    if (__lolsys_syscall(1,(long)&deadline,0,0,0,0,228)<0) return NULL;
++    static uint64_t cvIntervalNS = 0;
++    if (!cvIntervalNS) {
++        const char *hz = getenv("RCLOL_REFRESH_HZ");
++        int rate = hz ? atoi(hz) : 0;
++        cvIntervalNS = (rate > 0 && rate <= 1000) ? 1000000000ull / (uint64_t)rate : (1000000000ull / 144ull);
++    }
 +    for (;;) {
-+        deadline.nsec += NSEC_PER_SEC / 60;
++        deadline.nsec += cvIntervalNS;
 +        if(deadline.nsec>=NSEC_PER_SEC){deadline.nsec-=NSEC_PER_SEC;++deadline.sec;}
 +        long result;
 +        do { result=__lolsys_syscall(1,1,(long)&deadline,0,0,0,230); } while(result==-4);
@@ -4386,7 +4392,7 @@ index 3e9cba226..99e0a5494 100644
 +        dispatchTimerFire(NULL);
 +        struct { long sec, nsec; } now;
 +        if(__lolsys_syscall(1,(long)&now,0,0,0,0,228)==0 &&
-+           (now.sec>deadline.sec || (now.sec==deadline.sec && now.nsec-deadline.nsec>NSEC_PER_SEC/60))) {
++           (now.sec>deadline.sec || (now.sec==deadline.sec && (uint64_t)(now.nsec-deadline.nsec)>cvIntervalNS))) {
 +            deadline.sec=now.sec;deadline.nsec=now.nsec;
 +        }
 +    }

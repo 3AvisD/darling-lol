@@ -5944,7 +5944,7 @@ index b998456..2783a4a 100644
 +	 * refresh rates.  Use sched_yield for cooperative yields, and only sleep
 +	 * when a timed wait was explicitly requested. */
 +	if (option_time == 0) {
-+		__linux_sched_yield();
++		__linux_sched_yield_site("THRSWT");
 +	} else {
 +		__linux_nanosleep(&tv, &tv);
 +	}
