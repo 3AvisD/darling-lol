@@ -236,6 +236,36 @@ The backend's relative mouse mode (`CGAssociateMouseAndMouseCursorPosition(false
 
 For a manual comparison, keep the scene, FPS cap, display refresh and compositor settings the same. Record whether the delay affects the cursor itself, camera movement, or actions after clicking, and compare the in-game VSync setting on and off. Include the desktop/compositor, X11 or Xwayland session, GPU/driver, monitor refresh and fullscreen/windowed mode in the report. Do not automate game input. The fullscreen cursor-shape problem below is a separate known symptom.
 
+## Click offset grows towards the bottom of the screen
+
+A growing vertical offset has been reported on KDE Plasma/Wayland with Xwayland.
+The cause is unconfirmed, including whether it is related to commit `426fb75`.
+The borderless fullscreen request has been restored separately; retest alignment
+once the game covers the panel.
+
+If it persists, enable the passive input trace before the next manual game launch:
+
+```sh
+darling shell touch /tmp/rclol-input-trace
+```
+
+The flag is checked once per process, so enable it before launching the game.
+During a short manual test, compare clicks near the top, middle and bottom, and
+note the direction and approximate size of the error. Include the in-game
+resolution and window mode, Plasma's scale setting for each monitor, and the
+host output of `xrandr --listmonitors`. Collect the guest log with:
+
+```sh
+darling shell cat /tmp/rclol-input-trace.log > rclol-input-trace.log
+darling shell rm -f /tmp/rclol-input-trace
+```
+
+Removing the flag disables tracing for subsequently started processes. The log
+records motion, warps, pointer-position queries and relative-mode transitions;
+it can establish whether the relative path is active, but cannot by itself
+establish where the game rendered a clicked target. If practical, compare the
+same resolution in a smaller window and in borderless fullscreen.
+
 ## Cursor stops changing shape in fullscreen
 
 On Hyprland the game's cursor can keep its first shape (for example, it never switches to the attack cursor) until you leave and re-enter fullscreen. Darling sends every change to the X server; what freezes the shape on screen is Hyprland's direct scanout of the fullscreen Xwayland window. Turn it off in `hyprland.conf`:
