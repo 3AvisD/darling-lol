@@ -14,7 +14,6 @@ export RIOT_LAUNCHER_HOST RCLOL_REGION
 # client fails under Darling, so start the installed client here.
 sh scripts/run.sh || true
 unset RIOT_LAUNCHER_HOST
-python3 build/runtime/tools/riot-desktop-entry.py || true
 prefix=${DPREFIX:-$HOME/.darling}
 if [ ! -d "$prefix/Users/Shared/Riot Games/Riot Client.app/Contents/MacOS" ]; then
  echo "The installer exited without installing the Riot Client. Its logs are in" >&2

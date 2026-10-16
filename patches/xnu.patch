@@ -5893,11 +5893,14 @@ index b998456..2783a4a 100644
 +	__linux_sched_yield_site("SWTCH");
  	return 0;
  }
- 
-@@ -696,6 +1613,48 @@ kern_return_t syscall_thread_switch_impl(
- 		.tv_sec = 0,
+@@ -693,11 +1610,53 @@ kern_return_t syscall_thread_switch_impl(
+ 				mach_msg_timeout_t option_time)
+ {
+ 	struct timespec tv = {
+-		.tv_sec = 0,
 -		.tv_nsec = 1000000
-+		.tv_nsec = option_time > 0 ? (long)option_time * 1000 : 1000000
++		.tv_sec = option_time > 0 ? (time_t)(option_time / 1000000) : 0,
++		.tv_nsec = option_time > 0 ? (long)((option_time % 1000000) * 1000) : 1000000
  	};
 +
 +	/* darling-lol: opt-in trace (host file /tmp/rclol-select-trace) of who calls thread_switch and with which option:
