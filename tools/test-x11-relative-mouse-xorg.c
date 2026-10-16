@@ -79,7 +79,7 @@ int main(int argc, char **argv) {
     X11RelativeMouseClamp(&m, &x, &y);
     /* Send the raw target here to verify the X server clips it exactly as the backend does. */
     serial = NextRequest(d); queued = warp(d, 3900, -100);
-    X11RelativeMouseWarp(&m, x, y, queued, serial);
+    X11RelativeMouseWarp(&m, x, y, queued, serial, true);
     assert(XQueryPointer(d, win, &root, &child, &rx, &ry, &wx, &wy, &state));
     assert(rx == 3839 && ry == 24 && m.virtualX == rx && m.virtualY == ry);
     r = handle(&m, nextMotion(d));
