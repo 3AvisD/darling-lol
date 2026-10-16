@@ -17,14 +17,10 @@ unset RCLOL_APP_ARG3 RCLOL_APP_ARG3_SLOT RCLOL_UX_ARG1 RCLOL_UX_ARG1_SLOT
 unset RCLOL_UX_ARG2 RCLOL_UX_ARG2_SLOT
 # The paired runtime presents completed GPU textures without CPU readback.
 # Explicit 0 or an empty value selects the CPU fallback for diagnostics.
-for option in RCLOL_GPU_DIRECT_PRESENT RCLOL_GPU_DIRECT_ASYNC DARLING_CA_PRESENT_AT_COMMIT DARLING_CA_SKIP_LOCAL_IOSURFACE_RENDER RCLOL_FORWARD_MOUSE_MOVED RCLOL_MOUSE_CONFINEMENT; do
+for option in RCLOL_GPU_DIRECT_PRESENT RCLOL_GPU_DIRECT_ASYNC RCLOL_GPU_DIRECT_VSYNC DARLING_CA_PRESENT_AT_COMMIT DARLING_CA_SKIP_LOCAL_IOSURFACE_RENDER RCLOL_FORWARD_MOUSE_MOVED RCLOL_MOUSE_CONFINEMENT; do
  eval 'value=${'"$option"'-1}'
  case "$value" in 0|'') unset "$option";; *) export "$option=$value";; esac
 done
-# darling-lol perf: VSync off by default for lowest input latency.
-# Set RCLOL_GPU_DIRECT_VSYNC=1 to re-enable if tearing is unacceptable.
-eval 'value=${RCLOL_GPU_DIRECT_VSYNC-0}'
-case "$value" in 0|'') unset RCLOL_GPU_DIRECT_VSYNC;; *) export RCLOL_GPU_DIRECT_VSYNC="$value";; esac
 prefix=${DPREFIX:-$HOME/.darling}
 # The first-time installer puts the client in /Users/Shared/Riot Games and then
 # hands off through LaunchServices, which does not start it under Darling. Link
@@ -64,14 +60,8 @@ else
     --launch-patchline="${RCLOL_LAUNCH_PATCHLINE-live}"
  fi
 fi
-# --- darling-lol perf: low-latency GPU driver overrides ---
-# Vulkan WSI: prefer immediate (no VSync) or mailbox (tear-free low-latency).
-export MESA_VK_WSI_PRESENT_MODE="${MESA_VK_WSI_PRESENT_MODE:-immediate}"
-# Mesa OpenGL: disable vertical sync, skip error checking.
-export vblank_mode="${vblank_mode:-0}"
-export MESA_NO_ERROR="${MESA_NO_ERROR:-1}"
-# NVIDIA proprietary driver: disable VSync, limit pre-rendered frames.
-export __GL_SYNC_TO_VBLANK="${__GL_SYNC_TO_VBLANK:-0}"
+# --- darling-lol perf: scheduling & driver latency hints ---
+# NVIDIA proprietary driver: limit pre-rendered frames.
 export __GL_MaxFramesAllowed="${__GL_MaxFramesAllowed:-1}"
 export __GL_THREADED_OPTIMIZATIONS="${__GL_THREADED_OPTIMIZATIONS:-1}"
 export __GL_YIELD="${__GL_YIELD:-NOTHING}"
@@ -81,7 +71,7 @@ if [ -w /proc/self/timerslack_ns ]; then
 fi
 exec env -u ELECTRON_RUN_AS_NODE -u DYLD_INSERT_LIBRARIES EGL_PLATFORM=x11 \
   LANG="${RCLOL_GUEST_LOCALE:-en_US.UTF-8}" LC_ALL="${RCLOL_GUEST_LOCALE:-en_US.UTF-8}" \
-  mesa_glthread="${RCLOL_MESA_GLTHREAD-${mesa_glthread-true}}" \
+  mesa_glthread="${RCLOL_MESA_GLTHREAD-${mesa_glthread-false}}" \
   XMODIFIERS="${RCLOL_XMODIFIERS:-@im=none}" DISPLAY="${DISPLAY:-:1}" \
   DYLD_LIBRARY_PATH="${DYLD_LIBRARY_PATH:-@GUEST_HOME@/RuntimeLibraries}" \
   DYLD_FRAMEWORK_PATH="${DYLD_FRAMEWORK_PATH:-@GUEST_HOME@/RuntimeFrameworks}" \
