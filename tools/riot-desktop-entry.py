@@ -148,12 +148,13 @@ Name=League of Legends
 GenericName=MOBA Game
 Comment=Play League of Legends on Linux with darling-lol
 Exec={run_script}
+Path={PROJECT_ROOT}
 Icon=league-of-legends
 Terminal=false
 Categories=Game;ActionGame;StrategyGame;
 Keywords=riot;league;lol;darling;games;
-StartupWMClass=League of Legends
-StartupNotify=true
+StartupWMClass=Riot Client
+StartupNotify=false
 """
 
     desktop_file = apps_base / "league-of-legends.desktop"
@@ -161,11 +162,23 @@ StartupNotify=true
     os.chmod(desktop_file, 0o755)
     print(f"Created application launcher: {desktop_file}")
 
-    if desktop_dir.is_dir():
-        desktop_shortcut = desktop_dir / "league-of-legends.desktop"
+    target_desktop_dirs = []
+    try:
+        res = subprocess.run(["xdg-user-dir", "DESKTOP"], capture_output=True, text=True, check=False)
+        if res.returncode == 0 and res.stdout.strip():
+            d = Path(res.stdout.strip())
+            if d.is_dir() and d not in target_desktop_dirs:
+                target_desktop_dirs.append(d)
+    except Exception:
+        pass
+    for cand in [HOST_HOME / "Desktop", HOST_HOME / "Asztal"]:
+        if cand.is_dir() and cand not in target_desktop_dirs:
+            target_desktop_dirs.append(cand)
+
+    for ddir in target_desktop_dirs:
+        desktop_shortcut = ddir / "league-of-legends.desktop"
         desktop_shortcut.write_text(desktop_content)
         os.chmod(desktop_shortcut, 0o755)
-        # Mark as trusted on GNOME Desktop if gio is available
         gio = shutil.which("gio")
         if gio:
             subprocess.run([gio, "set", str(desktop_shortcut), "metadata::trusted", "true"], check=False)
