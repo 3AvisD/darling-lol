@@ -34,7 +34,14 @@ darling shell env DYLD_FRAMEWORK_PATH=/Users/me/RuntimeFrameworks \
   /Volumes/SystemRoot/path/to/darling-lol/build/riot-coretext-font-list-check
 darling shell env DYLD_FRAMEWORK_PATH=/Users/me/RuntimeFrameworks \
   /Volumes/SystemRoot/path/to/darling-lol/build/riot-window-layout-check
+darling shell env DYLD_FRAMEWORK_PATH=/Users/me/RuntimeFrameworks \
+  /Volumes/SystemRoot/path/to/darling-lol/build/riot-display-modes-check
 ```
+
+`riot-display-modes-check` (built by `build-riot-display-modes-check.py`) expects `DISPLAY_MODES_CHECK pass=1`. It checks two things for the main display, display 0 and an unknown display:
+
+- `CGDisplayCopyAllDisplayModes` never returns NULL. League passes the id from `[[window screen] deviceDescription]` (0 while the window is off every screen) straight to `CFArrayGetCount`, and NULL crashed it.
+- `CGDisplayScreenSize` returns a nonzero size (`SCREEN_SIZE ... pass=1`). It returned 0×0 for any display with EDID. League divides by this size for its camera aspect ratio, so the view-projection matrix's x row became NaN and every 3D vertex was discarded. The scene then showed only its blue clear colour, and world clicks did nothing. This was found with a RenderDoc capture and vertex shader debugging.
 
 Expected: `CORETEXT_FONT_LIST pass=1` with nonzero family/face counts (306/1124 on the development host), `VIEW_LAYER_RESIZE initial=1600x900 pass=1`, `NATIVE_RESIZE_ORDER size=1600x900 pass=1` `CONTENT_SIBLING_RESIZE ... pass=1` and `WINDOW_LAYOUT_CHECK ... pass=1`.
 
