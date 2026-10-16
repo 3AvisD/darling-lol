@@ -153,9 +153,10 @@ int main(void) {
     X11RelativeMouse *relative = slot(d,"_relativeMouse");
     X11RelativeMouseBegin(relative,3900,1000);
     assert(CGWarpMouseCursorPosition(CGPointMake(100,200)) == 0);
-    assert(relative->virtualX == 3940 && relative->virtualY == 1010);
+    BOOL honoured = !*(BOOL *)slot(d,"_isXwayland") || *(BOOL *)slot(d,"_cursorHidden");
+    assert(relative->virtualX == (honoured ? 3940 : 3900) && relative->virtualY == (honoured ? 1010 : 1000));
     NSPoint location = [d mouseLocation];
-    assert(location.x == 100 && location.y == 1960);
+    assert(location.x == (honoured ? 100 : 60) && location.y == (honoured ? 1960 : 1970));
     X11RelativeMouseMotion motion = X11RelativeMouseHandleMotion(relative,3907,1009,false,NextRequest([d display]));
     assert(motion.deltaX == 7 && motion.deltaY == 9);
     X11RelativeMouseEnd(relative);
