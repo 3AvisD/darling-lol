@@ -2355,7 +2355,6 @@ index 5ae29bf4..358e606b 100644
  
  - (void) setWindow: (id) window forID: (XID) i {
 @@ -962,20 +1075,85 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
-
  {
  #ifndef DARLING
      [[NSRunLoop currentRunLoop] addInputSource: _inputSource forMode: mode];
@@ -2563,6 +2562,7 @@ index 5ae29bf4..358e606b 100644
          break;
  
      case ButtonPress:;
++        [self updateMouseConfinementForWindow:window];
 +        if (ev->xbutton.button >= Button4 && ev->xbutton.button <= 7) {
 +            pos = [window transformPoint:NSMakePoint(ev->xbutton.x, ev->xbutton.y)];
 +            CGFloat wheelX = ev->xbutton.button == 6 ? 1.0 :
@@ -2851,65 +2851,46 @@ index 5ae29bf4..358e606b 100644
 +    if (data) XFree(data);
 +
 +    /* League's borderless fullscreen does not set the EWMH fullscreen bit.
-+     * Recognize a borderless window covering a monitor, including multi-monitor
-+     * setups and Wayland/GNOME top panel offsets. */
++     * Recognize a borderless game window, multi-monitor setups, and GNOME Wayland. */
 +    NSWindow *delegate = [window delegate];
 +    BOOL isBorderless = delegate ? !([delegate styleMask] & NSTitledWindowMask) : YES;
-+    BOOL isAppWindow = delegate ? !([delegate isKindOfClass:[NSMenuWindow class]] ||
-+                                   [delegate isKindOfClass:[NSPopUpWindow class]] ||
-+                                   ![delegate canBecomeKeyWindow]) : YES;
++    NSString *procName = [[NSProcessInfo processInfo] processName];
++    BOOL isGame = (procName && [procName rangeOfString:@"League" options:NSCaseInsensitiveSearch].location != NSNotFound &&
++                   [procName rangeOfString:@"Ux" options:NSCaseInsensitiveSearch].location == NSNotFound);
++    NSString *winTitle = [delegate respondsToSelector:@selector(title)] ? [delegate title] : nil;
++    if (winTitle && [winTitle rangeOfString:@"League of Legends" options:NSCaseInsensitiveSearch].location != NSNotFound &&
++        [winTitle rangeOfString:@"Riot" options:NSCaseInsensitiveSearch].location == NSNotFound) {
++        isGame = YES;
++    }
 +
-+    if (isBorderless && isAppWindow) {
-+        Window child; int x = 0, y = 0;
-+        XTranslateCoordinates(_display, win, DefaultRootWindow(_display), 0, 0, &x, &y, &child);
-+        NSRect delegateFrame = delegate ? [delegate frame] : NSZeroRect;
-+        XRRScreenResources *resources = XRRGetScreenResourcesCurrent(_display, DefaultRootWindow(_display));
-+        if (resources) {
-+            for (int i=0; i<resources->ncrtc; ++i) {
-+                XRRCrtcInfo *crtc = XRRGetCrtcInfo(_display, resources, resources->crtcs[i]);
-+                if (crtc) {
-+                    if (crtc->mode) {
-+                        BOOL sizeMatchesCrtc =
-+                            (abs(attrs.width - (int)crtc->width) <= 4 &&
-+                             (abs(attrs.height - (int)crtc->height) <= 4 ||
-+                              attrs.height >= (int)crtc->height - 60)) ||
-+                            (delegateFrame.size.width > 0 &&
-+                             abs((int)delegateFrame.size.width - (int)crtc->width) <= 4 &&
-+                             abs((int)delegateFrame.size.height - (int)crtc->height) <= 4);
++    if (isBorderless && (isGame || attrs.width >= 1024)) {
++        if (!fullscreen) {
++            fullscreen = YES;
++            /* Inform GNOME Shell / Mutter / EWMH to make this window fullscreen.
++             * This hides the GNOME top bar, sizes the window to fill the entire monitor,
++             * and enables Wayland pointer confinement (zwp_confined_pointer_v1). */
++            XClientMessageEvent cme = {0};
++            cme.type = ClientMessage;
++            cme.window = win;
++            cme.message_type = state;
++            cme.format = 32;
++            cme.data.l[0] = 1; /* _NET_WM_STATE_ADD */
++            cme.data.l[1] = (long)fs;
++            cme.data.l[2] = 0;
++            cme.data.l[3] = 1; /* normal application */
++            cme.data.l[4] = 0;
++            XSendEvent(_display, DefaultRootWindow(_display), False,
++                       SubstructureNotifyMask | SubstructureRedirectMask,
++                       (XEvent *)&cme);
 +
-+                        BOOL posMatchesCrtc =
-+                            abs(x - crtc->x) <= 4 &&
-+                            (y >= crtc->y - 4 && y <= crtc->y + 60);
-+
-+                        if (sizeMatchesCrtc && (posMatchesCrtc || delegateFrame.size.width > 0)) {
-+                            if (!fullscreen) {
-+                                fullscreen = YES;
-+                                /* Inform GNOME Shell / Mutter / EWMH to make this window fullscreen.
-+                                 * This hides the GNOME top bar, sizes the window to fill the entire monitor,
-+                                 * and enables Wayland pointer confinement (zwp_confined_pointer_v1). */
-+                                XClientMessageEvent cme = {0};
-+                                cme.type = ClientMessage;
-+                                cme.window = win;
-+                                cme.message_type = state;
-+                                cme.format = 32;
-+                                cme.data.l[0] = 1; /* _NET_WM_STATE_ADD */
-+                                cme.data.l[1] = (long)fs;
-+                                cme.data.l[2] = 0;
-+                                cme.data.l[3] = 1; /* normal application */
-+                                cme.data.l[4] = 0;
-+                                XSendEvent(_display, DefaultRootWindow(_display), False,
-+                                           SubstructureNotifyMask | SubstructureRedirectMask,
-+                                           (XEvent *)&cme);
-+                                XFlush(_display);
-+                                if (getenv("RCLOL_INPUT_TRACE")) fprintf(stderr,"CONFINEMENT promoted to EWMH FULLSCREEN for window %lu\n",win);
-+                            }
-+                        }
-+                    }
-+                    XRRFreeCrtcInfo(crtc);
-+                    if (fullscreen) break;
-+                }
-+            }
-+            XRRFreeScreenResources(resources);
++            /* Also set property directly on window for immediate Mutter state sync */
++            XChangeProperty(_display, win, state, XA_ATOM, 32, PropModeReplace,
++                            (const unsigned char *)&fs, 1);
++            unsigned long bypass = 1;
++            XChangeProperty(_display, win, XInternAtom(_display, "_NET_WM_BYPASS_COMPOSITOR", False),
++                            XA_CARDINAL, 32, PropModeReplace, (unsigned char *)&bypass, 1);
++            XFlush(_display);
++            if (getenv("RCLOL_INPUT_TRACE")) fprintf(stderr,"CONFINEMENT promoted to EWMH FULLSCREEN for window %lu\n",win);
 +        }
 +    }
 +
@@ -2925,7 +2906,8 @@ index 5ae29bf4..358e606b 100644
 +    }
 +    if (getenv("RCLOL_INPUT_TRACE")) fprintf(stderr,"CONFINEMENT focus=%lu target=%lu ancestor=%lu fullscreen=%d\n",focus,win,ancestor,fullscreen);
 +
-+    if (!fullscreen || attrs.map_state != IsViewable || ancestor != win) {
++    BOOL isFocused = (ancestor == win || focus == win || (isGame && (focus == PointerRoot || focus == None)));
++    if ((!fullscreen && !isGame) || attrs.map_state != IsViewable || !isFocused) {
 +        if (_confinedWindow == win) { XUngrabPointer(_display, CurrentTime); _confinedWindow=None; }
 +        return;
 +    }
@@ -3242,8 +3224,28 @@ index f4925b66..5ad2d1f7 100644
  
  @implementation X11Window
  
-@@ -193,8 +221,13 @@ static NSData *makeWindowIcon() {
+@@ -191,10 +219,30 @@ static NSData *makeWindowIcon() {
+         return nil;
+     }
  
++    NSString *procName = [[NSProcessInfo processInfo] processName];
++    BOOL isGame = (procName && [procName rangeOfString:@"League" options:NSCaseInsensitiveSearch].location != NSNotFound &&
++                   [procName rangeOfString:@"Ux" options:NSCaseInsensitiveSearch].location == NSNotFound);
++    NSString *winTitle = [delegate respondsToSelector:@selector(title)] ? [delegate title] : nil;
++    if (winTitle && [winTitle rangeOfString:@"League of Legends" options:NSCaseInsensitiveSearch].location != NSNotFound &&
++        [winTitle rangeOfString:@"Riot" options:NSCaseInsensitiveSearch].location == NSNotFound) {
++        isGame = YES;
++    }
++
++    BOOL isMenuOrPopup = NO;
++    if (delegate) {
++        if ([delegate isKindOfClass:NSClassFromString(@"NSMenuWindow")] ||
++            [delegate isKindOfClass:NSClassFromString(@"NSPopUpWindow")] ||
++            [delegate isKindOfClass:NSClassFromString(@"NSToolTipPanel")]) {
++            isMenuOrPopup = YES;
++        }
++    }
++
      XSetWindowAttributes xattr;
      unsigned long xattr_mask;
 -    xattr.override_redirect =
@@ -3251,14 +3253,11 @@ index f4925b66..5ad2d1f7 100644
 +    // A borderless game is still a focusable application window. Leaving it
 +    // override-redirect makes XWayland bypass compositor keyboard activation.
 +    // Menus and nonactivating popups keep their unmanaged behavior.
-+    xattr.override_redirect = _styleMask == NSBorderlessWindowMask &&
-+            ([delegate isKindOfClass:[NSMenuWindow class]] ||
-+             [delegate isKindOfClass:[NSPopUpWindow class]] ||
-+             ![delegate canBecomeKeyWindow]) ? True : False;
++    xattr.override_redirect = (!isGame && _styleMask == NSBorderlessWindowMask && isMenuOrPopup) ? True : False;
      xattr_mask = CWOverrideRedirect | CWColormap;
      xattr.colormap = cmap;
  
-@@ -206,6 +239,12 @@ static NSData *makeWindowIcon() {
+@@ -206,6 +254,12 @@ static NSData *makeWindowIcon() {
              (_visualInfo == NULL) ? CopyFromParent : _visualInfo->visual,
              xattr_mask, &xattr);
  
@@ -3271,6 +3270,20 @@ index f4925b66..5ad2d1f7 100644
      [self syncDelegateProperties];
  
      Atom atm = XInternAtom(_display, "WM_DELETE_WINDOW", False);
+@@ -217,6 +271,16 @@ static NSData *makeWindowIcon() {
+                             .res_class = (char *) name};
+     XSetClassHint(_display, _window, &classHint);
+ 
++    if (isGame && (_styleMask == NSBorderlessWindowMask || !(_styleMask & NSTitledWindowMask))) {
++        Atom state = XInternAtom(_display, "_NET_WM_STATE", False);
++        Atom fs = XInternAtom(_display, "_NET_WM_STATE_FULLSCREEN", False);
++        XChangeProperty(_display, _window, state, XA_ATOM, 32, PropModeReplace,
++                        (const unsigned char *)&fs, 1);
++        unsigned long bypass = 1;
++        XChangeProperty(_display, _window, XInternAtom(_display, "_NET_WM_BYPASS_COMPOSITOR", False),
++                        XA_CARDINAL, 32, PropModeReplace, (unsigned char *)&bypass, 1);
++    }
++
 @@ -266,6 +305,11 @@ static NSData *makeWindowIcon() {
  
      [self setWindowIcon];
