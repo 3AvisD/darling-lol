@@ -2307,7 +2307,7 @@ index 18189404..c683f96a 100644
 +- (NSRect) frameForRootRect: (NSRect) rect;
  @end
 diff --git a/AppKit/X11.backend/X11Display.m b/AppKit/X11.backend/X11Display.m
-index 5ae29bf4..d7fb09fc 100644
+index 5ae29bf4..b98eff64 100644
 --- a/AppKit/X11.backend/X11Display.m
 +++ b/AppKit/X11.backend/X11Display.m
 @@ -48,12 +48,271 @@
@@ -3391,14 +3391,17 @@ index 5ae29bf4..d7fb09fc 100644
          [self postEvent: event atStart: NO];
          break;
  
-@@ -1160,49 +1855,111 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1160,49 +1855,114 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
              // ev->xmotion.x, ev->xmotion.y, ev->xmotion.x_root,
              // ev->xmotion.y_root);
  
-+            /* darling-lol: Coalesce pending MotionNotify events in the X11 queue to eliminate input lag. */
-+            XEvent nextEv;
-+            while (XCheckTypedWindowEvent(_display, ev->xmotion.window, MotionNotify, &nextEv)) {
-+                *ev = nextEv;
++            /* darling-lol: Coalesce pending MotionNotify events in the X11 queue to eliminate input lag.
++             * Only coalesce in absolute mode: relative mode requires every motion event and warp echo. */
++            if (!_relativeMouse.active) {
++                XEvent nextEv;
++                while (XCheckTypedWindowEvent(_display, ev->xmotion.window, MotionNotify, &nextEv)) {
++                    *ev = nextEv;
++                }
 +            }
 +            rclolRootX = ev->xmotion.x_root;
 +            rclolRootY = ev->xmotion.y_root;
@@ -3529,7 +3532,7 @@ index 5ae29bf4..d7fb09fc 100644
                      mouseEventWithType: type
                                location: pos
                           modifierFlags:
-@@ -1211,28 +1968,58 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1211,28 +1971,58 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                              clickCount: 1
                                  deltaX: deltaX
                                  deltaY: deltaY];
@@ -3590,7 +3593,7 @@ index 5ae29bf4..d7fb09fc 100644
          NSLog(@"FocusIn");
          if ([delegate attachedSheet]) {
              [[delegate attachedSheet] makeKeyAndOrderFront: delegate];
-@@ -1243,28 +2030,61 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1243,28 +2033,61 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                                   checkForAppDeactivation: NO];
              lastFocusedWindow = nil;
          }
@@ -3654,7 +3657,7 @@ index 5ae29bf4..d7fb09fc 100644
          O2Rect rect = NSMakeRect(ev->xexpose.x, ev->xexpose.y,
                                   ev->xexpose.width, ev->xexpose.height);
  
-@@ -1301,11 +2121,23 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1301,11 +2124,23 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case UnmapNotify:
@@ -3682,7 +3685,7 @@ index 5ae29bf4..d7fb09fc 100644
          break;
  
      case MapRequest:
-@@ -1317,10 +2149,15 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1317,10 +2152,15 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case ConfigureNotify:
@@ -3698,7 +3701,7 @@ index 5ae29bf4..d7fb09fc 100644
          break;
  
      case ConfigureRequest:
-@@ -1344,6 +2181,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1344,6 +2184,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case PropertyNotify:
@@ -3707,7 +3710,7 @@ index 5ae29bf4..d7fb09fc 100644
          if ([window respondsToSelector: @selector(propertyNotify:)]) {
              [window propertyNotify: &ev->xproperty];
          }
-@@ -1399,7 +2238,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1399,7 +2241,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      default:
@@ -3718,7 +3721,7 @@ index 5ae29bf4..d7fb09fc 100644
              [self _invalidateRRCache];
              break;
          }
-@@ -1433,6 +2274,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1433,6 +2277,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
      NSLog(@"Request code: %d:%d", errorEvent->request_code,
            errorEvent->minor_code);
      NSLog(@"Error code: %d", errorEvent->error_code);
@@ -3729,7 +3732,7 @@ index 5ae29bf4..d7fb09fc 100644
      return 0;
  }
  
-@@ -1476,54 +2321,286 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
+@@ -1476,54 +2324,286 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
      return frame;
  }
  
