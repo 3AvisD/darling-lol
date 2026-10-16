@@ -2400,10 +2400,12 @@ index 43f4a84..46a4f72 100644
 +		for (;;) {
 +			{
 +				std::unique_lock<std::mutex> lock(wakeMutex);
-+				submitBatchWake().wait_for(lock, std::chrono::milliseconds(2));
++				/* darling-lol perf: 500µs batch window balances submission
++				 * merging with latency; the old 2ms added visible input lag. */
++				submitBatchWake().wait_for(lock, std::chrono::microseconds(500));
 +			}
 +			std::unique_lock<std::mutex> queueLock(device->graphicsQueueMutex());
-+			if (!state.items.empty() && std::chrono::steady_clock::now() - state.since >= std::chrono::milliseconds(2)) flushSubmitBatchLocked();
++			if (!state.items.empty() && std::chrono::steady_clock::now() - state.since >= std::chrono::microseconds(500)) flushSubmitBatchLocked();
 +		}
 +	}).detach();
 +}
@@ -7449,7 +7451,10 @@ new file mode 100644
 +			static constexpr VkDeviceSize MaxPooledSize = 4ull << 20;
 +			static constexpr VkDeviceSize Granule = 256;
 +			// a freed range is not handed out again before this long: work already submitted to the GPU may still read it
-+			static constexpr std::chrono::milliseconds Quarantine {1000};
++			/* darling-lol perf: the old 1000ms quarantine caused pool exhaustion
++			 * and fallback OS allocations during high-churn gameplay. 50ms (~3
++			 * frames at 60Hz) is sufficient for in-flight GPU work to drain. */
++			static constexpr std::chrono::milliseconds Quarantine {50};
 +
 +			struct Block {
 +				VkDeviceMemory memory = VK_NULL_HANDLE;

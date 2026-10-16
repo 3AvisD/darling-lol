@@ -6725,7 +6725,7 @@ index ffd7fe054..a74ffc63f 100644
  
      free(context);
  }
-@@ -383,9 +608,329 @@ CGLError CGLUnlockContext(CGLContextObj context) {
+@@ -383,9 +608,331 @@ CGLError CGLUnlockContext(CGLContextObj context) {
      return kCGLNoError;
  }
  
@@ -6948,12 +6948,14 @@ index ffd7fe054..a74ffc63f 100644
 +        if(__lolsys_syscall(1,(long)&now,0,0,0,0,228)==0){
 +            uint64_t current=(uint64_t)now.tv_sec*1000000000ull+now.tv_nsec;
 +            uint64_t deadline=ctx->native_next_present_ns;
-+            if(!deadline || (current>deadline && current-deadline>16666667ull))deadline=current;
++            static uint64_t paceNS = 0;
++            if (!paceNS) { const char *hz = getenv("RCLOL_REFRESH_HZ"); int r = hz ? atoi(hz) : 0; paceNS = r > 0 ? 1000000000ull / (uint64_t)r : 1000000ull; }
++            if(!deadline || (current>deadline && current-deadline>paceNS))deadline=current;
 +            if(deadline>current){
 +                struct timespec wake={deadline/1000000000ull,deadline%1000000000ull};
 +                while(__lolsys_syscall(1,1,(long)&wake,0,0,0,230)==-4){}
 +            }
-+            ctx->native_next_present_ns=deadline+16666667ull;
++            ctx->native_next_present_ns=deadline+paceNS;
 +        }
 +    }
 +    if(getenv("RCLOL_GPU_DIRECT_ASYNC")){int queued=enqueueAsyncPresent(ctx,binding.texture,binding.target,width,height);if(!queued){stopAsyncPresent(ctx);__atomic_store_n(&target->ready,0,__ATOMIC_RELEASE);}CGLReleaseContext(ctx);return queued;}
@@ -8420,7 +8422,7 @@ diff --git a/src/frameworks/OpenGL/CGLAsyncPresent.inc b/src/frameworks/OpenGL/C
 new file mode 100644
 --- /dev/null
 +++ b/src/frameworks/OpenGL/CGLAsyncPresent.inc
-@@ -0,0 +1,190 @@
+@@ -0,0 +1,197 @@
 +/* Bounded GPU-only staging: the producer never waits for display cadence.
 + * Three textures cover the currently displayed, pending, and writing frames.
 + * GPU fences order both the completed producer copy and subsequent reuse. */
@@ -8526,11 +8528,19 @@ new file mode 100644
 +        /* Native VSync owns the refresh cadence; avoid a second clock that
 +         * can miss the compositor's next refresh after a variable swap wait. */
 +        if(nativeVSync)continue;
-+        deadline+=16666667ull;
++        /* darling-lol perf: use dynamic refresh interval from RCLOL_REFRESH_HZ
++         * or default to uncapped (1ms minimum interval) when VSync is off. */
++        static uint64_t refreshNS = 0;
++        if (!refreshNS) {
++            const char *hz = getenv("RCLOL_REFRESH_HZ");
++            int rate = hz ? atoi(hz) : 0;
++            refreshNS = rate > 0 ? 1000000000ull / (uint64_t)rate : 1000000ull;
++        }
++        deadline += refreshNS;
 +        uint64_t now=nativeMonotonicNS();
 +        /* Preserve the refresh phase across small scheduling delays. Reset only
 +         * after a full missed period, so lateness does not accumulate as drift. */
-+        if(now>deadline && now-deadline>16666667ull){__atomic_fetch_add(&target->reserved[2],1,__ATOMIC_RELAXED);deadline=now;}
++        if(now>deadline && now-deadline>refreshNS){__atomic_fetch_add(&target->reserved[2],1,__ATOMIC_RELAXED);deadline=now;}
 +        nativeWaitUntil(deadline);
 +    }
 +    if(fbo)glDeleteFramebuffers(1,&fbo);
