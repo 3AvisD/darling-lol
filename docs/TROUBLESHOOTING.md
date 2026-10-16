@@ -158,7 +158,7 @@ On Hyprland, also check that direct scanout is off (`hyprctl getoption render:di
 
 ## Hybrid graphics laptops (AMD/Intel iGPU + NVIDIA)
 
-Metal renders with Vulkan, and each finished frame is handed to an OpenGL (EGL) context that presents it. The hand-off uses opaque file descriptors, which only work when Vulkan and OpenGL run on the same GPU. Indium takes the first Vulkan device the loader lists, and on a hybrid laptop both that device and the EGL context are normally the integrated GPU, so the discrete GPU stays idle. A report in [issue #3](https://github.com/lucannez64/darling-lol/issues/3) (Ryzen 9 5900HS, RTX 3060 Laptop) measured about 70 FPS in ARAM; which GPU rendered that match is not known. **Running on an NVIDIA GPU is not validated.**
+Metal renders with Vulkan, and each finished frame is handed to an OpenGL (EGL) context that presents it. The hand-off uses opaque file descriptors, which only work when Vulkan and OpenGL run on the same GPU. Indium takes the first Vulkan device the loader lists, and on a hybrid laptop both that device and the EGL context are normally the integrated GPU, so the discrete GPU stays idle. A report in [issue #3](https://github.com/lucannez64/darling-lol/issues/3) (Ryzen 9 5900HS, RTX 3060 Laptop) measured 60-70 FPS in ARAM on the integrated GPU; on the NVIDIA GPU the game showed a black screen. **Running on an NVIDIA GPU is not validated.**
 
 ### Run on the discrete GPU
 
@@ -184,6 +184,25 @@ Each process that uses Metal appends to guest `/tmp/metal-device.log` (host `~/.
 ```
 
 `MISMATCH` on the presenting line means Vulkan and OpenGL are on different GPUs. `match=unknown` means the OpenGL driver reports no device UUID. Include this file with performance reports.
+
+The log also lists the selected device's memory heaps and types, and one line the first time each kind of resource (`buffer`, `texture`, `drawable`, `drawable-internal`) gets a storage mode and memory type:
+
+```
+[MetalDevice] pid=… memory heap=0 size=6144MiB deviceLocal=yes
+[MetalDevice] pid=… memory type=0 flags=0x0(none) heap=1
+[MetalDevice] pid=… memory alloc kind=texture storage=private typeBits=0x… type=1 flags=0x1(DEVICE_LOCAL) heap=0 heapDeviceLocal=yes firstFit=0 flags=0x0(none) heap=1 heapDeviceLocal=no changed=yes
+```
+
+Resources only the GPU uses (`private`, `memoryless`, and `framebufferOnly` drawables) take the first allowed `DEVICE_LOCAL` type. Before 2026-10-16 they took the first allowed type (`firstFit`), which on NVIDIA can be system RAM; `changed=yes` marks where the two differ. `shared` and `managed` resources keep the first host-visible type. On the RX 6600 (RADV) type 0 is `DEVICE_LOCAL`, so nothing changes there.
+
+The first import of a drawable into the presenting OpenGL context, and the first semaphore import, are logged too; later ones only when they fail (at most five):
+
+```
+[MetalDevice] pid=… drawable GL import (first) dedicated=yes size=… 1920x1080 memoryType=1 tiling=linear glTiling=linear dedicated_error=0x0 import_error=0x0 setup_error=0x0 storage_error=0x0 query_error=0x0 ok
+[MetalDevice] pid=… drawable GL semaphore (first) import_error=0x0 wait_error=0x0 ok (checked for the first 600 imports)
+```
+
+A non-zero error or `FAILED` means the frames cannot reach the window. Before 2026-10-16 the import did not mark the memory as dedicated, which the extension requires; Mesa ignores it, and it is the suspected cause of the NVIDIA black screen (not yet confirmed). If the game shows a black screen on NVIDIA, report it with this file.
 
 ### Host-side checks
 

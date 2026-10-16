@@ -781,7 +781,7 @@ index 8546daa..7e4993c 100644
  		void updateBindings();
  
 diff --git a/private-include/indium/device.private.hpp b/private-include/indium/device.private.hpp
-index 58f1794..75cdeb3 100644
+index 58f1794..be7dbdc 100644
 --- a/private-include/indium/device.private.hpp
 +++ b/private-include/indium/device.private.hpp
 @@ -13,6 +13,8 @@
@@ -836,7 +836,7 @@ index 58f1794..75cdeb3 100644
  		std::shared_ptr<TimelineSemaphore> getWrappedTimelineSemaphore();
  
  		BinarySemaphore getBinarySemaphore(bool exportable = false);
-@@ -111,5 +128,31 @@ namespace Indium {
+@@ -111,5 +128,34 @@ namespace Indium {
  
  		INDIUM_PROPERTY(VkPhysicalDeviceMemoryProperties, m, M,emoryProperties);
  		INDIUM_PROPERTY_READONLY(Feature, f, F,eatures);
@@ -859,6 +859,9 @@ index 58f1794..75cdeb3 100644
 +		void releaseDescriptorPool(VkDescriptorPool pool);
 +		// Cached handles belong to the device and remain alive through all GPU uses.
 +		std::pair<VkRenderPass, bool> acquireRenderPass(const VkRenderPassCreateInfo& info);
++		// Memory type index for a buffer or image of the given storage mode, or SIZE_MAX. Non-virtual and without
++		// state in the class, so the layout above is unchanged.
++		size_t findMemoryType(uint32_t memoryTypeBits, StorageMode storageMode, bool image);
 +	private:
 +		std::mutex _descriptorPoolMutex;
 +		std::vector<VkDescriptorPool> _availableDescriptorPools;
@@ -1789,7 +1792,7 @@ index e58f0ba..616d177 100644
 +    finishTrackedEncoder(_privateCommandBuffer.lock()->commandBuffer());
  };
 diff --git a/src/indium/buffer.cpp b/src/indium/buffer.cpp
-index 23fd2d3..e73df2a 100644
+index 23fd2d3..1a48b81 100644
 --- a/src/indium/buffer.cpp
 +++ b/src/indium/buffer.cpp
 @@ -1,6 +1,8 @@
@@ -1801,7 +1804,34 @@ index 23fd2d3..e73df2a 100644
  
  #include <cstring>
  
-@@ -69,23 +71,11 @@ Indium::PrivateBuffer::PrivateBuffer(std::shared_ptr<PrivateDevice> device, size
+@@ -43,49 +45,17 @@ Indium::PrivateBuffer::PrivateBuffer(std::shared_ptr<PrivateDevice> device, size
+ 
+ 	DynamicVK::vkGetBufferMemoryRequirements(_privateDevice->device(), _buffer, &requirements);
+ 
+-	size_t targetIndex = SIZE_MAX;
+-
+-	for (size_t i = 0; i < _privateDevice->memoryProperties().memoryTypeCount; ++i) {
+-		const auto& type = _privateDevice->memoryProperties().memoryTypes[i];
+-
+-		if ((requirements.memoryTypeBits & (1 << i)) == 0) {
+-			continue;
+-		}
+-
+-		if ((_storageMode == StorageMode::Managed || _storageMode == StorageMode::Shared) && (type.propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) == 0) {
+-			continue;
+-		}
+-
+-		if (_storageMode == StorageMode::Shared && (type.propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) == 0) {
+-			continue;
+-		}
+-
+-		// okay, this is good enough
+-		targetIndex = i;
+-		break;
+-	}
++	size_t targetIndex = _privateDevice->findMemoryType(requirements.memoryTypeBits, _storageMode, false);
+ 
+ 	if (targetIndex == SIZE_MAX) {
  		throw std::runtime_error("No suitable memory region found for buffer with requested storage mode");
  	}
  
@@ -1829,7 +1859,7 @@ index 23fd2d3..e73df2a 100644
  };
  
  Indium::PrivateBuffer::PrivateBuffer(std::shared_ptr<PrivateDevice> device, const void* pointer, size_t length, ResourceOptions options):
-@@ -103,9 +93,11 @@ Indium::PrivateBuffer::PrivateBuffer(std::shared_ptr<PrivateDevice> device, cons
+@@ -103,9 +73,11 @@ Indium::PrivateBuffer::PrivateBuffer(std::shared_ptr<PrivateDevice> device, cons
  	if (_storageMode == StorageMode::Managed) {
  		VkMappedMemoryRange range {};
  		range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
@@ -1843,7 +1873,7 @@ index 23fd2d3..e73df2a 100644
  		if (DynamicVK::vkFlushMappedMemoryRanges(_privateDevice->device(), 1, &range) != VK_SUCCESS) {
  			// TODO
  			abort();
-@@ -114,12 +106,10 @@ Indium::PrivateBuffer::PrivateBuffer(std::shared_ptr<PrivateDevice> device, cons
+@@ -114,12 +86,10 @@ Indium::PrivateBuffer::PrivateBuffer(std::shared_ptr<PrivateDevice> device, cons
  };
  
  Indium::PrivateBuffer::~PrivateBuffer() {
@@ -1859,7 +1889,7 @@ index 23fd2d3..e73df2a 100644
  };
  
  std::shared_ptr<Indium::Device> Indium::PrivateBuffer::device() {
-@@ -136,7 +126,8 @@ void* Indium::PrivateBuffer::contents() {
+@@ -136,7 +106,8 @@ void* Indium::PrivateBuffer::contents() {
  	}
  
  	if (!_mapped) {
@@ -1869,7 +1899,7 @@ index 23fd2d3..e73df2a 100644
  			// TODO
  			abort();
  		}
-@@ -148,9 +139,16 @@ void* Indium::PrivateBuffer::contents() {
+@@ -148,9 +119,16 @@ void* Indium::PrivateBuffer::contents() {
  void Indium::PrivateBuffer::didModifyRange(Range<size_t> range) {
  	VkMappedMemoryRange vulkanRange {};
  	vulkanRange.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
@@ -1888,7 +1918,7 @@ index 23fd2d3..e73df2a 100644
  	if (DynamicVK::vkFlushMappedMemoryRanges(_privateDevice->device(), 1, &vulkanRange) != VK_SUCCESS) {
  		// TODO
  		abort();
-@@ -158,8 +156,10 @@ void Indium::PrivateBuffer::didModifyRange(Range<size_t> range) {
+@@ -158,8 +136,10 @@ void Indium::PrivateBuffer::didModifyRange(Range<size_t> range) {
  };
  
  uint64_t Indium::PrivateBuffer::gpuAddress() {
@@ -2803,7 +2833,7 @@ index 5f62ad0..5957bec 100644
  	DynamicVK::vkCmdBindDescriptorSets(buf->commandBuffer(), VK_PIPELINE_BIND_POINT_COMPUTE, _pso->layout(), 0, descriptorSets.size(), descriptorSets.data(), 0, nullptr);
  };
 diff --git a/src/indium/device.cpp b/src/indium/device.cpp
-index 322e186..2003684 100644
+index 322e186..78b77ae 100644
 --- a/src/indium/device.cpp
 +++ b/src/indium/device.cpp
 @@ -1,4 +1,6 @@
@@ -2813,7 +2843,7 @@ index 322e186..2003684 100644
  #include <indium/instance.private.hpp>
  #include <indium/command-queue.private.hpp>
  #include <indium/render-pipeline.private.hpp>
-@@ -12,39 +14,167 @@
+@@ -12,39 +14,207 @@
  
  #include <iridium/iridium.hpp>
  
@@ -2872,6 +2902,46 @@ index 322e186..2003684 100644
 +			case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU: return "virtual";
 +			case VK_PHYSICAL_DEVICE_TYPE_CPU: return "cpu";
 +			default: return "other";
++		}
++	}
++
++	std::string memoryFlagsString(VkMemoryPropertyFlags flags) {
++		static const std::pair<VkMemoryPropertyFlags, const char*> names[] = {
++			{ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, "DEVICE_LOCAL" },
++			{ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, "HOST_VISIBLE" },
++			{ VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, "HOST_COHERENT" },
++			{ VK_MEMORY_PROPERTY_HOST_CACHED_BIT, "HOST_CACHED" },
++			{ VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT, "LAZILY_ALLOCATED" },
++			{ VK_MEMORY_PROPERTY_PROTECTED_BIT, "PROTECTED" },
++			{ VK_MEMORY_PROPERTY_DEVICE_COHERENT_BIT_AMD, "DEVICE_COHERENT_AMD" },
++			{ VK_MEMORY_PROPERTY_DEVICE_UNCACHED_BIT_AMD, "DEVICE_UNCACHED_AMD" },
++		};
++		std::string out = "0x" + hexValue(flags, 1) + "(";
++		bool first = true;
++		VkMemoryPropertyFlags rest = flags;
++		for (const auto& name: names) {
++			if ((flags & name.first) == 0) continue;
++			out += (first ? "" : "|") + std::string(name.second);
++			first = false;
++			rest &= ~name.first;
++		}
++		if (rest) out += (first ? "0x" : "|0x") + hexValue(rest, 1);
++		else if (first) out += "none";
++		return out + ")";
++	}
++
++	// The memory types and heaps of the device Metal renders on, logged once when it
++	// is selected, so the per-allocation lines below can be read without vulkaninfo.
++	void appendMemoryTable(const VkPhysicalDeviceMemoryProperties& memory) {
++		for (uint32_t i = 0; i < memory.memoryHeapCount; ++i) {
++			const auto& heap = memory.memoryHeaps[i];
++			appendDeviceLog("memory heap=" + std::to_string(i) + " size=" + std::to_string(heap.size >> 20) + "MiB"
++				+ " deviceLocal=" + ((heap.flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) ? "yes" : "no"));
++		}
++		for (uint32_t i = 0; i < memory.memoryTypeCount; ++i) {
++			const auto& type = memory.memoryTypes[i];
++			appendDeviceLog("memory type=" + std::to_string(i) + " flags=" + memoryFlagsString(type.propertyFlags)
++				+ " heap=" + std::to_string(type.heapIndex));
 +		}
 +	}
 +
@@ -2987,7 +3057,7 @@ index 322e186..2003684 100644
  			continue;
  		}
  
-@@ -67,12 +197,101 @@ void Indium::initGlobalDeviceList() {
+@@ -67,12 +237,105 @@ void Indium::initGlobalDeviceList() {
  		DynamicVK::vkGetPhysicalDeviceFeatures2(device, &features);
  
  		if (!features12.timelineSemaphore) {
@@ -3004,7 +3074,7 @@ index 322e186..2003684 100644
 +		memcpy(candidate.deviceUUID, idProperties.deviceUUID, 16);
 +		memcpy(candidate.driverUUID, idProperties.driverUUID, 16);
 +		candidates.push_back(candidate);
- 	}
++	}
 +
 +	// Resolve the explicit selection against the supported list. An explicit choice
 +	// is honoured even when it names a software (CPU) device, because the user asked
@@ -3061,6 +3131,10 @@ index 322e186..2003684 100644
 +		+ " deviceUUID=" + uuidToString(selected.deviceUUID)
 +		+ " reason=" + (selectedReason.empty() ? std::string("loader-first") : selectedReason));
 +
++	VkPhysicalDeviceMemoryProperties selectedMemory {};
++	DynamicVK::vkGetPhysicalDeviceMemoryProperties(selected.device, &selectedMemory);
++	appendMemoryTable(selectedMemory);
++
 +	// A VkDevice is created for the selected device only: its driver is initialized
 +	// and, on a hybrid laptop, the discrete GPU is not woken for a device the
 +	// rendering GPU cannot share memory with anyway. The old behaviour -- a VkDevice
@@ -3083,7 +3157,7 @@ index 322e186..2003684 100644
 +
 +	for (size_t index: creationOrder) {
 +		globalDeviceList.push_back(std::make_shared<PrivateDevice>(candidates[index].device));
-+	}
+ 	}
 +
 +	appendDeviceLog("created VkDevice for " + std::to_string(globalDeviceList.size()) + " of "
 +		+ std::to_string(candidates.size()) + " supported device(s)"
@@ -3091,7 +3165,7 @@ index 322e186..2003684 100644
  };
  
  void Indium::finitGlobalDeviceList() {
-@@ -83,7 +302,8 @@ Indium::Device::~Device() {};
+@@ -83,7 +346,8 @@ Indium::Device::~Device() {};
  
  Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
  	_physicalDevice(physicalDevice)
@@ -3101,7 +3175,7 @@ index 322e186..2003684 100644
  	DynamicVK::vkGetPhysicalDeviceProperties(_physicalDevice, &_properties);
  
  	std::vector<VkQueueFamilyProperties> queueFamilies;
-@@ -233,6 +453,36 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
+@@ -233,6 +497,36 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
  		}
  	}
  
@@ -3138,7 +3212,7 @@ index 322e186..2003684 100644
  	VkDeviceCreateInfo deviceCreateInfo {};
  	deviceCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
  	deviceCreateInfo.pQueueCreateInfos = queueCreateInfos.data();
-@@ -246,6 +496,7 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
+@@ -246,6 +540,7 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
  	}
  
  	_features = indiumFeatures;
@@ -3146,7 +3220,7 @@ index 322e186..2003684 100644
  
  	for (const auto& index: queueFamilyIndices) {
  		VkQueue queue;
-@@ -297,6 +548,9 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
+@@ -297,6 +592,9 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
  };
  
  Indium::PrivateDevice::~PrivateDevice() {
@@ -3156,7 +3230,7 @@ index 322e186..2003684 100644
  	if (_oneshotCommandPool) {
  		DynamicVK::vkDestroyCommandPool(_device, _oneshotCommandPool, nullptr);
  	}
-@@ -308,6 +562,23 @@ std::string Indium::PrivateDevice::name() const {
+@@ -308,6 +606,23 @@ std::string Indium::PrivateDevice::name() const {
  	return _properties.deviceName;
  };
  
@@ -3180,7 +3254,7 @@ index 322e186..2003684 100644
  std::shared_ptr<Indium::CommandQueue> Indium::PrivateDevice::newCommandQueue() {
  	return std::make_shared<PrivateCommandQueue>(shared_from_this());
  };
-@@ -317,9 +588,9 @@ std::shared_ptr<Indium::RenderPipelineState> Indium::PrivateDevice::newRenderPip
+@@ -317,9 +632,9 @@ std::shared_ptr<Indium::RenderPipelineState> Indium::PrivateDevice::newRenderPip
  };
  
  std::shared_ptr<Indium::ComputePipelineState> Indium::PrivateDevice::newComputePipelineState(const ComputePipelineDescriptor& descriptor, PipelineOption options, std::shared_ptr<ComputePipelineReflection> reflection) {
@@ -3193,7 +3267,7 @@ index 322e186..2003684 100644
  	return std::make_shared<PrivateComputePipelineState>(shared_from_this(), descriptor);
  };
  
-@@ -357,6 +628,7 @@ std::shared_ptr<Indium::Library> Indium::PrivateDevice::newLibrary(const void* d
+@@ -357,6 +672,7 @@ std::shared_ptr<Indium::Library> Indium::PrivateDevice::newLibrary(const void* d
  				break;
  		}
  
@@ -3201,7 +3275,7 @@ index 322e186..2003684 100644
  		funcInfo.bindings.insert(funcInfo.bindings.end(), info.bindings.begin(), info.bindings.end());
  		funcInfo.embeddedSamplers.insert(funcInfo.embeddedSamplers.end(), info.embeddedSamplers.begin(), info.embeddedSamplers.end());
  	}
-@@ -480,9 +752,18 @@ void Indium::PrivateDevice::waitForSemaphore(VkSemaphore semaphore, uint64_t tar
+@@ -480,9 +796,18 @@ void Indium::PrivateDevice::waitForSemaphore(VkSemaphore semaphore, uint64_t tar
  	wakeupEventLoop();
  };
  
@@ -3221,7 +3295,7 @@ index 322e186..2003684 100644
  	VkSemaphoreTypeCreateInfo typeInfo {};
  	typeInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
  	typeInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
-@@ -505,7 +786,14 @@ Indium::TimelineSemaphore Indium::PrivateDevice::getTimelineSemaphore() {
+@@ -505,7 +830,14 @@ Indium::TimelineSemaphore Indium::PrivateDevice::getTimelineSemaphore() {
  };
  
  void Indium::PrivateDevice::putTimelineSemaphore(const TimelineSemaphore& semaphore) {
@@ -3237,7 +3311,7 @@ index 322e186..2003684 100644
  };
  
  std::shared_ptr<Indium::TimelineSemaphore> Indium::PrivateDevice::getWrappedTimelineSemaphore() {
-@@ -551,3 +839,91 @@ std::shared_ptr<Indium::BinarySemaphore> Indium::PrivateDevice::getWrappedBinary
+@@ -551,3 +883,160 @@ std::shared_ptr<Indium::BinarySemaphore> Indium::PrivateDevice::getWrappedBinary
  		delete ptr;
  	});
  };
@@ -3329,6 +3403,75 @@ index 322e186..2003684 100644
 +    }
 +    DynamicVK::vkDestroyDescriptorPool(_device, pool, nullptr);
 +}
++
++// The Vulkan spec orders memory types so that a type whose flags are a subset of
++// another's comes first. A flag-less type (system RAM the GPU reads over PCIe,
++// which NVIDIA exposes) therefore precedes every DEVICE_LOCAL type, and the first
++// type allowed by memoryTypeBits put resources only the GPU touches in system RAM
++// there. Private and Memoryless resources now take the first allowed DEVICE_LOCAL
++// type and fall back to that first fit. Shared and Managed keep the first fit
++// that is host visible (and coherent for Shared): moving them to DEVICE_LOCAL and
++// HOST_VISIBLE BAR memory would make their CPU reads uncached. On RADV type 0 is
++// DEVICE_LOCAL, so nothing changes there.
++size_t Indium::PrivateDevice::findMemoryType(uint32_t memoryTypeBits, StorageMode storageMode, bool image) {
++	const auto& memory = _memoryProperties;
++	const bool gpuOnly = storageMode == StorageMode::Private || storageMode == StorageMode::Memoryless;
++	size_t firstFit = SIZE_MAX;
++	size_t deviceLocal = SIZE_MAX;
++
++	for (size_t i = 0; i < memory.memoryTypeCount; ++i) {
++		const auto& type = memory.memoryTypes[i];
++
++		if ((memoryTypeBits & (1u << i)) == 0) {
++			continue;
++		}
++
++		if ((storageMode == StorageMode::Managed || storageMode == StorageMode::Shared) && (type.propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) == 0) {
++			continue;
++		}
++
++		if (storageMode == StorageMode::Shared && (type.propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) == 0) {
++			continue;
++		}
++
++		if (firstFit == SIZE_MAX) {
++			firstFit = i;
++		}
++
++		if (!gpuOnly || (type.propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0) {
++			deviceLocal = i;
++			break;
++		}
++	}
++
++	const size_t chosen = deviceLocal != SIZE_MAX ? deviceLocal : firstFit;
++	if (chosen == SIZE_MAX) {
++		return chosen;
++	}
++
++	// Logged the first time each (kind, storage mode, type) occurs in the process;
++	// afterwards this is one relaxed load. 2 kinds x 4 modes x 32 types = 256 bits.
++	static std::atomic<uint64_t> logged[4] {};
++	const size_t bit = ((image ? 4u : 0u) + (static_cast<size_t>(storageMode) & 3)) * 32 + chosen;
++	const uint64_t mask = uint64_t(1) << (bit & 63);
++	if ((logged[bit >> 6].load(std::memory_order_relaxed) & mask) == 0 && (logged[bit >> 6].fetch_or(mask) & mask) == 0) {
++		static const char* modeNames[] = { "shared", "managed", "private", "memoryless" };
++		auto describe = [&](size_t index) {
++			const auto& type = memory.memoryTypes[index];
++			return std::to_string(index) + " flags=" + memoryFlagsString(type.propertyFlags)
++				+ " heap=" + std::to_string(type.heapIndex)
++				+ " heapDeviceLocal=" + ((memory.memoryHeaps[type.heapIndex].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) ? "yes" : "no");
++		};
++		appendDeviceLog(std::string("memory alloc kind=") + (image ? "texture" : "buffer")
++			+ " storage=" + modeNames[static_cast<size_t>(storageMode) & 3]
++			+ " typeBits=0x" + hexValue(memoryTypeBits, 8)
++			+ " type=" + describe(chosen)
++			+ " firstFit=" + describe(firstFit)
++			+ (chosen != firstFit ? " changed=yes" : " changed=no"));
++	}
++
++	return chosen;
++};
 diff --git a/src/indium/dynamic-vk.cpp b/src/indium/dynamic-vk.cpp
 index a4677c3..69ef23f 100644
 --- a/src/indium/dynamic-vk.cpp
@@ -4499,7 +4642,7 @@ index 71392df..d82e5f0 100644
  	info.unnormalizedCoordinates = descriptor.normalizedCoordinates ? VK_FALSE : VK_TRUE;
  
 diff --git a/src/indium/texture.cpp b/src/indium/texture.cpp
-index 1e3e971..4db87d4 100644
+index 1e3e971..cbdd7ff 100644
 --- a/src/indium/texture.cpp
 +++ b/src/indium/texture.cpp
 @@ -1,8 +1,90 @@
@@ -4706,7 +4849,34 @@ index 1e3e971..4db87d4 100644
  	info.sharingMode = VK_SHARING_MODE_EXCLUSIVE; // TODO: check if this should be "concurrent" instead. i think we're good, though.
  	info.queueFamilyIndexCount = 0;
  	info.pQueueFamilyIndices = nullptr;
-@@ -373,19 +495,18 @@ Indium::ConcreteTexture::ConcreteTexture(std::shared_ptr<PrivateDevice> device,
+@@ -347,45 +469,24 @@ Indium::ConcreteTexture::ConcreteTexture(std::shared_ptr<PrivateDevice> device,
+ 
+ 	DynamicVK::vkGetImageMemoryRequirements(_device->device(), _image, &reqs);
+ 
+-	size_t targetIndex = SIZE_MAX;
+-
+-	for (size_t i = 0; i < _device->memoryProperties().memoryTypeCount; ++i) {
+-		const auto& type = _device->memoryProperties().memoryTypes[i];
+-
+-		if ((reqs.memoryTypeBits & (1 << i)) == 0) {
+-			continue;
+-		}
+-
+-		if ((_storageMode == StorageMode::Managed || _storageMode == StorageMode::Shared) && (type.propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) == 0) {
+-			continue;
+-		}
+-
+-		if (_storageMode == StorageMode::Shared && (type.propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) == 0) {
+-			continue;
+-		}
+-
+-		// okay, this is good enough
+-		targetIndex = i;
+-		break;
+-	}
++	size_t targetIndex = _device->findMemoryType(reqs.memoryTypeBits, _storageMode, true);
+ 
+ 	if (targetIndex == SIZE_MAX) {
  		throw std::runtime_error("No suitable memory region found for image with requested storage mode");
  	}
  
@@ -4714,15 +4884,15 @@ index 1e3e971..4db87d4 100644
 -	allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
 -	allocateInfo.allocationSize = reqs.size;
 -	allocateInfo.memoryTypeIndex = targetIndex;
--
--	if (DynamicVK::vkAllocateMemory(_device->device(), &allocateInfo, nullptr, &_memory) != VK_SUCCESS) {
--		// TODO
--		abort();
--	}
 +	Indium::count("textureAlloc", reqs.size);
 +	auto allocation = MemoryPool::allocate(_device->device(), reinterpret_cast<uint64_t>(_image), targetIndex, reqs.size, reqs.alignment, true, false);
 +	_memory = allocation.memory;
  
+-	if (DynamicVK::vkAllocateMemory(_device->device(), &allocateInfo, nullptr, &_memory) != VK_SUCCESS) {
+-		// TODO
+-		abort();
+-	}
+-
 -	DynamicVK::vkBindImageMemory(_device->device(), _image, _memory, 0);
 +	DynamicVK::vkBindImageMemory(_device->device(), _image, _memory, allocation.offset);
  
@@ -4735,7 +4905,7 @@ index 1e3e971..4db87d4 100644
  	VkCommandBufferAllocateInfo cmdBufAllocInfo {};
  	cmdBufAllocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
  	cmdBufAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-@@ -409,7 +530,7 @@ Indium::ConcreteTexture::ConcreteTexture(std::shared_ptr<PrivateDevice> device,
+@@ -409,7 +510,7 @@ Indium::ConcreteTexture::ConcreteTexture(std::shared_ptr<PrivateDevice> device,
  	barrier.srcAccessMask = VK_ACCESS_NONE;
  	barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
  	barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -4744,7 +4914,7 @@ index 1e3e971..4db87d4 100644
  	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
  	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
  	barrier.image = _image;
-@@ -438,15 +559,13 @@ Indium::ConcreteTexture::ConcreteTexture(std::shared_ptr<PrivateDevice> device,
+@@ -438,15 +539,13 @@ Indium::ConcreteTexture::ConcreteTexture(std::shared_ptr<PrivateDevice> device,
  	submitInfo.commandBufferCount = 1;
  	submitInfo.pCommandBuffers = &cmdBuf;
  
@@ -4766,7 +4936,7 @@ index 1e3e971..4db87d4 100644
  
  	VkImageViewCreateInfo info2 {};
  	info2.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-@@ -463,12 +582,24 @@ Indium::ConcreteTexture::ConcreteTexture(std::shared_ptr<PrivateDevice> device,
+@@ -463,12 +562,24 @@ Indium::ConcreteTexture::ConcreteTexture(std::shared_ptr<PrivateDevice> device,
  		// TODO
  		abort();
  	}
@@ -4792,7 +4962,7 @@ index 1e3e971..4db87d4 100644
  };
  
  Indium::TextureType Indium::ConcreteTexture::textureType() const {
-@@ -537,7 +668,20 @@ VkImage Indium::ConcreteTexture::image() {
+@@ -537,7 +648,20 @@ VkImage Indium::ConcreteTexture::image() {
  	return _image;
  };
  
@@ -4813,7 +4983,7 @@ index 1e3e971..4db87d4 100644
  	return VK_IMAGE_LAYOUT_GENERAL;
  };
  
-@@ -546,6 +690,16 @@ void Indium::ConcreteTexture::replaceRegion(Indium::Region region, size_t mipmap
+@@ -546,6 +670,16 @@ void Indium::ConcreteTexture::replaceRegion(Indium::Region region, size_t mipmap
  };
  
  void Indium::ConcreteTexture::replaceRegion(Indium::Region region, size_t mipmapLevel, size_t slice, const void* bytes, size_t bytesPerRow, size_t bytesPerImage) {
@@ -4830,7 +5000,7 @@ index 1e3e971..4db87d4 100644
  	if (_storageMode != StorageMode::Managed && _storageMode != StorageMode::Shared) {
  		throw std::runtime_error("Invalid usage of replaceRegion on non-managed and non-shared texture");
  	}
-@@ -556,99 +710,109 @@ void Indium::ConcreteTexture::replaceRegion(Indium::Region region, size_t mipmap
+@@ -556,99 +690,109 @@ void Indium::ConcreteTexture::replaceRegion(Indium::Region region, size_t mipmap
  
  	auto aspect = pixelFormatToVkImageAspectFlags(_descriptor.pixelFormat);
  
