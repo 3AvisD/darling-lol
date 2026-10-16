@@ -20,3 +20,7 @@ if [ -f build/runtime/tools/build-riot-libs-runtime.sh ]; then
   python3 build/runtime/tools/install-riot-libs-runtime.py
 fi
 python3 build/runtime/tools/install-darling-system-profiler.py
+# darling-lol: install GNOME application launcher and icon.
+if [ -f build/runtime/tools/riot-desktop-entry.py ]; then
+  python3 build/runtime/tools/riot-desktop-entry.py || true
+fi
