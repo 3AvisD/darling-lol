@@ -256,7 +256,9 @@ static void *pumpFrames(void *arg) {
           XFlush(f->display);
       }
     }
-    deadline.tv_nsec += 2000000;
+    /* darling-lol perf: 500µs poll interval (2000 Hz) reduces average frame
+     * detection latency from 1ms to 0.25ms at negligible CPU cost. */
+    deadline.tv_nsec += 500000;
     if (deadline.tv_nsec >= 1000000000) {
       deadline.tv_nsec -= 1000000000;
       deadline.tv_sec++;

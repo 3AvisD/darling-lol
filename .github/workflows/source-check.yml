@@ -11,3 +11,5 @@ jobs:
         with:
           python-version: '3.12'
       - run: python scripts/validate.py
+      - run: python tools/riot-input-offline-check.py
+      - run: python tools/riot-runtime-cleanup-offline-check.py

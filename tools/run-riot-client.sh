@@ -17,7 +17,7 @@ unset RCLOL_APP_ARG3 RCLOL_APP_ARG3_SLOT RCLOL_UX_ARG1 RCLOL_UX_ARG1_SLOT
 unset RCLOL_UX_ARG2 RCLOL_UX_ARG2_SLOT
 # The paired runtime presents completed GPU textures without CPU readback.
 # Explicit 0 or an empty value selects the CPU fallback for diagnostics.
-for option in RCLOL_GPU_DIRECT_PRESENT RCLOL_GPU_DIRECT_ASYNC RCLOL_GPU_DIRECT_VSYNC DARLING_CA_PRESENT_AT_COMMIT DARLING_CA_SKIP_LOCAL_IOSURFACE_RENDER RCLOL_FORWARD_MOUSE_MOVED; do
+for option in RCLOL_GPU_DIRECT_PRESENT RCLOL_GPU_DIRECT_ASYNC RCLOL_GPU_DIRECT_VSYNC DARLING_CA_PRESENT_AT_COMMIT DARLING_CA_SKIP_LOCAL_IOSURFACE_RENDER RCLOL_FORWARD_MOUSE_MOVED RCLOL_MOUSE_CONFINEMENT; do
  eval 'value=${'"$option"'-1}'
  case "$value" in 0|'') unset "$option";; *) export "$option=$value";; esac
 done
@@ -59,6 +59,27 @@ else
   set -- "$@" --launch-product="${RCLOL_LAUNCH_PRODUCT-league_of_legends}" \
     --launch-patchline="${RCLOL_LAUNCH_PATCHLINE-live}"
  fi
+fi
+# --- darling-lol perf: scheduling & driver latency hints ---
+# Refresh rate for display link, async presenter, and frame pacing: the primary monitor's
+# current mode (the first monitor without a primary); unset falls back to 60 Hz.
+if [ -z "${RCLOL_REFRESH_HZ-}" ] && command -v xrandr >/dev/null 2>&1; then
+  RCLOL_REFRESH_HZ=$(xrandr --current 2>/dev/null | awk '
+    / connected/ { primary = / primary / }
+    /\*/ { for (i = 2; i <= NF; i++) if ($i ~ /\*/) { rate = $i; sub(/[*+]+/, "", rate)
+            if (primary) { print int(rate + 0.5); found = 1; exit } else if (first == "") first = int(rate + 0.5) } }
+    END { if (!found && first != "") print first }')
+fi
+if [ -n "${RCLOL_REFRESH_HZ-}" ]; then export RCLOL_REFRESH_HZ; fi
+# Vulkan WSI & Mesa optimizations
+export MESA_NO_ERROR="${MESA_NO_ERROR:-1}"
+# NVIDIA proprietary driver: limit pre-rendered frames.
+export __GL_MaxFramesAllowed="${__GL_MaxFramesAllowed:-1}"
+export __GL_THREADED_OPTIMIZATIONS="${__GL_THREADED_OPTIMIZATIONS:-1}"
+export __GL_YIELD="${__GL_YIELD:-NOTHING}"
+# Reduce timer slack for tighter scheduling in the game process tree.
+if [ -w /proc/self/timerslack_ns ]; then
+  echo 1 > /proc/self/timerslack_ns 2>/dev/null || true
 fi
 exec env -u ELECTRON_RUN_AS_NODE -u DYLD_INSERT_LIBRARIES EGL_PLATFORM=x11 \
   LANG="${RCLOL_GUEST_LOCALE:-en_US.UTF-8}" LC_ALL="${RCLOL_GUEST_LOCALE:-en_US.UTF-8}" \

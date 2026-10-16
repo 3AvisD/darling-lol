@@ -4,7 +4,10 @@ import ast,json,re,subprocess,sys
 from pathlib import Path
 from common import ROOT
 subprocess.run([sys.executable,str(ROOT/'scripts/configure.py')],check=True)
-files=subprocess.check_output(['git','-C',str(ROOT),'ls-files','-z']).decode().split('\0')
+try:
+    files=subprocess.check_output(['git','-C',str(ROOT),'ls-files','-z'],stderr=subprocess.DEVNULL).decode().split('\0')
+except (OSError, subprocess.CalledProcessError):
+    files=[str(p.relative_to(ROOT)) for p in ROOT.rglob('*') if p.is_file() and not any(part.startswith('.') or part in ['build','__pycache__'] for part in p.relative_to(ROOT).parts)]
 errors=[]
 secret_patterns=[r'gh[pousr]_[A-Za-z0-9]{30,}',r'AKIA[0-9A-Z]{16}',r'eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}',r'-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----']
 for name in filter(None,files):
@@ -28,6 +31,10 @@ manifest=json.loads((ROOT/'upstream/manifest.json').read_text())
 for c in manifest['components']:
     if not re.fullmatch('[0-9a-f]{40}',c['revision']):errors.append(c['path']+': invalid pinned revision')
     if not (ROOT/c['patch']).is_file():errors.append(c['path']+': patch missing')
+    else:
+        parsed=subprocess.run(['git','apply','--numstat','-'],input=(ROOT/c['patch']).read_text(),
+                              text=True,capture_output=True)
+        if parsed.returncode:errors.append(c['patch']+': '+parsed.stderr.strip())
 if errors:
     print('\n'.join(errors));raise SystemExit(1)
 print('PASS: tracked source audit, rendered Python/shell syntax and',len(manifest['components']),'pinned patch entries')

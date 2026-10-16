@@ -515,10 +515,10 @@ index 7361d09a..4bdd88cf 100644
      return [self CGColor];
  }
 diff --git a/AppKit/NSCursor.m b/AppKit/NSCursor.m
-index 4cd74633..9be5239a 100644
+index 4cd74633..4098fd28 100644
 --- a/AppKit/NSCursor.m
 +++ b/AppKit/NSCursor.m
-@@ -365,12 +365,9 @@ static NSMutableArray *_cursorStack = nil;
+@@ -365,10 +365,7 @@ static NSMutableArray *_cursorStack = nil;
  }
  
  + (void) setHiddenUntilMouseMoves: (BOOL) flag {
@@ -530,10 +530,8 @@ index 4cd74633..9be5239a 100644
  }
  
  - initWithImage: (NSImage *) image
-         foregroundColorHint: (NSColor *) foregroundHint
-         backgroundColorHint: (NSColor *) backgroundHint
 diff --git a/AppKit/NSDisplay.m b/AppKit/NSDisplay.m
-index cacd8999..13faf0f7 100644
+index cacd8999..9422d869 100644
 --- a/AppKit/NSDisplay.m
 +++ b/AppKit/NSDisplay.m
 @@ -43,6 +43,10 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
@@ -547,8 +545,7 @@ index cacd8999..13faf0f7 100644
  - (instancetype) init {
      if ([self class] != [NSDisplay class]) {
          // Initializing a concrete subclass.
-@@ -135,6 +139,26 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
- - (void) unhideCursor {
+@@ -136,6 +140,26 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
      NSInvalidAbstractInvocation();
  }
  
@@ -574,6 +571,7 @@ index cacd8999..13faf0f7 100644
 +
  // Arrow, IBeam, HorizontalResize, VerticalResize
  - (id) cursorWithName: (NSString *) name {
+     NSInvalidAbstractInvocation();
 @@ -146,28 +170,46 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
      NSInvalidAbstractInvocation();
  }
@@ -628,7 +626,7 @@ index cacd8999..13faf0f7 100644
          }
      }
  
-@@ -193,7 +215,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+@@ -193,7 +235,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
      }
  
      while (--count >= 0) {
@@ -638,7 +636,7 @@ index cacd8999..13faf0f7 100644
              [_eventQueue removeObjectAtIndex: count];
          }
      }
-@@ -310,6 +333,10 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+@@ -310,6 +353,10 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
      return 0;
  }
  
@@ -835,6 +833,37 @@ index 2251b642..8b29725d 100644
  - (NSRect) boundingRectForFont {
      return CTFontGetBoundingBox(_ctFont);
  }
+diff --git a/AppKit/NSGeometryTrace.h b/AppKit/NSGeometryTrace.h
+new file mode 100644
+index 00000000..a51a9241
+--- /dev/null
++++ b/AppKit/NSGeometryTrace.h
+@@ -0,0 +1,25 @@
++/* Opt-in runtime geometry diagnostics; never log view text or client data. */
++#ifndef DARLING_NS_GEOMETRY_TRACE_H
++#define DARLING_NS_GEOMETRY_TRACE_H
++#include <stdarg.h>
++#include <stdio.h>
++#include <stdlib.h>
++
++static inline void DarlingGeometryTrace(const char *format, ...) {
++    if (!getenv("DARLING_UI_GEOMETRY_TRACE"))
++        return;
++    va_list args, copy;
++    va_start(args, format);
++    va_copy(copy, args);
++    vfprintf(stderr, format, args);
++    va_end(args);
++    /* Clients may redirect stderr to a non-log descriptor. Keep a copy in
++     * the guest's temporary directory so their resize events remain visible. */
++    FILE *file = fopen("/tmp/darling-ui-geometry.log", "a");
++    if (file) {
++        vfprintf(file, format, copy);
++        fclose(file);
++    }
++    va_end(copy);
++}
++#endif
 diff --git a/AppKit/NSImage.m b/AppKit/NSImage.m
 index d2ac8e05..a4164f0a 100644
 --- a/AppKit/NSImage.m
@@ -2039,6 +2068,112 @@ index d545120a..b2845478 100644
  }
  
  + (BOOL) allowsAutomaticWindowTabbing {
+diff --git a/AppKit/NSWorkspace.m b/AppKit/NSWorkspace.m
+index ad5e4f9d..dbd997aa 100644
+--- a/AppKit/NSWorkspace.m
++++ b/AppKit/NSWorkspace.m
+@@ -20,9 +20,58 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ #import <AppKit/NSRaise.h>
+ #import <AppKit/NSWorkspace.h>
+ #import <Foundation/Foundation.h>
++#include <dispatch/dispatch.h>
+ 
+ NSString *const NSWorkspaceApplicationKey = @"NSWorkspaceApplicationKey";
+ 
++/* Electron's shell.openExternal() uses -openURL:configuration:completionHandler: (macOS 10.15)
++ * with a configured NSWorkspaceOpenConfiguration, so the configuration needs real properties.
++ * The URL itself is opened by -openURL: (LaunchServices in MacWorkspace). */
++@interface NSWorkspaceOpenConfiguration () {
++    BOOL _activates, _hides, _hidesOthers, _addsToRecentItems, _createsNewApplicationInstance;
++    BOOL _allowsRunningApplicationSubstitution, _forPrinting, _promptsUserIfNeeded, _requiresUniversalLinks;
++    NSAppleEventDescriptor *_appleEvent;
++    NSArray *_arguments;
++    NSDictionary *_environment;
++    cpu_type_t _architecture;
++}
++@end
++
++@implementation NSWorkspaceOpenConfiguration
++@synthesize activates = _activates, hides = _hides, hidesOthers = _hidesOthers;
++@synthesize addsToRecentItems = _addsToRecentItems, createsNewApplicationInstance = _createsNewApplicationInstance;
++@synthesize allowsRunningApplicationSubstitution = _allowsRunningApplicationSubstitution;
++@synthesize forPrinting = _forPrinting, promptsUserIfNeeded = _promptsUserIfNeeded;
++@synthesize requiresUniversalLinks = _requiresUniversalLinks;
++@synthesize appleEvent = _appleEvent, arguments = _arguments, environment = _environment;
++@synthesize architecture = _architecture;
+++ (instancetype) configuration {
++    NSWorkspaceOpenConfiguration *c = [[[self alloc] init] autorelease];
++    c->_activates = YES;
++    c->_addsToRecentItems = YES;
++    c->_allowsRunningApplicationSubstitution = YES;
++    return c;
++}
++- (id) copyWithZone: (NSZone *) zone {
++    NSWorkspaceOpenConfiguration *c = [[[self class] allocWithZone: zone] init];
++    c->_activates = _activates; c->_hides = _hides; c->_hidesOthers = _hidesOthers;
++    c->_addsToRecentItems = _addsToRecentItems;
++    c->_createsNewApplicationInstance = _createsNewApplicationInstance;
++    c->_allowsRunningApplicationSubstitution = _allowsRunningApplicationSubstitution;
++    c->_forPrinting = _forPrinting; c->_promptsUserIfNeeded = _promptsUserIfNeeded;
++    c->_requiresUniversalLinks = _requiresUniversalLinks; c->_architecture = _architecture;
++    c->_appleEvent = [_appleEvent retain];
++    c->_arguments = [_arguments copy]; c->_environment = [_environment copy];
++    return c;
++}
++- (void) dealloc {
++    [_appleEvent release];
++    [_arguments release];
++    [_environment release];
++    [super dealloc];
++}
++@end
++
+ NSString *const NSWorkspaceWillPowerOffNotification =
+         @"NSWorkspaceWillPowerOffNotification";
+ 
+@@ -161,6 +210,24 @@ NSNotificationName NSWorkspaceWillUnmountNotification = @"NSWorkspaceWillUnmount
+     return 0;
+ }
+ 
++- (void) openURL: (NSURL *) url
++        configuration: (NSWorkspaceOpenConfiguration *) configuration
++        completionHandler: (void (^)(id application, NSError *error)) completionHandler
++{
++    // Opening may wait on another process; keep it off the caller's thread.
++    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
++        BOOL opened = [self openURL: url];
++        if (completionHandler != NULL) {
++            NSError *error = nil;
++            if (!opened)
++                error = [NSError errorWithDomain: NSCocoaErrorDomain code: 256 userInfo: nil];
++            dispatch_async(dispatch_get_main_queue(), ^{
++                completionHandler(nil, error);
++            });
++        }
++    });
++}
++
+ - (BOOL) selectFile: (NSString *) path
+         inFileViewerRootedAtPath: (NSString *) rootedAtPath
+ {
+@@ -317,16 +384,3 @@ NSNotificationName NSWorkspaceWillUnmountNotification = @"NSWorkspaceWillUnmount
+ }
+ 
+ @end
+-
+-static dispatch_once_t _initOnceNsWorkspaceOpenConfig;
+-static NSWorkspaceOpenConfiguration* _singletonNsWorkspaceOpenConfig;
+-
+-@implementation NSWorkspaceOpenConfiguration
+-+ (instancetype)configuration {
+-    dispatch_once(&_initOnceNsWorkspaceOpenConfig, ^{
+-        _singletonNsWorkspaceOpenConfig = [[NSWorkspaceOpenConfiguration alloc] init];
+-    });
+-    return _singletonNsWorkspaceOpenConfig;
+-}
+-
+-@end
+\ No newline at end of file
 diff --git a/AppKit/X11.backend/CarbonKeys.h b/AppKit/X11.backend/CarbonKeys.h
 index e999cbf2..14f9cb6a 100644
 --- a/AppKit/X11.backend/CarbonKeys.h
@@ -2107,10 +2242,10 @@ index bdc97bdf..139c91eb 100644
          _cursor = XcursorLibraryLoadCursor(display, "left_ptr");
      return self;
 diff --git a/AppKit/X11.backend/X11Display.h b/AppKit/X11.backend/X11Display.h
-index 18189404..5b3a34bc 100644
+index 18189404..12cde429 100644
 --- a/AppKit/X11.backend/X11Display.h
 +++ b/AppKit/X11.backend/X11Display.h
-@@ -10,13 +10,14 @@
+@@ -10,13 +10,19 @@
  #import <X11/Xlib.h>
  #import <X11/Xresource.h>
  #import <X11/Xlocale.h>
@@ -2122,11 +2257,16 @@ index 18189404..5b3a34bc 100644
  #endif
  
 -@class X11Cursor;
-+@class X11Cursor, X11Window;
++@class X11Cursor, X11Window, NSWindow;
++
++/* darling-lol: League's in-game window (not the Riot or League client), recognized by process
++ * name or by its "League of Legends (TM) Client" title. window may be None before creation. */
++BOOL X11IsLeagueGameWindow(Display *display, Window window, NSWindow *delegate);
++BOOL X11RootRectCoversMonitor(Display *display, NSRect rect);
  
  @interface X11Display : NSDisplay {
      Display *_display;
-@@ -36,19 +37,41 @@
+@@ -36,19 +42,43 @@
      NSTimeInterval lastClickTimeStamp;
      int clickCount;
      X11Cursor *_blankCursor, *_defaultCursor;
@@ -2142,6 +2282,8 @@ index 18189404..5b3a34bc 100644
 +    X11Cursor *_definedCursor;
 +    BOOL _cursorHidden;
 +    Window _confinedWindow;
++    int _confinedWidth;
++    int _confinedHeight;
 +    unsigned int _otherButtonsDown;
      KeySym _lastKeySym;
 +    unsigned char _modifierKeysDown[256];
@@ -2170,7 +2312,7 @@ index 18189404..5b3a34bc 100644
 +- (NSRect) frameForRootRect: (NSRect) rect;
  @end
 diff --git a/AppKit/X11.backend/X11Display.m b/AppKit/X11.backend/X11Display.m
-index 5ae29bf4..86a647ff 100644
+index 5ae29bf4..47fb6552 100644
 --- a/AppKit/X11.backend/X11Display.m
 +++ b/AppKit/X11.backend/X11Display.m
 @@ -48,12 +48,271 @@
@@ -2472,8 +2614,11 @@ index 5ae29bf4..86a647ff 100644
  
          lastFocusedWindow = nil;
          lastClickTimeStamp = 0.0;
-@@ -147,15 +419,18 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+@@ -145,17 +417,21 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+ }
+ 
  - (void) dealloc {
++    X11RelativeMouseEnd(&_relativeMouse);
      [_blankCursor release];
      [_defaultCursor release];
 +    [_definedCursor release];
@@ -2494,7 +2639,7 @@ index 5ae29bf4..86a647ff 100644
      if (_cfSocket != NULL)
          CFRelease(_cfSocket);
  #endif
-@@ -172,6 +447,56 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+@@ -172,6 +448,56 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
      return _display;
  }
  
@@ -2551,7 +2696,7 @@ index 5ae29bf4..86a647ff 100644
  - (void) _enableDetectableAutoRepeat {
      int major = XkbMajorVersion, minor = XkbMinorVersion;
      XkbStateRec state;
-@@ -190,6 +515,35 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+@@ -190,6 +516,35 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
          [_lastScreens release];
          _lastScreens = nil;
      }
@@ -2587,7 +2732,7 @@ index 5ae29bf4..86a647ff 100644
  }
  
  - (NSArray *) screens {
-@@ -201,25 +555,60 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+@@ -201,25 +556,60 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
  
      int eventBase, errorBase;
  
@@ -2658,7 +2803,7 @@ index 5ae29bf4..86a647ff 100644
  
                  nsscreen =
                          [[[NSScreen alloc] initWithFrame: frame
-@@ -228,18 +617,17 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+@@ -228,18 +618,17 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
                  Atom actualType;
                  unsigned long nitems, bytesAfter;
                  int actualFormat;
@@ -2680,7 +2825,7 @@ index 5ae29bf4..86a647ff 100644
              } else {
                  nsscreen = [[[NSScreen alloc] initWithFrame: NSZeroRect
                                                 visibleFrame: NSZeroRect]
-@@ -247,25 +635,35 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+@@ -247,25 +636,35 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
              }
              [nsscreen setCgDirectDisplayID: (i + 1)];
  
@@ -2727,21 +2872,78 @@ index 5ae29bf4..86a647ff 100644
  }
  
  static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
-@@ -536,12 +934,52 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -536,12 +935,109 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
      return &layout->layout;
  }
  
 +/* darling-lol: the game asks for the pointer position, the pressed buttons and the modifier state about a thousand
 + * times per second. Each answer was a synchronous X round trip (XQueryPointer / XkbGetState) that puts the main thread
-+ * to sleep until XWayland replies; while the mouse moves they dominated the slow frames. Reuse a reply for 8 ms, keep it
++ * to sleep until XWayland replies; while the mouse moves they dominated the slow frames. Reuse a reply for 1 ms, keep it
 + * current from the input events themselves (a motion event carries position and button state), and drop it on every
 + * button, key, crossing or focus event so the next question after a state change is always asked for real. */
 +#include <mach/mach_time.h>
++#include <poll.h>
++static BOOL rclolHasGameTitle(NSString *title) {
++    return title && [title rangeOfString:@"(TM) Client" options:NSCaseInsensitiveSearch].location != NSNotFound;
++}
++
++BOOL X11IsLeagueGameWindow(Display *display, Window window, NSWindow *delegate) {
++    /* Tooltips, menus and other panels are not the game window even in the game process: a
++     * tooltip treated as the game was made managed and EWMH fullscreen, a black screen on top. */
++    static Class panelClass, toolTipClass;
++    if (!panelClass) {
++        panelClass = NSClassFromString(@"NSPanel");
++        toolTipClass = NSClassFromString(@"NSToolTipWindow");
++    }
++    if (delegate && ((panelClass && [delegate isKindOfClass: panelClass]) ||
++                     (toolTipClass && [delegate isKindOfClass: toolTipClass])))
++        return NO;
++    static int gameProcess = -1;
++    if (gameProcess < 0) {
++        NSString *name = [[NSProcessInfo processInfo] processName];
++        gameProcess = name && [name rangeOfString:@"League" options:NSCaseInsensitiveSearch].location != NSNotFound
++                && [name rangeOfString:@"Ux" options:NSCaseInsensitiveSearch].location == NSNotFound
++                && [name rangeOfString:@"Riot" options:NSCaseInsensitiveSearch].location == NSNotFound
++                && [name rangeOfString:@"Client" options:NSCaseInsensitiveSearch].location == NSNotFound;
++    }
++    if (gameProcess) return YES;
++    if ([delegate respondsToSelector:@selector(title)] && rclolHasGameTitle([delegate title])) return YES;
++    if (window == None) return NO;
++    XTextProperty prop;
++    BOOL titled = NO;
++    if (XGetWMName(display, window, &prop) && prop.value) {
++        titled = rclolHasGameTitle([NSString stringWithUTF8String:(const char *)prop.value]);
++        XFree(prop.value);
++    }
++    return titled;
++}
++
++/* Automatic fullscreen is valid only after the game has supplied its final monitor geometry.
++ * Process identity alone also matches its temporary 1x1 startup window. */
++BOOL X11RootRectCoversMonitor(Display *display, NSRect rect) {
++    if (rect.size.width < 3 || rect.size.height < 3) return NO;
++    BOOL covers = NO;
++    XRRScreenResources *resources = XRRGetScreenResourcesCurrent(display, DefaultRootWindow(display));
++    if (resources) {
++        for (int i = 0; i < resources->ncrtc; ++i) {
++            XRRCrtcInfo *crtc = XRRGetCrtcInfo(display, resources, resources->crtcs[i]);
++            if (crtc) {
++                if (crtc->mode && fabs(rect.origin.x - crtc->x) <= 2 && fabs(rect.origin.y - crtc->y) <= 2 &&
++                    fabs(rect.size.width - crtc->width) <= 2 && fabs(rect.size.height - crtc->height) <= 2)
++                    covers = YES;
++                XRRFreeCrtcInfo(crtc);
++            }
++        }
++        XRRFreeScreenResources(resources);
++    }
++    return covers;
++}
++
 +static BOOL rclolFresh(uint64_t *stamp) {
 +    static mach_timebase_info_data_t tb;
 +    if (tb.denom == 0) mach_timebase_info(&tb);
 +    uint64_t now = mach_absolute_time();
-+    if (*stamp != 0 && (now - *stamp) * tb.numer / tb.denom < 8000000ULL) return YES;
++    if (*stamp != 0 && (now - *stamp) * tb.numer / tb.denom < 1000000ULL) return YES;
 +    *stamp = now;
 +    return NO;
 +}
@@ -2782,7 +2984,7 @@ index 5ae29bf4..86a647ff 100644
  }
  
  - (NSPasteboard *) pasteboardWithName: (NSString *) name {
-@@ -675,6 +1113,15 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -675,6 +1171,15 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                                      blue: 0.60f
                                      alpha: 1.0f];
  
@@ -2798,7 +3000,7 @@ index 5ae29bf4..86a647ff 100644
      NSLog(@"missing color for %@", colorName);
      return [NSColor redColor];
  }
-@@ -688,6 +1135,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -688,6 +1193,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  }
  
  - (void) hideCursor {
@@ -2809,7 +3011,7 @@ index 5ae29bf4..86a647ff 100644
      if (!_blankCursor)
          _blankCursor = [[X11Cursor alloc] initBlank];
      [self setCursor: _blankCursor];
-@@ -695,6 +1146,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -695,6 +1204,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  
  - (void) unhideCursor {
      NSCursor *current = [NSCursor currentCursor];
@@ -2820,7 +3022,7 @@ index 5ae29bf4..86a647ff 100644
      if (current != nil) {
          [current push];
          [current pop];
-@@ -747,12 +1202,28 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -747,12 +1260,28 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  
  - (void) setCursor: (id) cursor {
      CGWindow *window = [[NSApp keyWindow] platformWindow];
@@ -2854,7 +3056,7 @@ index 5ae29bf4..86a647ff 100644
      }
  }
  
-@@ -921,15 +1392,22 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -921,15 +1450,22 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  }
  
  - (NSPoint) mouseLocation {
@@ -2886,7 +3088,7 @@ index 5ae29bf4..86a647ff 100644
  }
  
  - (void) setWindow: (id) window forID: (XID) i {
-@@ -948,6 +1426,16 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -948,6 +1484,19 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          // retaining the window causes it to keep popping back up endlessly even after dismissing it
          if (lastFocusedWindow && [[lastFocusedWindow platformWindow] windowHandle] == i)
              lastFocusedWindow = nil;
@@ -2896,14 +3098,17 @@ index 5ae29bf4..86a647ff 100644
 +            _definedCursor = nil;
 +        }
 +        /* The server released any grab on a destroyed window. */
-+        if (_confinedWindow == i)
++        if (_confinedWindow == i) {
 +            _confinedWindow = None;
++            _confinedWidth = 0;
++            _confinedHeight = 0;
++        }
 +        if (_relativeWindow == i)
 +            [self suspendRelativeMouse];
      }
  }
  
-@@ -962,20 +1450,82 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -962,20 +1511,86 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  {
  #ifndef DARLING
      [[NSRunLoop currentRunLoop] addInputSource: _inputSource forMode: mode];
@@ -2935,10 +3140,10 @@ index 5ae29bf4..86a647ff 100644
 +        result = nil;
 +    NSTimeInterval remaining;
 +    while (result == nil && (remaining = [untilDate timeIntervalSinceNow]) > 0) {
-+        /* Display-link and input sources have no CF timer deadline. A 20ms
-+         * fallback can sleep past every 60Hz source wakeup; bound its latency
-+         * below a refresh interval while the socket wakeup path is polled. */
-+        NSTimeInterval slice = remaining < 0.004 ? remaining : 0.004;
++        /* Display-link and input sources have no CF timer deadline. Bound the
++         * idle-poll latency below half a 144Hz frame (~3.5ms) so input events
++         * are dispatched promptly at high refresh rates. */
++        NSTimeInterval slice = remaining < 0.002 ? remaining : 0.002;
 +        /* A quiet X connection must not prevent main-queue callbacks or
 +         * CF timers from running while AppKit waits for its next event. */
 +        CFStringRef cfMode = (mode == nil || [mode isEqual:NSDefaultRunLoopMode])
@@ -2978,12 +3183,16 @@ index 5ae29bf4..86a647ff 100644
 +                slice = next > now ? next - now : 0;
 +        }
 +        if (result == nil && slice > 0) {
-+            /* Keep this polling deadline independent of Mach wait timers. */
++            /* darling-lol perf: wait on the X11 connection fd instead of a blind
++             * sleep, so an input event arriving on the socket ends the wait early.
++             * ppoll keeps the nanosecond deadline: poll's millisecond timeout
++             * truncates sub-millisecond slices to 0 and turns the wait into a spin. */
++            struct pollfd pfd = { .fd = ConnectionNumber(_display), .events = POLLIN };
 +            struct { long seconds, nanoseconds; } delay = {
 +                0, (long)(slice * 1000000000.0)
 +            };
 +            extern long __lolsys_syscall(long, long, long, long, long, long, int);
-+            __lolsys_syscall((long)&delay, 0, 0, 0, 0, 0, 35 /* Linux nanosleep */);
++            __lolsys_syscall((long)&pfd, 1, (long)&delay, 0, 8, 0, 271 /* Linux ppoll */);
 +        }
 +    }
 +    return result;
@@ -2991,7 +3200,7 @@ index 5ae29bf4..86a647ff 100644
  }
  
  - (NSEventModifierFlags) modifierFlagsForState: (unsigned int) state {
-@@ -1010,17 +1560,96 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1010,17 +1625,96 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
      return result;
  }
  
@@ -3088,7 +3297,20 @@ index 5ae29bf4..86a647ff 100644
          NSEventModifierFlags modifierFlags = [self modifierFlagsForState: ev->xkey.state];
          char buf[20] = {0};
          KeySym keySym;
-@@ -1038,6 +1667,18 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1030,7 +1724,11 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+             break;
+ 
+         if (ev->type == KeyPress) {
+-            strLen = Xutf8LookupString(window->_xic, (XKeyPressedEvent *) ev, buf, sizeof(buf) - 1, &keySym, NULL);
++            if (window && window->_xic) {
++                strLen = Xutf8LookupString(window->_xic, (XKeyPressedEvent *) ev, buf, sizeof(buf) - 1, &keySym, NULL);
++            } else {
++                strLen = XLookupString((XKeyEvent*) ev, buf, sizeof(buf) - 1, &keySym, NULL);
++            }
+             buf[strLen] = 0;
+         } else {
+             // Xutf8LookupString() may not be used with KeyRelease
+@@ -1038,6 +1736,18 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
              buf[strLen] = 0;
          }
  
@@ -3107,10 +3329,12 @@ index 5ae29bf4..86a647ff 100644
          id str = [[NSString alloc] initWithCString: buf
                                            encoding: NSUTF8StringEncoding];
          NSPoint pos =
-@@ -1077,6 +1718,30 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1077,6 +1787,32 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case ButtonPress:;
++        if (window && !_confinedWindow)
++            [self updateMouseConfinementForWindow: window];
 +        if (ev->xbutton.button >= Button4 && ev->xbutton.button <= 7) {
 +            pos = [self locationInWindow: window x: ev->xbutton.x y: ev->xbutton.y
 +                                   rootX: ev->xbutton.x_root rootY: ev->xbutton.y_root];
@@ -3138,7 +3362,7 @@ index 5ae29bf4..86a647ff 100644
          NSTimeInterval now = [[NSDate date] timeIntervalSinceReferenceDate];
  
          if (now - lastClickTimeStamp < [self doubleClickInterval]) {
-@@ -1086,8 +1751,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1086,8 +1822,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          }
          lastClickTimeStamp = now;
  
@@ -3149,7 +3373,7 @@ index 5ae29bf4..86a647ff 100644
  
          switch (ev->xbutton.button) {
          case Button1:
-@@ -1096,10 +1761,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1096,10 +1832,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          case Button3:
              type = NSRightMouseDown;
              break;
@@ -3160,7 +3384,7 @@ index 5ae29bf4..86a647ff 100644
          default:
              type = NSOtherMouseDown;
          }
-@@ -1113,14 +1774,22 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1113,14 +1845,22 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                          clickCount: clickCount
                              deltaX: 0.0
                              deltaY: 0.0];
@@ -3187,7 +3411,7 @@ index 5ae29bf4..86a647ff 100644
          CGFloat deltaY = 0.0;
  
          switch (ev->xbutton.button) {
-@@ -1130,14 +1799,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1130,14 +1870,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          case Button3:
              type = NSRightMouseUp;
              break;
@@ -3202,7 +3426,7 @@ index 5ae29bf4..86a647ff 100644
          default:
              type = NSOtherMouseUp;
          }
-@@ -1151,7 +1812,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1151,7 +1883,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                          clickCount: clickCount
                              deltaX: 0.0
                              deltaY: deltaY];
@@ -3213,7 +3437,18 @@ index 5ae29bf4..86a647ff 100644
          [self postEvent: event atStart: NO];
          break;
  
-@@ -1164,45 +1827,82 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1160,49 +1894,95 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+             // ev->xmotion.x, ev->xmotion.y, ev->xmotion.x_root,
+             // ev->xmotion.y_root);
+ 
++            if (_confinedWindow == [window windowHandle] && _confinedWidth > 0 && _confinedHeight > 0) {
++                if (ev->xmotion.x < 0) ev->xmotion.x = 0;
++                else if (ev->xmotion.x > _confinedWidth) ev->xmotion.x = _confinedWidth;
++                if (ev->xmotion.y < 0) ev->xmotion.y = 0;
++                else if (ev->xmotion.y > _confinedHeight) ev->xmotion.y = _confinedHeight;
++            }
++
+             CGPoint lastMotionPos = [window mouseLocationOutsideOfEventStream];
              pos = [window
                      transformPoint: NSMakePoint(ev->xmotion.x, ev->xmotion.y)];
  
@@ -3249,15 +3484,17 @@ index 5ae29bf4..86a647ff 100644
 +                BOOL warpsHonoured = !_isXwayland || _cursorHidden;
 +                rclolLastPos = NSMakePoint(_relativeMouse.physicalX, _relativeMouse.physicalY);
 +                X11RelativeMouseMotion relative = X11RelativeMouseHandleMotion(
-+                        &_relativeMouse, ev->xmotion.x_root, ev->xmotion.y_root, warpsHonoured);
++                        &_relativeMouse, ev->xmotion.x_root, ev->xmotion.y_root, warpsHonoured, ev->xmotion.serial);
 +                rclolEventPos = NSMakePoint(_relativeMouse.virtualX, _relativeMouse.virtualY);
 +                if (relative.rewarp) {
 +                    if (rclolTraceOn())
 +                        rclolTraceRated(&rclolWarpRewarpChannel, "target=%d,%d from=%d,%d honoured=%d",
 +                                        relative.warpX, relative.warpY, ev->xmotion.x_root, ev->xmotion.y_root,
 +                                        warpsHonoured);
++                    unsigned long serial = NextRequest(_display);
 +                    unsigned queued = [self warpPointerToRootX: relative.warpX y: relative.warpY];
-+                    X11RelativeMouseExpectEcho(&_relativeMouse, relative.warpX, relative.warpY, queued);
++                    if (!X11RelativeMouseExpectEcho(&_relativeMouse, relative.warpX, relative.warpY, queued, serial))
++                        [self suspendRelativeMouse]; /* Allocation failure must not turn an echo into input. */
 +                }
 +                if (!relative.post) {
 +                    if (rclolTraceOn())
@@ -3322,7 +3559,7 @@ index 5ae29bf4..86a647ff 100644
                      mouseEventWithType: type
                                location: pos
                           modifierFlags:
-@@ -1211,28 +1911,49 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1211,28 +1991,58 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                              clickCount: 1
                                  deltaX: deltaX
                                  deltaY: deltaY];
@@ -3357,6 +3594,15 @@ index 5ae29bf4..86a647ff 100644
  
      case LeaveNotify:
          NSLog(@"LeaveNotify");
++        if (_confinedWindow == [window windowHandle] && _confinedWidth > 0 && _confinedHeight > 0) {
++            Window win = [window windowHandle];
++            int cx = ev->xcrossing.x < 0 ? 0 : (ev->xcrossing.x >= _confinedWidth ? _confinedWidth - 1 : ev->xcrossing.x);
++            int cy = ev->xcrossing.y < 0 ? 0 : (ev->xcrossing.y >= _confinedHeight ? _confinedHeight - 1 : ev->xcrossing.y);
++            XWarpPointer(_display, None, win, 0, 0, 0, 0, cx, cy);
++            XFlush(_display);
++            [self updateMouseConfinementForWindow: window];
++            break;
++        }
 +        if (!_relativeMouse.active && ev->xcrossing.detail != NotifyInferior) {
 +            [window setLastKnownCursorPosition:
 +                [window transformPoint: NSMakePoint(ev->xcrossing.x, ev->xcrossing.y)]];
@@ -3374,7 +3620,7 @@ index 5ae29bf4..86a647ff 100644
          NSLog(@"FocusIn");
          if ([delegate attachedSheet]) {
              [[delegate attachedSheet] makeKeyAndOrderFront: delegate];
-@@ -1243,28 +1964,55 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1243,28 +2053,62 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                                   checkForAppDeactivation: NO];
              lastFocusedWindow = nil;
          }
@@ -3403,8 +3649,13 @@ index 5ae29bf4..86a647ff 100644
 +                            (unsigned long) _confinedWindow,
 +                            [NSApp isActive]);
          NSLog(@"FocusOut");
++        /* A key released while focus is elsewhere is never reported; always resync modifiers. */
 +        [self reconcileModifierKeys:NULL window:delegate];
 +        _lastKeySym = 0;
++        /* Focus moved to a child of this window, or this is a PointerRoot pointer crossing: the
++         * window still owns the keyboard, so keep it active and keep the confinement. */
++        if (ev->xfocus.detail == NotifyInferior || ev->xfocus.detail == NotifyPointer)
++            break;
          [delegate platformWindowDeactivated: window
                      checkForAppDeactivation: NO];
          lastFocusedWindow = nil;
@@ -3415,6 +3666,8 @@ index 5ae29bf4..86a647ff 100644
 +        if (_confinedWindow) {
 +            XUngrabPointer(_display, CurrentTime);
 +            _confinedWindow = None;
++            _confinedWidth = 0;
++            _confinedHeight = 0;
 +        }
 +        _otherButtonsDown = 0;
          if (window != nil)
@@ -3432,7 +3685,7 @@ index 5ae29bf4..86a647ff 100644
          O2Rect rect = NSMakeRect(ev->xexpose.x, ev->xexpose.y,
                                   ev->xexpose.width, ev->xexpose.height);
  
-@@ -1301,11 +2049,23 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1301,11 +2145,23 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case UnmapNotify:
@@ -3460,7 +3713,21 @@ index 5ae29bf4..86a647ff 100644
          break;
  
      case MapRequest:
-@@ -1321,6 +2081,7 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1317,10 +2173,21 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+         break;
+ 
+     case ConfigureNotify:
++        if (_relativeMouse.active && ev->xconfigure.window == _relativeWindow) {
++            /* Reconfiguration can make Xorg move a confined pointer by itself. Take a new snapshot
++             * and discard the previous geometry's pending motion/echoes before resuming. */
++            [self suspendRelativeMouse];
++            [self beginRelativeMouseWithWindow: NULL pick: NULL];
++        }
++        if (ev->xconfigure.window == _confinedWindow) {
++            _confinedWidth = ev->xconfigure.width;
++            _confinedHeight = ev->xconfigure.height;
++        }
+         [window frameChanged];
          [delegate platformWindow: window
                      frameChanged: [window frame]
                           didSize: YES];
@@ -3468,7 +3735,7 @@ index 5ae29bf4..86a647ff 100644
          break;
  
      case ConfigureRequest:
-@@ -1344,6 +2105,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1344,6 +2211,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case PropertyNotify:
@@ -3477,7 +3744,7 @@ index 5ae29bf4..86a647ff 100644
          if ([window respondsToSelector: @selector(propertyNotify:)]) {
              [window propertyNotify: &ev->xproperty];
          }
-@@ -1399,7 +2162,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1399,7 +2268,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      default:
@@ -3488,7 +3755,7 @@ index 5ae29bf4..86a647ff 100644
              [self _invalidateRRCache];
              break;
          }
-@@ -1433,6 +2198,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1433,6 +2304,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
      NSLog(@"Request code: %d:%d", errorEvent->request_code,
            errorEvent->minor_code);
      NSLog(@"Error code: %d", errorEvent->error_code);
@@ -3499,12 +3766,12 @@ index 5ae29bf4..86a647ff 100644
      return 0;
  }
  
-@@ -1476,54 +2245,218 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
+@@ -1476,54 +2351,279 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
      return frame;
  }
  
 +/* Moves the X pointer and waits for the server, so the warp's MotionNotify (if any) is already queued on return.
-+ * Returns the number of queued events, the window in which that echo must arrive. */
++ * Returns the number of queued events. Callers capture NextRequest before this method to identify the echo. */
 +- (unsigned) warpPointerToRootX: (int) x y: (int) y {
 +    XWarpPointer(_display, None, DefaultRootWindow(_display), 0, 0, 0, 0, x, y);
 +    XSync(_display, False);
@@ -3533,11 +3800,18 @@ index 5ae29bf4..86a647ff 100644
 +                        _relativeMouse.virtualY, _relativeMouse.physicalX, _relativeMouse.physicalY,
 +                        !_isXwayland || _cursorHidden, (unsigned long) _confinedWindow, rclolRootX, rclolRootY,
 +                        [NSApp isActive]);
++    /* Xorg clips warps to confine_to. Report that same target to the game, otherwise mouseLocation,
++     * button events and the next rewarp disagree at the window edge (including on secondary monitors). */
++    if (_relativeMouse.active && (!_isXwayland || _cursorHidden))
++        X11RelativeMouseClamp(&_relativeMouse, &position.x, &position.y);
 +    int x = X11RelativeMouseWarpCoordinate(position.x), y = X11RelativeMouseWarpCoordinate(position.y);
 +    if (_relativeMouse.active) {
 +        /* CGWarpMouseCursorPosition moves the disassociated cursor without producing a delta: the virtual
 +         * cursor follows and the warp's echo is dropped. Not honoured on Xwayland with a visible cursor. */
-+        X11RelativeMouseWarp(&_relativeMouse, position.x, position.y, [self warpPointerToRootX: x y: y]);
++        unsigned long serial = NextRequest(_display);
++        unsigned queued = [self warpPointerToRootX: x y: y];
++        if (!X11RelativeMouseWarp(&_relativeMouse, position.x, position.y, queued, serial, !_isXwayland || _cursorHidden))
++            [self suspendRelativeMouse];
 +        return;
 +    }
      NSLog(@"Warp to: x=%f, y=%f\n", position.x, position.y);
@@ -3545,8 +3819,8 @@ index 5ae29bf4..86a647ff 100644
 -                 position.x, position.y);
 -    XSync(_display, False);
 +    [self warpPointerToRootX: x y: y];
- }
- 
++}
++
 +/* Confinement preserves absolute motion and edge panning. Relative mode holds
 + * its own grab and is left alone while requested. */
 +- (void) updateMouseConfinementForWindow:(X11Window *)window {
@@ -3558,6 +3832,27 @@ index 5ae29bf4..86a647ff 100644
 +        return;
 +    }
 +    Window win = [window windowHandle];
++    XWindowAttributes attrs;
++    if (!XGetWindowAttributes(_display, win, &attrs)) {
++        if (rclolTraceOn())
++            rclolTraceRated(&rclolConfineChannel, "skip: XGetWindowAttributes failed window=%lu", (unsigned long) win);
++        return;
++    }
++
++    BOOL fullscreen = NO;
++    Atom actual; int format; unsigned long count, remaining; unsigned char *data = NULL;
++    Atom state = XInternAtom(_display, "_NET_WM_STATE", False);
++    Atom fs = XInternAtom(_display, "_NET_WM_STATE_FULLSCREEN", False);
++    if (XGetWindowProperty(_display, win, state, 0, 64, False, XA_ATOM,
++        &actual, &format, &count, &remaining, &data) == Success && format == 32) {
++        for (unsigned long i=0; i<count; ++i) if (((Atom *)data)[i] == fs) fullscreen = YES;
++    }
++    if (data) XFree(data);
++    BOOL rclolEwmhFullscreen = fullscreen;
++
++    /* Only the window that holds keyboard focus may take the pointer. Asking the WM to activate
++     * or focus it from here would fight the user's alt-tab: this runs on every focus, map,
++     * configure and _NET_WM_STATE change. */
 +    Window focus; int revert;
 +    XGetInputFocus(_display, &focus, &revert);
 +    Window ancestor = focus;
@@ -3575,49 +3870,32 @@ index 5ae29bf4..86a647ff 100644
 +                            (unsigned long) _confinedWindow);
 +        return;
 +    }
-+    XWindowAttributes attrs;
-+    if (!XGetWindowAttributes(_display, win, &attrs)) {
-+        if (rclolTraceOn())
-+            rclolTraceRated(&rclolConfineChannel, "skip: XGetWindowAttributes failed window=%lu", (unsigned long) win);
-+        return;
-+    }
-+    BOOL fullscreen = NO;
-+    Atom actual; int format; unsigned long count, remaining; unsigned char *data = NULL;
-+    Atom state = XInternAtom(_display, "_NET_WM_STATE", False);
-+    Atom fs = XInternAtom(_display, "_NET_WM_STATE_FULLSCREEN", False);
-+    if (XGetWindowProperty(_display, win, state, 0, 64, False, XA_ATOM,
-+        &actual, &format, &count, &remaining, &data) == Success && format == 32) {
-+        for (unsigned long i=0; i<count; ++i) if (((Atom *)data)[i] == fs) fullscreen = YES;
-+    }
-+    if (data) XFree(data);
-+    BOOL rclolEwmhFullscreen = fullscreen;
 +    /* League's borderless fullscreen does not set the EWMH fullscreen bit.
 +     * Recognize a borderless window covering one monitor, including monitor 2. */
-+    if (!fullscreen && !([[window delegate] styleMask] & NSTitledWindowMask)) {
++    BOOL borderless = !([[window delegate] styleMask] & NSTitledWindowMask);
++    if (!fullscreen && borderless) {
 +        Window child; int x, y;
 +        XTranslateCoordinates(_display, win, DefaultRootWindow(_display), 0, 0, &x, &y, &child);
-+        XRRScreenResources *resources = XRRGetScreenResourcesCurrent(_display, DefaultRootWindow(_display));
-+        if (resources) {
-+            for (int i=0; i<resources->ncrtc; ++i) {
-+                XRRCrtcInfo *crtc = XRRGetCrtcInfo(_display, resources, resources->crtcs[i]);
-+                if (crtc) {
-+                    if (crtc->mode && abs(x-crtc->x)<=2 && abs(y-crtc->y)<=2 &&
-+                        abs(attrs.width-(int)crtc->width)<=2 && abs(attrs.height-(int)crtc->height)<=2) fullscreen=YES;
-+                    XRRFreeCrtcInfo(crtc);
-+                }
-+            }
-+            XRRFreeScreenResources(resources);
-+        }
++        fullscreen = X11RootRectCoversMonitor(_display, NSMakeRect(x, y, attrs.width, attrs.height));
 +    }
++    /* X11Window owns EWMH requests on frame/style changes. Confinement only observes the
++     * resulting state; issuing another fullscreen request here races WM resize decisions. */
 +    if (!fullscreen || attrs.map_state != IsViewable) {
 +        if (rclolTraceOn())
 +            rclolTraceRated(&rclolConfineChannel, "no confinement window=%lu fullscreen=%d ewmh=%d titled=%d size=%dx%d map_state=%d %s",
 +                            (unsigned long) win, fullscreen, rclolEwmhFullscreen,
 +                            ([[window delegate] styleMask] & NSTitledWindowMask) != 0, attrs.width, attrs.height,
 +                            attrs.map_state, _confinedWindow == win ? "releasing confinement" : "nothing to release");
-+        if (_confinedWindow == win) { XUngrabPointer(_display, CurrentTime); _confinedWindow=None; }
++        if (_confinedWindow == win) {
++            XUngrabPointer(_display, CurrentTime);
++            _confinedWindow = None;
++            _confinedWidth = 0;
++            _confinedHeight = 0;
++        }
 +        return;
 +    }
++    _confinedWidth = attrs.width;
++    _confinedHeight = attrs.height;
 +    if (_confinedWindow == win) {
 +        if (rclolTraceOn())
 +            rclolTraceRated(&rclolConfineChannel, "already confined window=%lu", (unsigned long) win);
@@ -3631,7 +3909,29 @@ index 5ae29bf4..86a647ff 100644
 +        rclolTraceRated(&rclolConfineChannel, "confine window=%lu fullscreen=%d ewmh=%d size=%dx%d XGrabPointer=%d(%s)",
 +                        (unsigned long) win, fullscreen, rclolEwmhFullscreen, attrs.width, attrs.height, status,
 +                        rclolGrabResultName(status));
-+    if (status == GrabSuccess) _confinedWindow=win;
++    /* AlreadyGrabbed means another client holds the pointer: nothing is confined. */
++    if (status == GrabSuccess) {
++        _confinedWindow = win;
++        _confinedWidth = attrs.width;
++        _confinedHeight = attrs.height;
++    }
++}
++
++/* Cache the actual confine_to rectangle, including its root offset. XWarpPointer clips to this
++ * rectangle, not to the primary monitor; refresh on resize/move rather than on every motion. */
++- (BOOL) updateRelativeMouseBounds {
++    XWindowAttributes attrs;
++    Window child;
++    int x, y;
++    if (!XGetWindowAttributes(_display, _relativeWindow, &attrs) ||
++        !XTranslateCoordinates(_display, _relativeWindow, DefaultRootWindow(_display), 0, 0, &x, &y, &child))
++        return NO;
++    _relativeMouse.minX = MAX(0, x);
++    _relativeMouse.minY = MAX(0, y);
++    _relativeMouse.maxX = MIN(DisplayWidth(_display, DefaultScreen(_display)) - 1, x + attrs.width - 1);
++    _relativeMouse.maxY = MIN(DisplayHeight(_display, DefaultScreen(_display)) - 1, y + attrs.height - 1);
++    _relativeMouse.bounded = _relativeMouse.maxX >= _relativeMouse.minX && _relativeMouse.maxY >= _relativeMouse.minY;
++    return _relativeMouse.bounded;
 +}
 +
 +/* Takes the relative-mode pointer grab on the key (else main) window, starting with the virtual cursor at the
@@ -3649,27 +3949,53 @@ index 5ae29bf4..86a647ff 100644
 +    Window win = xwin ? [xwin windowHandle] : None;
 +    if (win == None) {
 +        NSLog(@"Relative mouse mode: no window to grab the pointer for\n");
++        [self suspendRelativeMouse];
 +        return -1;
 +    }
++    Window focus; int revert;
++    XGetInputFocus(_display, &focus, &revert);
++    Window ancestor = focus;
++    while (ancestor != win && ancestor != None && ancestor != PointerRoot && ancestor != DefaultRootWindow(_display)) {
++        Window root, parent, *children = NULL; unsigned count;
++        if (!XQueryTree(_display, ancestor, &root, &parent, &children, &count)) break;
++        if (children) XFree(children);
++        ancestor = parent;
++    }
++    if (ancestor != win) {
++        [self suspendRelativeMouse];
++        return -1; /* FocusIn retries the preserved relative-mode request. */
++    }
++    if (_relativeMouse.active && _relativeWindow == win) return GrabSuccess;
 +    /* FocusChangeMask is not valid in a pointer grab. This grab replaces any confinement grab. */
 +    const unsigned int mask = ButtonPressMask | ButtonReleaseMask | PointerMotionMask;
 +    int result = XGrabPointer(_display, win, False, mask, GrabModeAsync,
 +                              GrabModeAsync, win, None, CurrentTime);
 +    if (result != GrabSuccess) {
 +        NSLog(@"XGrabPointer() failed with error %d for window %lu\n", result, win);
++        [self suspendRelativeMouse];
 +        return result;
 +    }
 +    NSLog(@"XGrabPointer() succeeded for window %lu\n", win);
 +    _confinedWindow = None;
++    _confinedWidth = 0;
++    _confinedHeight = 0;
 +    Window root, child;
-+    int rootX = rclolRootX, rootY = rclolRootY, windowX, windowY;
++    int rootX, rootY, windowX, windowY;
 +    unsigned int state;
++    unsigned long snapshotSerial = NextRequest(_display);
 +    if (!XQueryPointer(_display, win, &root, &child, &rootX, &rootY, &windowX, &windowY, &state)) {
-+        rootX = rclolRootX;
-+        rootY = rclolRootY;
++        XUngrabPointer(_display, CurrentTime);
++        X11RelativeMouseEnd(&_relativeMouse);
++        _relativeWindow = None;
++        return -1; /* Never start relative mode from an uninitialized or stale cache. */
 +    }
 +    X11RelativeMouseBegin(&_relativeMouse, rootX, rootY);
++    _relativeMouse.firstSerial = snapshotSerial;
 +    _relativeWindow = win;
++    if (![self updateRelativeMouseBounds]) {
++        [self suspendRelativeMouse];
++        return -1;
++    }
 +    rclolPointerStamp = 0;
 +    return result;
 +}
@@ -3681,8 +4007,8 @@ index 5ae29bf4..86a647ff 100644
 +    X11RelativeMouseEnd(&_relativeMouse);
 +    _relativeWindow = None;
 +    rclolPointerStamp = 0;
-+}
-+
+ }
+ 
 +/* CGAssociateMouseAndMouseCursorPosition(!doGrab). */
  - (void) grabMouse: (BOOL) doGrab {
 +    BOOL rclolRelativeBefore = _relativeMouse.active;
@@ -3735,6 +4061,8 @@ index 5ae29bf4..86a647ff 100644
 +        _relativeRequested = NO;
 +        _relativeWindow = None;
 +        _confinedWindow = None;
++        _confinedWidth = 0;
++        _confinedHeight = 0;
 +        rclolPointerStamp = 0;
 +        NSWindow *nswin = [NSApp keyWindow];
 +        if (nswin) [self updateMouseConfinementForWindow:(X11Window *)[nswin platformWindow]];
@@ -3949,8 +4277,203 @@ index 0e91a5d1..1e4cec1b 100644
  }
  
  - (void) selectionNotify: (XSelectionEvent *) event {
+diff --git a/AppKit/X11.backend/X11RelativeMouse.h b/AppKit/X11.backend/X11RelativeMouse.h
+new file mode 100644
+index 0000000..31fa646
+--- /dev/null
++++ b/AppKit/X11.backend/X11RelativeMouse.h
+@@ -0,0 +1,189 @@
++/* darling-lol: decision logic for macOS-style relative mouse mode in the X11 backend.
++ *
++ * While CGAssociateMouseAndMouseCursorPosition(false) is in effect, macOS freezes the cursor: physical motion
++ * only produces deltas, events report the frozen cursor position, and CGWarpMouseCursorPosition moves the cursor
++ * without producing a delta. Here the frozen cursor is the "virtual" position (X root coordinates). Core X motion
++ * still moves the real pointer, so deltas are measured against the last physical position, and where the server
++ * honours warps the pointer is warped back to the virtual position after each motion. Every warp (ours or the
++ * application's) is followed by a MotionNotify at its target; those echoes are recognised by request serial
++ * and position and dropped. Warps are synchronous (XSync), so an echo can only be among the events already queued at that moment;
++ * an expected echo expires once that many events have been handled.
++ *
++ * On Xwayland a warp only reaches the compositor while the X cursor is hidden. With a visible cursor the echo
++ * still arrives, but the next real motion reports the unmoved physical pointer, so honoured=false keeps the last
++ * physical position across echoes and never warps back.
++ *
++ * Plain C without X11 or Objective-C dependencies, so tools/test-x11-relative-mouse.c can run it on the host. */
++#ifndef X11_RELATIVE_MOUSE_H
++#define X11_RELATIVE_MOUSE_H
++
++#include <stdbool.h>
++#include <stdlib.h>
++
++#define X11_RELATIVE_MOUSE_INITIAL_ECHOES 8
++
++typedef struct {
++    int x, y;
++    unsigned long serial; /* X request that generated the echo; coordinates alone also match real motion */
++    unsigned remaining; /* X events (of any type) still to be handled before this echo is given up */
++} X11RelativeMouseEcho;
++
++typedef struct {
++    bool active;              /* relative motion handling is on (the pointer grab is held) */
++    double virtualX, virtualY; /* the frozen macOS cursor, X root coordinates */
++    int physicalX, physicalY; /* last physical pointer position, X root coordinates */
++    unsigned long firstSerial; /* ignore motion queued before the initial XQueryPointer snapshot */
++    bool bounded;
++    int minX, minY, maxX, maxY; /* inclusive root coordinates of the confine_to window */
++    unsigned echoCount;
++    unsigned echoCapacity;
++    X11RelativeMouseEcho *echoes; /* oldest first; never discard a pending warp echo on overflow */
++} X11RelativeMouse;
++
++typedef struct {
++    bool post;             /* deliver a mouse moved/dragged event */
++    bool echo;             /* the event was the echo of a warp */
++    double deltaX, deltaY; /* NSEvent convention: positive deltaY is downwards */
++    bool rewarp;           /* warp the pointer back to (warpX, warpY) */
++    int warpX, warpY;
++} X11RelativeMouseMotion;
++
++/* X11 warps take integer coordinates; conversions truncate like the original implicit double-to-int argument. */
++static inline int X11RelativeMouseWarpCoordinate(double value) {
++    return (int) value;
++}
++
++/* Initialize storage to zero before the first Begin; End releases the pending-echo allocation. */
++static inline void X11RelativeMouseBegin(X11RelativeMouse *mouse, int rootX, int rootY) {
++    free(mouse->echoes);
++    mouse->echoes = NULL;
++    mouse->echoCapacity = 0;
++    mouse->firstSerial = 0;
++    mouse->bounded = false;
++    mouse->active = true;
++    mouse->virtualX = rootX;
++    mouse->virtualY = rootY;
++    mouse->physicalX = rootX;
++    mouse->physicalY = rootY;
++    mouse->echoCount = 0;
++}
++
++static inline void X11RelativeMouseEnd(X11RelativeMouse *mouse) {
++    free(mouse->echoes);
++    mouse->echoes = NULL;
++    mouse->echoCapacity = 0;
++    mouse->active = false;
++    mouse->echoCount = 0;
++}
++
++/* Record a warp to (x, y) that was just sent and synced. queuedEvents is the number of X events queued after the
++ * sync; zero means the warp produced no event (the pointer was already there). */
++static inline bool X11RelativeMouseExpectEcho(X11RelativeMouse *mouse, int x, int y, unsigned queuedEvents,
++                                              unsigned long serial) {
++    if (!queuedEvents) return true;
++    if (mouse->echoCount) {
++        X11RelativeMouseEcho *last = &mouse->echoes[mouse->echoCount - 1];
++        if (last->x == x && last->y == y && last->serial == serial) {
++            if (last->remaining < queuedEvents) last->remaining = queuedEvents;
++            return true;
++        }
++    }
++    if (mouse->echoCount == mouse->echoCapacity) {
++        unsigned capacity = mouse->echoCapacity ? mouse->echoCapacity * 2 : X11_RELATIVE_MOUSE_INITIAL_ECHOES;
++        if (capacity <= mouse->echoCapacity) return false;
++        X11RelativeMouseEcho *echoes = realloc(mouse->echoes, (size_t)capacity * sizeof(*echoes));
++        if (!echoes) return false;
++        mouse->echoes = echoes;
++        mouse->echoCapacity = capacity;
++    }
++    mouse->echoes[mouse->echoCount++] = (X11RelativeMouseEcho) {x, y, serial, queuedEvents};
++    return true;
++}
++
++/* CGWarpMouseCursorPosition while relative: the virtual cursor moves to the target; the physical position is
++ * only updated when the echo arrives (and only if the warp was honoured). */
++static inline void X11RelativeMouseClamp(const X11RelativeMouse *mouse, double *x, double *y) {
++    if (!mouse->bounded) return;
++    if (*x < mouse->minX) *x = mouse->minX;
++    if (*x > mouse->maxX) *x = mouse->maxX;
++    if (*y < mouse->minY) *y = mouse->minY;
++    if (*y > mouse->maxY) *y = mouse->maxY;
++}
++
++static inline bool X11RelativeMouseWarp(X11RelativeMouse *mouse, double x, double y, unsigned queuedEvents,
++                                       unsigned long serial, bool warpsHonoured) {
++    if (warpsHonoured) {
++        mouse->virtualX = x;
++        mouse->virtualY = y;
++    }
++    return X11RelativeMouseExpectEcho(mouse, X11RelativeMouseWarpCoordinate(x), X11RelativeMouseWarpCoordinate(y),
++                               queuedEvents, serial);
++}
++
++/* One X event has been handled: age the expected echoes. */
++static inline void X11RelativeMouseTick(X11RelativeMouse *mouse) {
++    unsigned kept = 0;
++    for (unsigned i = 0; i < mouse->echoCount; ++i)
++        if (mouse->echoes[i].remaining > 1) {
++            mouse->echoes[kept] = mouse->echoes[i];
++            mouse->echoes[kept++].remaining--;
++        }
++    mouse->echoCount = kept;
++}
++
++/* A MotionNotify at root position (rootX, rootY) while relative. Ages the expected echoes. */
++static inline X11RelativeMouseMotion X11RelativeMouseHandleMotion(X11RelativeMouse *mouse, int rootX, int rootY,
++                                                                  bool warpsHonoured, unsigned long serial)
++{
++    X11RelativeMouseMotion result = {false, false, 0.0, 0.0, false, 0, 0};
++    if (serial < mouse->firstSerial) {
++        X11RelativeMouseTick(mouse);
++        return result;
++    }
++    for (unsigned i = 0; i < mouse->echoCount; ++i)
++        if (mouse->echoes[i].serial == serial && mouse->echoes[i].x == rootX && mouse->echoes[i].y == rootY) {
++            /* Warps are echoed in order; earlier expected echoes that did not arrive never will. */
++            for (unsigned j = i + 1; j < mouse->echoCount; ++j)
++                mouse->echoes[j - i - 1] = mouse->echoes[j];
++            mouse->echoCount -= i + 1;
++            if (warpsHonoured) {
++                mouse->physicalX = rootX;
++                mouse->physicalY = rootY;
++            }
++            result.echo = true;
++            X11RelativeMouseTick(mouse);
++            return result;
++        }
++    result.deltaX = rootX - mouse->physicalX;
++    result.deltaY = rootY - mouse->physicalY;
++    mouse->physicalX = rootX;
++    mouse->physicalY = rootY;
++    if (!warpsHonoured) {
++        mouse->virtualX = rootX;
++        mouse->virtualY = rootY;
++    }
++    result.post = result.deltaX != 0.0 || result.deltaY != 0.0;
++    int warpX = X11RelativeMouseWarpCoordinate(mouse->virtualX);
++    int warpY = X11RelativeMouseWarpCoordinate(mouse->virtualY);
++    if (warpsHonoured && (rootX != warpX || rootY != warpY)) {
++        /* More physical motion may already be queued before our latest warp. That warp will
++         * re-anchor it; issuing another one for each queued event creates an echo backlog. */
++        bool pending = mouse->echoCount && serial < mouse->echoes[mouse->echoCount - 1].serial;
++        result.rewarp = !pending;
++        result.warpX = warpX;
++        result.warpY = warpY;
++    }
++    X11RelativeMouseTick(mouse);
++    return result;
++}
++
++/* NSEvent deltas for absolute (non-relative) motion between two positions in Cocoa window coordinates, which
++ * are bottom-up while NSEvent's deltaY is positive downwards. */
++static inline void X11AbsoluteMouseDelta(double lastX, double lastY, double x, double y, double *deltaX,
++                                         double *deltaY)
++{
++    *deltaX = x - lastX;
++    *deltaY = lastY - y;
++}
++
++#endif
 diff --git a/AppKit/X11.backend/X11Window.h b/AppKit/X11.backend/X11Window.h
-index bfe3839a..dbc974a0 100644
+index bfe3839a..e8c8828f 100644
 --- a/AppKit/X11.backend/X11Window.h
 +++ b/AppKit/X11.backend/X11Window.h
 @@ -26,7 +26,7 @@
@@ -3962,8 +4485,12 @@ index bfe3839a..dbc974a0 100644
  
  @interface X11Window : CGWindow {
      int _level; // TODO: care about this value
-@@ -49,6 +49,26 @@
+@@ -47,8 +47,30 @@
+     BOOL _mapped;
+     CGPoint _lastMotionPos;
      BOOL _isModal;
++    BOOL _overrideRedirect;
++    BOOL _fullscreenRequested;
      BOOL _isOpaque;
      BOOL _hasShadow;
 +    NSTimer *_remoteFrameTimer;
@@ -3989,7 +4516,7 @@ index bfe3839a..dbc974a0 100644
  
  @public
      XIC _xic;
-@@ -60,9 +80,9 @@
+@@ -60,9 +82,9 @@
  - (Visual *) visual;
  - (Drawable) drawable;
  - (NSPoint) transformPoint: (NSPoint) pos;
@@ -4001,10 +4528,18 @@ index bfe3839a..dbc974a0 100644
  - (void) frameChanged;
  - (void) setLastKnownCursorPosition: (CGPoint) point;
 diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
-index f4925b66..6f653f6d 100644
+index f4925b66..f9dd38cc 100644
 --- a/AppKit/X11.backend/X11Window.m
 +++ b/AppKit/X11.backend/X11Window.m
-@@ -38,6 +38,34 @@
+@@ -23,6 +23,7 @@
+ #import <AppKit/NSPopUpWindow.h>
+ #import <AppKit/NSRaise.h>
+ #import <AppKit/NSWindow.h>
++#import <AppKit/NSScreen.h>
+ #import <Foundation/NSBundle.h>
+ #import <Foundation/NSException.h>
+ #import <Foundation/NSMutableData.h>
+@@ -38,6 +39,34 @@
  #import "X11Window.h"
  #import <X11/Xatom.h>
  #import <X11/Xutil.h>
@@ -4039,7 +4574,7 @@ index f4925b66..6f653f6d 100644
  
  @implementation X11Window
  
-@@ -158,7 +186,7 @@ static NSData *makeWindowIcon() {
+@@ -158,7 +187,7 @@ static NSData *makeWindowIcon() {
      X11Display* x11disp = (X11Display *) [NSDisplay currentDisplay];
      _display = [x11disp display];
  
@@ -4048,23 +4583,26 @@ index f4925b66..6f653f6d 100644
      BOOL isPanel = [delegate isKindOfClass: [NSPanel class]];
      if (isPanel && _styleMask & NSDocModalWindowMask)
          _styleMask = NSBorderlessWindowMask;
-@@ -193,8 +221,13 @@ static NSData *makeWindowIcon() {
+@@ -193,8 +222,16 @@ static NSData *makeWindowIcon() {
  
      XSetWindowAttributes xattr;
      unsigned long xattr_mask;
 -    xattr.override_redirect =
 -            _styleMask == NSBorderlessWindowMask ? True : False;
++    BOOL isGame = X11IsLeagueGameWindow(_display, None, delegate);
++
 +    // A borderless game is still a focusable application window. Leaving it
 +    // override-redirect makes XWayland bypass compositor keyboard activation.
 +    // Menus and nonactivating popups keep their unmanaged behavior.
-+    xattr.override_redirect = _styleMask == NSBorderlessWindowMask &&
++    xattr.override_redirect = !isGame && _styleMask == NSBorderlessWindowMask &&
 +            ([delegate isKindOfClass:[NSMenuWindow class]] ||
 +             [delegate isKindOfClass:[NSPopUpWindow class]] ||
 +             ![delegate canBecomeKeyWindow]) ? True : False;
++    _overrideRedirect = xattr.override_redirect;
      xattr_mask = CWOverrideRedirect | CWColormap;
      xattr.colormap = cmap;
  
-@@ -206,6 +239,12 @@ static NSData *makeWindowIcon() {
+@@ -206,6 +243,12 @@ static NSData *makeWindowIcon() {
              (_visualInfo == NULL) ? CopyFromParent : _visualInfo->visual,
              xattr_mask, &xattr);
  
@@ -4077,19 +4615,146 @@ index f4925b66..6f653f6d 100644
      [self syncDelegateProperties];
  
      Atom atm = XInternAtom(_display, "WM_DELETE_WINDOW", False);
-@@ -266,6 +305,11 @@ static NSData *makeWindowIcon() {
+@@ -217,6 +260,15 @@ static NSData *makeWindowIcon() {
+                             .res_class = (char *) name};
+     XSetClassHint(_display, _window, &classHint);
+ 
++    if (isGame && !(_styleMask & NSTitledWindowMask)) {
++        /* darling-lol: never let the compositor scan out this parent window
++         * directly (bypass=2): Metal/OpenGL draw into a child window, so direct
++         * scanout shows black. EWMH fullscreen is requested in setStyleMask. */
++        unsigned long bypass = 2;
++        XChangeProperty(_display, _window, XInternAtom(_display, "_NET_WM_BYPASS_COMPOSITOR", False),
++                        XA_CARDINAL, 32, PropModeReplace, (unsigned char *)&bypass, 1);
++    }
++
+     XSetWindowBackgroundPixmap(_display, _window, None);
+ 
+     _isModal = [delegate isSheet] || [NSApp modalWindow] == delegate;
+@@ -266,6 +318,13 @@ static NSData *makeWindowIcon() {
  
      [self setWindowIcon];
  
-+    /* Poll the host-visible remote CA frame on the AppKit/main runloop. */
-+    _remoteFrameTimer = [[NSTimer scheduledTimerWithTimeInterval: 1.0 / 60.0
-+        target: self selector: @selector(presentRemoteCAFrame:)
-+        userInfo: nil repeats: YES] retain];
++    /* Chromium windows consume cross-process CA frames. League's native Metal window owns its
++     * drawable; a same-size client surface must never be raised above that drawable. */
++    if (!isGame)
++        _remoteFrameTimer = [[NSTimer scheduledTimerWithTimeInterval: 1.0 / 60.0
++            target: self selector: @selector(presentRemoteCAFrame:)
++            userInfo: nil repeats: YES] retain];
 +
      return self;
  }
  
-@@ -338,7 +382,6 @@ static NSData *makeWindowIcon() {
+@@ -279,24 +338,30 @@ static NSData *makeWindowIcon() {
+     return _styleMask;
+ }
+ 
+-- (void) setStyleMaskInternal: (NSUInteger) mask force: (BOOL) force {
+-    if (force || (mask & NSWindowStyleMaskResizable) !=
+-                         (_styleMask & NSWindowStyleMaskResizable)) {
+-        XSizeHints *sh = XAllocSizeHints();
+-        if (mask & NSWindowStyleMaskResizable) {
+-            // Make resizable
+-            sh->flags = 0;
+-        } else {
+-            // Make non-resizable
+-            sh->flags = PMinSize | PMaxSize;
+-            sh->min_width = sh->max_width = _frame.size.width;
+-            sh->min_height = sh->max_height = _frame.size.height;
+-        }
+-
+-        XSetWMSizeHints(_display, _window, sh, XA_WM_NORMAL_HINTS);
+-        XFree(sh);
++/* A borderless application covering a monitor needs EWMH fullscreen so the
++ * compositor places it above desktop panels. Compare full monitor bounds,
++ * never the work area, and leave unmanaged menus/popups alone. */
++- (BOOL) wantsFullscreenWithStyleMask: (NSUInteger) mask rootFrame: (O2Rect) frame {
++    if (_overrideRedirect || [_delegate isKindOfClass:[NSPanel class]] ||
++        [_delegate isKindOfClass:[NSMenuWindow class]] || [_delegate isKindOfClass:[NSPopUpWindow class]] ||
++        [_delegate isKindOfClass:NSClassFromString(@"NSToolTipWindow")]) return NO;
++    if (mask & NSWindowStyleMaskFullScreen) return YES;
++    if (mask & NSTitledWindowMask) return NO;
++    X11Display *display = (X11Display *) [NSDisplay currentDisplay];
++    for (NSScreen *screen in [display screens]) {
++        if (!NSIsEmptyRect([screen frame]) &&
++            NSEqualRects([display rootRectForFrame: [screen frame]], frame))
++            return YES;
+     }
++    return NO;
++}
+ 
++- (void) requestFullscreen: (BOOL) fullscreen force: (BOOL) force {
++    if (fullscreen) {
++        unsigned long bypass = 2;
++        XChangeProperty(_display, _window, XInternAtom(_display,"_NET_WM_BYPASS_COMPOSITOR",False),
++                        XA_CARDINAL,32,PropModeReplace,(unsigned char *)&bypass,1);
++    }
+     if (!_mapped) {
+         long states[2];
+         int states_cnt = 0;
+@@ -304,7 +369,7 @@ static NSData *makeWindowIcon() {
+             states[states_cnt++] =
+                     (long) XInternAtom(_display, "_NET_WM_STATE_MODAL", False);
+         }
+-        if (mask & NSWindowStyleMaskFullScreen) {
++        if (fullscreen) {
+             states[states_cnt++] = (long) XInternAtom(
+                     _display, "_NET_WM_STATE_FULLSCREEN", False);
+         }
+@@ -312,14 +377,13 @@ static NSData *makeWindowIcon() {
+                         XInternAtom(_display, "_NET_WM_STATE", False), XA_ATOM,
+                         32, PropModeReplace, (const unsigned char *) states,
+                         states_cnt);
+-    } else if (force || ((mask & NSWindowStyleMaskFullScreen) !=
+-                         (_styleMask & NSWindowStyleMaskFullScreen))) {
++    } else if (force || fullscreen != _fullscreenRequested) {
+         XClientMessageEvent event = {0};
+         event.type = ClientMessage;
+         event.window = _window;
+         event.message_type = XInternAtom(_display, "_NET_WM_STATE", False);
+         event.format = 32;
+-        event.data.l[0] = (mask & NSWindowStyleMaskFullScreen) ? 1 : 2;
++        event.data.l[0] = fullscreen ? 1 : 0; /* EWMH ADD / REMOVE, not TOGGLE */
+         event.data.l[1] =
+                 (long) XInternAtom(_display, "_NET_WM_STATE_FULLSCREEN", False);
+         event.data.l[3] = 1;
+@@ -327,6 +391,35 @@ static NSData *makeWindowIcon() {
+                    SubstructureNotifyMask | SubstructureRedirectMask,
+                    (XEvent *) &event);
+     }
++    _fullscreenRequested = fullscreen;
++    XFlush(_display);
++}
++
++- (void) setStyleMaskInternal: (NSUInteger) mask force: (BOOL) force {
++    if (force || (mask & NSWindowStyleMaskResizable) !=
++                         (_styleMask & NSWindowStyleMaskResizable)) {
++        XSizeHints *sh = XAllocSizeHints();
++        if (mask & NSWindowStyleMaskResizable) {
++            // Make resizable
++            sh->flags = 0;
++        } else {
++            if (X11IsLeagueGameWindow(_display, _window, _delegate)) {
++                // A fixed-size window cannot be made EWMH fullscreen by Mutter,
++                // and a stale minimum would block switching to a smaller mode.
++                sh->flags = 0;
++            } else {
++                // Make non-resizable
++                sh->flags = PMinSize | PMaxSize;
++                sh->min_width = sh->max_width = _frame.size.width;
++                sh->min_height = sh->max_height = _frame.size.height;
++            }
++        }
++
++        XSetWMSizeHints(_display, _window, sh, XA_WM_NORMAL_HINTS);
++        XFree(sh);
++    }
++
++    [self requestFullscreen:[self wantsFullscreenWithStyleMask:mask rootFrame:_frame] force:force];
+ }
+ 
+ - (void) setStyleMask: (NSUInteger) mask {
+@@ -338,7 +431,6 @@ static NSData *makeWindowIcon() {
  }
  
  + (void) removeDecorationForWindow: (Window) w onDisplay: (Display *) dpy {
@@ -4097,7 +4762,7 @@ index f4925b66..6f653f6d 100644
      struct {
          unsigned long flags;
          unsigned long functions;
-@@ -358,6 +401,7 @@ static NSData *makeWindowIcon() {
+@@ -358,6 +450,7 @@ static NSData *makeWindowIcon() {
      if (!_mapped) {
          XMapWindow(_display, _window);
          _mapped = YES;
@@ -4105,7 +4770,7 @@ index f4925b66..6f653f6d 100644
      }
  }
  
-@@ -377,15 +421,27 @@ static NSData *makeWindowIcon() {
+@@ -377,15 +470,27 @@ static NSData *makeWindowIcon() {
  - (void) syncDelegateProperties {
      long mask = KeyPressMask | KeyReleaseMask | ExposureMask |
                  StructureNotifyMask | EnterWindowMask | LeaveWindowMask |
@@ -4138,7 +4803,7 @@ index f4925b66..6f653f6d 100644
      // TODO: background color
  }
  
-@@ -393,6 +449,28 @@ static NSData *makeWindowIcon() {
+@@ -393,6 +498,28 @@ static NSData *makeWindowIcon() {
      // This is essentially dealloc; we release our contexts
      // and windows, but unlike dealloc, this method can be called
      // several times, so set everything to nil/NULL/0.
@@ -4167,7 +4832,7 @@ index f4925b66..6f653f6d 100644
      [_context release];
      _context = nil;
  
-@@ -421,6 +499,388 @@ static NSData *makeWindowIcon() {
+@@ -421,6 +548,392 @@ static NSData *makeWindowIcon() {
      }
  }
  
@@ -4184,6 +4849,10 @@ index f4925b66..6f653f6d 100644
 +- (BOOL) presentRemoteCAFrame: (NSTimer *) timer {
 +    static unsigned char *pixels;
 +    static size_t pixelCapacity;
++    /* Slots are selected by dimensions, not by window ownership. A fullscreen client slot can
++     * match the game and create a black presentation child above Metal's X11SubWindow. Keep
++     * the native game renderer authoritative, including calls from openGLFlushBuffer/expose. */
++    if (X11IsLeagueGameWindow(_display, _window, _delegate)) return NO;
 +    if (!_mapped) return NO;
 +    double now = CFAbsoluteTimeGetCurrent();
 +    /* X geometry queries are synchronous round trips. Cache stable targets
@@ -4556,12 +5225,20 @@ index f4925b66..6f653f6d 100644
  - (Window) windowHandle {
      return _window;
  }
-@@ -473,11 +933,20 @@ static NSData *makeWindowIcon() {
+@@ -470,14 +983,32 @@ static NSData *makeWindowIcon() {
+     const char *text = [title cString];
+     XStringListToTextProperty((char **) &text, 1, &prop);
+     XSetWMName(_display, _window, &prop);
++    if (title && [title rangeOfString:@"(TM) Client" options:NSCaseInsensitiveSearch].location != NSNotFound) {
++        [(X11Display *)[NSDisplay currentDisplay] updateMouseConfinementForWindow:self];
++    }
  }
  
  - (void) setFrame: (O2Rect) frame {
 -    frame = [self transformFrame: frame];
 +    frame = [(X11Display *) [NSDisplay currentDisplay] rootRectForFrame: frame];
++    BOOL fullscreen = [self wantsFullscreenWithStyleMask:_styleMask rootFrame:frame];
++    if (!fullscreen) [self requestFullscreen:NO force:NO];
      XMoveResizeWindow(_display, _window, frame.origin.x, frame.origin.y,
                        frame.size.width, frame.size.height);
      [self invalidateContextWithNewSize: frame.size];
@@ -4569,16 +5246,20 @@ index f4925b66..6f653f6d 100644
 +    // Nonresizable windows can be created at 1x1 and enlarged before display.
 +    // Refresh the constraints so a managing compositor sees the current size.
 +    if (!(_styleMask & NSWindowStyleMaskResizable)) {
-+        XSizeHints hints = {0};
-+        hints.flags = PMinSize | PMaxSize;
-+        hints.min_width = hints.max_width = frame.size.width;
-+        hints.min_height = hints.max_height = frame.size.height;
-+        XSetWMSizeHints(_display, _window, &hints, XA_WM_NORMAL_HINTS);
++        if (!X11IsLeagueGameWindow(_display, _window, _delegate)) {
++            XSizeHints hints = {0};
++            hints.flags = PMinSize | PMaxSize;
++            hints.min_width = hints.max_width = frame.size.width;
++            hints.min_height = hints.max_height = frame.size.height;
++            XSetWMSizeHints(_display, _window, &hints, XA_WM_NORMAL_HINTS);
++        }
 +    }
++    if (fullscreen) [self requestFullscreen:YES force:NO];
++    [(X11Display *)[NSDisplay currentDisplay] updateMouseConfinementForWindow:self];
  }
  
  - (void) setHasShadow: (BOOL) value {
-@@ -488,6 +957,25 @@ static NSData *makeWindowIcon() {
+@@ -488,6 +1019,25 @@ static NSData *makeWindowIcon() {
      _level = value;
  }
  
@@ -4604,7 +5285,29 @@ index f4925b66..6f653f6d 100644
  - (void) setOpaque: (BOOL) value {
      _isOpaque = value;
  }
-@@ -559,7 +1047,29 @@ static NSData *makeWindowIcon() {
+@@ -543,6 +1093,21 @@ static NSData *makeWindowIcon() {
+ - (void) makeKey {
+     [self ensureMapped];
+     XRaiseWindow(_display, _window);
++    /* darling-lol: League's game window is managed (not override-redirect), so keyboard focus is
++     * the WM's to give. Ask for activation once when the game makes it key; the WM's focus-stealing
++     * policy still applies, unlike a direct XSetInputFocus. */
++    if (X11IsLeagueGameWindow(_display, _window, _delegate)) {
++        XEvent act = {0};
++        act.xclient.type = ClientMessage;
++        act.xclient.window = _window;
++        act.xclient.message_type = XInternAtom(_display, "_NET_ACTIVE_WINDOW", False);
++        act.xclient.format = 32;
++        act.xclient.data.l[0] = 1; /* source: normal application */
++        act.xclient.data.l[1] = CurrentTime;
++        XSendEvent(_display, DefaultRootWindow(_display), False,
++                   SubstructureRedirectMask | SubstructureNotifyMask, &act);
++        XFlush(_display);
++    }
+ }
+ 
+ - (void) makeMain {
+@@ -559,7 +1124,29 @@ static NSData *makeWindowIcon() {
      XRaiseWindow(_display, _window);
  }
  
@@ -4634,7 +5337,7 @@ index f4925b66..6f653f6d 100644
      Atom wmState = XInternAtom(_display, "_NET_WM_STATE", FALSE);
      Atom hiddenState = XInternAtom(_display, "_NET_WM_STATE_HIDDEN", FALSE);
  
-@@ -615,6 +1125,12 @@ static NSData *makeWindowIcon() {
+@@ -615,6 +1202,12 @@ static NSData *makeWindowIcon() {
  }
  
  - (void) openGLFlushBuffer {
@@ -4647,7 +5350,7 @@ index f4925b66..6f653f6d 100644
      CGLError error;
  
      CGLContextObj prevContext = CGLGetCurrentContext();
-@@ -652,7 +1168,7 @@ static NSData *makeWindowIcon() {
+@@ -652,7 +1245,7 @@ static NSData *makeWindowIcon() {
  }
  
  - (O2Rect) frame {
@@ -4656,7 +5359,7 @@ index f4925b66..6f653f6d 100644
  }
  
  static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
-@@ -666,6 +1182,7 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
+@@ -666,6 +1259,7 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
  }
  
  - (void) frameChanged {
@@ -4664,7 +5367,7 @@ index f4925b66..6f653f6d 100644
      XErrorHandler previousHandler = XSetErrorHandler(ignoreBadWindow);
      @try {
          Window root, parent;
-@@ -710,14 +1227,6 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
+@@ -710,14 +1304,6 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
      [_deviceDictionary addEntriesFromDictionary: entries];
  }
  
@@ -4747,10 +5450,10 @@ index b5ae3a65..6d555f60 100644
  - (NSColor *) blendedColorWithFraction: (CGFloat) fraction
                                 ofColor: (NSColor *) color;
 diff --git a/AppKit/include/AppKit/NSDisplay.h b/AppKit/include/AppKit/NSDisplay.h
-index 8860a087..aec7116d 100644
+index 8860a087..a897e2ce 100644
 --- a/AppKit/include/AppKit/NSDisplay.h
 +++ b/AppKit/include/AppKit/NSDisplay.h
-@@ -22,6 +22,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+@@ -22,15 +22,18 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
  #import <AppKit/NSPasteboard.h>
  #import <CarbonCore/UnicodeUtilities.h>
  #import <Foundation/Foundation.h>
@@ -4758,7 +5461,7 @@ index 8860a087..aec7116d 100644
  
  @class NSColor, NSDraggingManager, NSPrintInfo, NSView, NSSavePanel,
          NSOpenPanel, NSFontTypeface, CGWindow;
-@@ -29,8 +30,10 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ 
  @interface NSDisplay : NSObject {
      NSMutableArray *_eventQueue;
 +    BOOL _cursorHiddenUntilMouseMoves;
@@ -4769,7 +5472,8 @@ index 8860a087..aec7116d 100644
  
  - (NSArray *) screens;
  
-@@ -50,7 +53,9 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+@@ -47,6 +50,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ 
  - (void) hideCursor;
  - (void) unhideCursor;
 +- (void) setCursorHiddenUntilMouseMoves: (BOOL) flag;
@@ -4777,8 +5481,6 @@ index 8860a087..aec7116d 100644
  
  - (id) cursorWithImage: (NSImage *) image hotSpot: (NSPoint) hotSpot;
  - (id) cursorWithName: (NSString *) name;
- - (void) setCursor: (id) cursor;
- 
 @@ -95,6 +100,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
  
  - (NSPoint) mouseLocation;
@@ -5261,7 +5963,7 @@ index db8869c8..6fea5107 100644
 +    CGContextSetTextPosition(c, savedPosition.x, savedPosition.y);
  }
 diff --git a/CoreGraphics/CGDirectDisplay.m b/CoreGraphics/CGDirectDisplay.m
-index e213b066..ea0bc264 100644
+index e213b066..9dc3da02 100644
 --- a/CoreGraphics/CGDirectDisplay.m
 +++ b/CoreGraphics/CGDirectDisplay.m
 @@ -53,6 +53,29 @@ static NSDisplay *currentDisplay(void) {
@@ -9633,6 +10335,7 @@ index 985f77f3..db64f55d 100644
  + (CAMediaTimingFunction *) animationTimingFunction;
 diff --git a/QuartzCore/include/QuartzCore/CATransformLayer.h b/QuartzCore/include/QuartzCore/CATransformLayer.h
 new file mode 100644
+index 00000000..19cd9ea9
 --- /dev/null
 +++ b/QuartzCore/include/QuartzCore/CATransformLayer.h
 @@ -0,0 +1,28 @@
@@ -9664,293 +10367,3 @@ new file mode 100644
 +- (instancetype) init;
 +
 +@end
-diff --git a/AppKit/NSWorkspace.m b/AppKit/NSWorkspace.m
-index ad5e4f9d..dbd997aa 100644
---- a/AppKit/NSWorkspace.m
-+++ b/AppKit/NSWorkspace.m
-@@ -20,9 +20,58 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
- #import <AppKit/NSRaise.h>
- #import <AppKit/NSWorkspace.h>
- #import <Foundation/Foundation.h>
-+#include <dispatch/dispatch.h>
- 
- NSString *const NSWorkspaceApplicationKey = @"NSWorkspaceApplicationKey";
- 
-+/* Electron's shell.openExternal() uses -openURL:configuration:completionHandler: (macOS 10.15)
-+ * with a configured NSWorkspaceOpenConfiguration, so the configuration needs real properties.
-+ * The URL itself is opened by -openURL: (LaunchServices in MacWorkspace). */
-+@interface NSWorkspaceOpenConfiguration () {
-+    BOOL _activates, _hides, _hidesOthers, _addsToRecentItems, _createsNewApplicationInstance;
-+    BOOL _allowsRunningApplicationSubstitution, _forPrinting, _promptsUserIfNeeded, _requiresUniversalLinks;
-+    NSAppleEventDescriptor *_appleEvent;
-+    NSArray *_arguments;
-+    NSDictionary *_environment;
-+    cpu_type_t _architecture;
-+}
-+@end
-+
-+@implementation NSWorkspaceOpenConfiguration
-+@synthesize activates = _activates, hides = _hides, hidesOthers = _hidesOthers;
-+@synthesize addsToRecentItems = _addsToRecentItems, createsNewApplicationInstance = _createsNewApplicationInstance;
-+@synthesize allowsRunningApplicationSubstitution = _allowsRunningApplicationSubstitution;
-+@synthesize forPrinting = _forPrinting, promptsUserIfNeeded = _promptsUserIfNeeded;
-+@synthesize requiresUniversalLinks = _requiresUniversalLinks;
-+@synthesize appleEvent = _appleEvent, arguments = _arguments, environment = _environment;
-+@synthesize architecture = _architecture;
-++ (instancetype) configuration {
-+    NSWorkspaceOpenConfiguration *c = [[[self alloc] init] autorelease];
-+    c->_activates = YES;
-+    c->_addsToRecentItems = YES;
-+    c->_allowsRunningApplicationSubstitution = YES;
-+    return c;
-+}
-+- (id) copyWithZone: (NSZone *) zone {
-+    NSWorkspaceOpenConfiguration *c = [[[self class] allocWithZone: zone] init];
-+    c->_activates = _activates; c->_hides = _hides; c->_hidesOthers = _hidesOthers;
-+    c->_addsToRecentItems = _addsToRecentItems;
-+    c->_createsNewApplicationInstance = _createsNewApplicationInstance;
-+    c->_allowsRunningApplicationSubstitution = _allowsRunningApplicationSubstitution;
-+    c->_forPrinting = _forPrinting; c->_promptsUserIfNeeded = _promptsUserIfNeeded;
-+    c->_requiresUniversalLinks = _requiresUniversalLinks; c->_architecture = _architecture;
-+    c->_appleEvent = [_appleEvent retain];
-+    c->_arguments = [_arguments copy]; c->_environment = [_environment copy];
-+    return c;
-+}
-+- (void) dealloc {
-+    [_appleEvent release];
-+    [_arguments release];
-+    [_environment release];
-+    [super dealloc];
-+}
-+@end
-+
- NSString *const NSWorkspaceWillPowerOffNotification =
-         @"NSWorkspaceWillPowerOffNotification";
- 
-@@ -161,6 +210,24 @@ NSNotificationName NSWorkspaceWillUnmountNotification = @"NSWorkspaceWillUnmount
-     return 0;
- }
- 
-+- (void) openURL: (NSURL *) url
-+        configuration: (NSWorkspaceOpenConfiguration *) configuration
-+        completionHandler: (void (^)(id application, NSError *error)) completionHandler
-+{
-+    // Opening may wait on another process; keep it off the caller's thread.
-+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-+        BOOL opened = [self openURL: url];
-+        if (completionHandler != NULL) {
-+            NSError *error = nil;
-+            if (!opened)
-+                error = [NSError errorWithDomain: NSCocoaErrorDomain code: 256 userInfo: nil];
-+            dispatch_async(dispatch_get_main_queue(), ^{
-+                completionHandler(nil, error);
-+            });
-+        }
-+    });
-+}
-+
- - (BOOL) selectFile: (NSString *) path
-         inFileViewerRootedAtPath: (NSString *) rootedAtPath
- {
-@@ -317,16 +384,3 @@ NSNotificationName NSWorkspaceWillUnmountNotification = @"NSWorkspaceWillUnmount
- }
- 
- @end
--
--static dispatch_once_t _initOnceNsWorkspaceOpenConfig;
--static NSWorkspaceOpenConfiguration* _singletonNsWorkspaceOpenConfig;
--
--@implementation NSWorkspaceOpenConfiguration
--+ (instancetype)configuration {
--    dispatch_once(&_initOnceNsWorkspaceOpenConfig, ^{
--        _singletonNsWorkspaceOpenConfig = [[NSWorkspaceOpenConfiguration alloc] init];
--    });
--    return _singletonNsWorkspaceOpenConfig;
--}
--
--@end
-\ No newline at end of file
-diff --git a/AppKit/NSGeometryTrace.h b/AppKit/NSGeometryTrace.h
-new file mode 100644
-index 00000000..a51a9241
---- /dev/null
-+++ b/AppKit/NSGeometryTrace.h
-@@ -0,0 +1,25 @@
-+/* Opt-in runtime geometry diagnostics; never log view text or client data. */
-+#ifndef DARLING_NS_GEOMETRY_TRACE_H
-+#define DARLING_NS_GEOMETRY_TRACE_H
-+#include <stdarg.h>
-+#include <stdio.h>
-+#include <stdlib.h>
-+
-+static inline void DarlingGeometryTrace(const char *format, ...) {
-+    if (!getenv("DARLING_UI_GEOMETRY_TRACE"))
-+        return;
-+    va_list args, copy;
-+    va_start(args, format);
-+    va_copy(copy, args);
-+    vfprintf(stderr, format, args);
-+    va_end(args);
-+    /* Clients may redirect stderr to a non-log descriptor. Keep a copy in
-+     * the guest's temporary directory so their resize events remain visible. */
-+    FILE *file = fopen("/tmp/darling-ui-geometry.log", "a");
-+    if (file) {
-+        vfprintf(file, format, copy);
-+        fclose(file);
-+    }
-+    va_end(copy);
-+}
-+#endif
-diff --git a/AppKit/X11.backend/X11RelativeMouse.h b/AppKit/X11.backend/X11RelativeMouse.h
-new file mode 100644
-index 00000000..7fc39cc4
---- /dev/null
-+++ b/AppKit/X11.backend/X11RelativeMouse.h
-@@ -0,0 +1,147 @@
-+/* darling-lol: decision logic for macOS-style relative mouse mode in the X11 backend.
-+ *
-+ * While CGAssociateMouseAndMouseCursorPosition(false) is in effect, macOS freezes the cursor: physical motion
-+ * only produces deltas, events report the frozen cursor position, and CGWarpMouseCursorPosition moves the cursor
-+ * without producing a delta. Here the frozen cursor is the "virtual" position (X root coordinates). Core X motion
-+ * still moves the real pointer, so deltas are measured against the last physical position, and where the server
-+ * honours warps the pointer is warped back to the virtual position after each motion. Every warp (ours or the
-+ * application's) is followed by a MotionNotify at its target; those echoes are recognised by position and
-+ * dropped. Warps are synchronous (XSync), so an echo can only be among the events already queued at that moment;
-+ * an expected echo expires once that many events have been handled.
-+ *
-+ * On Xwayland a warp only reaches the compositor while the X cursor is hidden. With a visible cursor the echo
-+ * still arrives, but the next real motion reports the unmoved physical pointer, so honoured=false keeps the last
-+ * physical position across echoes and never warps back.
-+ *
-+ * Plain C without X11 or Objective-C dependencies, so tools/test-x11-relative-mouse.c can run it on the host. */
-+#ifndef X11_RELATIVE_MOUSE_H
-+#define X11_RELATIVE_MOUSE_H
-+
-+#include <stdbool.h>
-+
-+#define X11_RELATIVE_MOUSE_MAX_ECHOES 8
-+
-+typedef struct {
-+    int x, y;
-+    unsigned remaining; /* X events (of any type) still to be handled before this echo is given up */
-+} X11RelativeMouseEcho;
-+
-+typedef struct {
-+    bool active;              /* relative motion handling is on (the pointer grab is held) */
-+    double virtualX, virtualY; /* the frozen macOS cursor, X root coordinates */
-+    int physicalX, physicalY; /* last physical pointer position, X root coordinates */
-+    unsigned echoCount;
-+    X11RelativeMouseEcho echoes[X11_RELATIVE_MOUSE_MAX_ECHOES]; /* oldest first */
-+} X11RelativeMouse;
-+
-+typedef struct {
-+    bool post;             /* deliver a mouse moved/dragged event */
-+    bool echo;             /* the event was the echo of a warp */
-+    double deltaX, deltaY; /* NSEvent convention: positive deltaY is downwards */
-+    bool rewarp;           /* warp the pointer back to (warpX, warpY) */
-+    int warpX, warpY;
-+} X11RelativeMouseMotion;
-+
-+/* X11 warps take integer coordinates; conversions truncate like the original implicit double-to-int argument. */
-+static inline int X11RelativeMouseWarpCoordinate(double value) {
-+    return (int) value;
-+}
-+
-+static inline void X11RelativeMouseBegin(X11RelativeMouse *mouse, int rootX, int rootY) {
-+    mouse->active = true;
-+    mouse->virtualX = rootX;
-+    mouse->virtualY = rootY;
-+    mouse->physicalX = rootX;
-+    mouse->physicalY = rootY;
-+    mouse->echoCount = 0;
-+}
-+
-+static inline void X11RelativeMouseEnd(X11RelativeMouse *mouse) {
-+    mouse->active = false;
-+    mouse->echoCount = 0;
-+}
-+
-+/* Record a warp to (x, y) that was just sent and synced. queuedEvents is the number of X events queued after the
-+ * sync; zero means the warp produced no event (the pointer was already there). */
-+static inline void X11RelativeMouseExpectEcho(X11RelativeMouse *mouse, int x, int y, unsigned queuedEvents) {
-+    if (!queuedEvents) return;
-+    if (mouse->echoCount) {
-+        X11RelativeMouseEcho *last = &mouse->echoes[mouse->echoCount - 1];
-+        if (last->x == x && last->y == y) {
-+            if (last->remaining < queuedEvents) last->remaining = queuedEvents;
-+            return;
-+        }
-+    }
-+    if (mouse->echoCount == X11_RELATIVE_MOUSE_MAX_ECHOES) {
-+        for (unsigned i = 1; i < mouse->echoCount; ++i)
-+            mouse->echoes[i - 1] = mouse->echoes[i];
-+        mouse->echoCount--;
-+    }
-+    mouse->echoes[mouse->echoCount++] = (X11RelativeMouseEcho) {x, y, queuedEvents};
-+}
-+
-+/* CGWarpMouseCursorPosition while relative: the virtual cursor moves to the target; the physical position is
-+ * only updated when the echo arrives (and only if the warp was honoured). */
-+static inline void X11RelativeMouseWarp(X11RelativeMouse *mouse, double x, double y, unsigned queuedEvents) {
-+    mouse->virtualX = x;
-+    mouse->virtualY = y;
-+    X11RelativeMouseExpectEcho(mouse, X11RelativeMouseWarpCoordinate(x), X11RelativeMouseWarpCoordinate(y),
-+                               queuedEvents);
-+}
-+
-+/* One X event has been handled: age the expected echoes. */
-+static inline void X11RelativeMouseTick(X11RelativeMouse *mouse) {
-+    unsigned kept = 0;
-+    for (unsigned i = 0; i < mouse->echoCount; ++i)
-+        if (mouse->echoes[i].remaining > 1) {
-+            mouse->echoes[kept] = mouse->echoes[i];
-+            mouse->echoes[kept++].remaining--;
-+        }
-+    mouse->echoCount = kept;
-+}
-+
-+/* A MotionNotify at root position (rootX, rootY) while relative. Ages the expected echoes. */
-+static inline X11RelativeMouseMotion X11RelativeMouseHandleMotion(X11RelativeMouse *mouse, int rootX, int rootY,
-+                                                                  bool warpsHonoured)
-+{
-+    X11RelativeMouseMotion result = {false, false, 0.0, 0.0, false, 0, 0};
-+    for (unsigned i = 0; i < mouse->echoCount; ++i)
-+        if (mouse->echoes[i].x == rootX && mouse->echoes[i].y == rootY) {
-+            /* Warps are echoed in order; earlier expected echoes that did not arrive never will. */
-+            for (unsigned j = i + 1; j < mouse->echoCount; ++j)
-+                mouse->echoes[j - i - 1] = mouse->echoes[j];
-+            mouse->echoCount -= i + 1;
-+            if (warpsHonoured) {
-+                mouse->physicalX = rootX;
-+                mouse->physicalY = rootY;
-+            }
-+            result.echo = true;
-+            X11RelativeMouseTick(mouse);
-+            return result;
-+        }
-+    result.deltaX = rootX - mouse->physicalX;
-+    result.deltaY = rootY - mouse->physicalY;
-+    mouse->physicalX = rootX;
-+    mouse->physicalY = rootY;
-+    result.post = result.deltaX != 0.0 || result.deltaY != 0.0;
-+    int warpX = X11RelativeMouseWarpCoordinate(mouse->virtualX);
-+    int warpY = X11RelativeMouseWarpCoordinate(mouse->virtualY);
-+    if (warpsHonoured && (rootX != warpX || rootY != warpY)) {
-+        result.rewarp = true;
-+        result.warpX = warpX;
-+        result.warpY = warpY;
-+    }
-+    X11RelativeMouseTick(mouse);
-+    return result;
-+}
-+
-+/* NSEvent deltas for absolute (non-relative) motion between two positions in Cocoa window coordinates, which
-+ * are bottom-up while NSEvent's deltaY is positive downwards. */
-+static inline void X11AbsoluteMouseDelta(double lastX, double lastY, double x, double y, double *deltaX,
-+                                         double *deltaY)
-+{
-+    *deltaX = x - lastX;
-+    *deltaY = lastY - y;
-+}
-+
-+#endif
