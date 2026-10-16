@@ -14,4 +14,9 @@ chmod 1777 "$HOME/.darling/private/tmp"
 python3 build/runtime/tools/stop-darling-runtime.py
 sh build/runtime/tools/install-riot-presentation-runtime.sh
 sh build/runtime/tools/install-riot-gpu-runtime.sh
+# darling-lol perf: build and install optimized libc/libc++/libplatform.
+if [ -f build/runtime/tools/build-riot-libs-runtime.sh ]; then
+  sh build/runtime/tools/build-riot-libs-runtime.sh
+  python3 build/runtime/tools/install-riot-libs-runtime.py
+fi
 python3 build/runtime/tools/install-darling-system-profiler.py

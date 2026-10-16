@@ -4,7 +4,10 @@ import ast,json,re,subprocess,sys
 from pathlib import Path
 from common import ROOT
 subprocess.run([sys.executable,str(ROOT/'scripts/configure.py')],check=True)
-files=subprocess.check_output(['git','-C',str(ROOT),'ls-files','-z']).decode().split('\0')
+try:
+    files=subprocess.check_output(['git','-C',str(ROOT),'ls-files','-z'],stderr=subprocess.DEVNULL).decode().split('\0')
+except Exception:
+    files=[str(p.relative_to(ROOT)) for p in ROOT.rglob('*') if p.is_file() and not any(part.startswith('.') or part in ['build','__pycache__'] for part in p.relative_to(ROOT).parts)]
 errors=[]
 secret_patterns=[r'gh[pousr]_[A-Za-z0-9]{30,}',r'AKIA[0-9A-Z]{16}',r'eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}',r'-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----']
 for name in filter(None,files):

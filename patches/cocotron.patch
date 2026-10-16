@@ -2255,21 +2255,22 @@ index 5ae29bf4..358e606b 100644
  - (void) _enableDetectableAutoRepeat {
      int major = XkbMajorVersion, minor = XkbMinorVersion;
      XkbStateRec state;
-@@ -536,12 +603,52 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -536,12 +603,53 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
      return &layout->layout;
  }
  
 +/* darling-lol: the game asks for the pointer position, the pressed buttons and the modifier state about a thousand
 + * times per second. Each answer was a synchronous X round trip (XQueryPointer / XkbGetState) that puts the main thread
-+ * to sleep until XWayland replies; while the mouse moves they dominated the slow frames. Reuse a reply for 8 ms, keep it
++ * to sleep until XWayland replies; while the mouse moves they dominated the slow frames. Reuse a reply for 1 ms, keep it
 + * current from the input events themselves (a motion event carries position and button state), and drop it on every
 + * button, key, crossing or focus event so the next question after a state change is always asked for real. */
 +#include <mach/mach_time.h>
++#include <poll.h>
 +static BOOL rclolFresh(uint64_t *stamp) {
 +    static mach_timebase_info_data_t tb;
 +    if (tb.denom == 0) mach_timebase_info(&tb);
 +    uint64_t now = mach_absolute_time();
-+    if (*stamp != 0 && (now - *stamp) * tb.numer / tb.denom < 8000000ULL) return YES;
++    if (*stamp != 0 && (now - *stamp) * tb.numer / tb.denom < 1000000ULL) return YES;
 +    *stamp = now;
 +    return NO;
 +}
@@ -2344,7 +2345,7 @@ index 5ae29bf4..358e606b 100644
  }
  
  - (void) setWindow: (id) window forID: (XID) i {
-@@ -962,20 +1072,82 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -962,20 +1072,85 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  {
  #ifndef DARLING
      [[NSRunLoop currentRunLoop] addInputSource: _inputSource forMode: mode];
@@ -2419,12 +2420,15 @@ index 5ae29bf4..358e606b 100644
 +                slice = next > now ? next - now : 0;
 +        }
 +        if (result == nil && slice > 0) {
-+            /* Keep this polling deadline independent of Mach wait timers. */
-+            struct { long seconds, nanoseconds; } delay = {
-+                0, (long)(slice * 1000000000.0)
-+            };
++            /* darling-lol perf: poll() the X11 connection fd instead of blind
++             * nanosleep.  This wakes within <0.1ms when an input event arrives
++             * on the socket, eliminating up to 4ms of input latency jitter. */
++            int xfd = ConnectionNumber(_display);
++            struct pollfd pfd = { .fd = xfd, .events = POLLIN };
++            int timeout_ms = (int)(slice * 1000.0);
++            if (timeout_ms < 1) timeout_ms = 1;
 +            extern long __lolsys_syscall(long, long, long, long, long, long, int);
-+            __lolsys_syscall((long)&delay, 0, 0, 0, 0, 0, 35 /* Linux nanosleep */);
++            __lolsys_syscall((long)&pfd, 1, timeout_ms, 0, 0, 0, 7 /* Linux poll */);
 +        }
 +    }
 +    return result;
@@ -2625,7 +2629,7 @@ index 5ae29bf4..358e606b 100644
          default:
              type = NSOtherMouseUp;
          }
-@@ -1151,11 +1430,13 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1151,14 +1430,24 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                          clickCount: clickCount
                              deltaX: 0.0
                              deltaY: deltaY];
@@ -2640,6 +2644,17 @@ index 5ae29bf4..358e606b 100644
              // NSLog(@"MotionNotify, x=%d, y=%d, xroot=%d, yroot=%d\n",
              // ev->xmotion.x, ev->xmotion.y, ev->xmotion.x_root,
              // ev->xmotion.y_root);
++            /* darling-lol perf: drain pending MotionNotify events for this
++             * window from the X11 queue so we only process the latest position. */
++            while (XCheckTypedWindowEvent(_display, ev->xmotion.window, MotionNotify, ev))
++                ;
++            rclolRootX = ev->xmotion.x_root;
++            rclolRootY = ev->xmotion.y_root;
++            rclolPointerState = ev->xmotion.state;
++            rclolPointerStamp = mach_absolute_time();
+ 
+             CGPoint lastMotionPos = [window mouseLocationOutsideOfEventStream];
+             pos = [window
 @@ -1195,14 +1476,29 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  
 +            [self pointerMoved];
