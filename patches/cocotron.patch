@@ -7105,7 +7105,7 @@ index 5ad375f8..c8e83814 100644
 +- (BOOL) _treeHasAnimations;
  @end
 diff --git a/QuartzCore/CAMetalDrawable.mm b/QuartzCore/CAMetalDrawable.mm
-index d6f86b31..2bdc198d 100644
+index d6f86b31..20e4e88b 100644
 --- a/QuartzCore/CAMetalDrawable.mm
 +++ b/QuartzCore/CAMetalDrawable.mm
 @@ -31,6 +31,13 @@
@@ -7221,7 +7221,7 @@ index d6f86b31..2bdc198d 100644
  //
  // helper classes
  //
-@@ -129,13 +226,39 @@ public:
+@@ -129,27 +226,109 @@ public:
  // texture
  //
  
@@ -7250,9 +7250,26 @@ index d6f86b31..2bdc198d 100644
 +// (see reportGpuDeviceMatch) -- so they take the first allowed DEVICE_LOCAL type,
 +// falling back to first fit. Without framebufferOnly they still need host-visible,
 +// coherent memory and keep first fit. On RADV type 0 is DEVICE_LOCAL: unchanged.
++//
++// League sets framebufferOnly=NO, so its drawables lived in system RAM and crossed
++// PCIe every frame. framebufferOnly=NO lets Metal sample or blit the texture; it
++// does not make it CPU-mapped, and nothing here maps either image (replaceRegion
++// aborts, getBytes is a stub), so those drawables are placed like framebufferOnly
++// ones too. On the RX 6600 that gave about 20 FPS more in a practice-tool fight and
++// the same FPS when idle. The guest flag file /tmp/metal-no-drawable-vram restores
++// host-visible memory. Read once per process, when the first drawable is created.
 +static size_t findSharedMemory(const VkMemoryRequirements& reqs, std::shared_ptr<Indium::PrivateDevice> device, bool framebufferOnly, bool internal) {
++	static const bool drawableVram = access("/tmp/metal-no-drawable-vram", F_OK) != 0;
++	static std::once_flag logSwitch;
++	std::call_once(logSwitch, []() {
++		appendDeviceLog(std::string("drawable-vram=") + (drawableVram ? "on" : "off (file:/tmp/metal-no-drawable-vram)"));
++	});
++
++	const bool vramDrawable = !framebufferOnly && drawableVram;
++	const bool gpuOnly = framebufferOnly || vramDrawable;
 +	const auto& memory = device->memoryProperties();
 +	size_t firstFit = SIZE_MAX;
++	size_t legacy = SIZE_MAX; // the choice before 2026-10-16 (host-visible drawables), for the log
  	size_t targetIndex = SIZE_MAX;
  
 -	for (size_t i = 0; i < device->memoryProperties().memoryTypeCount; ++i) {
@@ -7265,7 +7282,15 @@ index d6f86b31..2bdc198d 100644
  			continue;
  		}
  
-@@ -147,9 +270,42 @@ static size_t findSharedMemory(const VkMemoryRequirements& reqs, std::shared_ptr
+-		if (!framebufferOnly && (type.propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) == 0) {
+-			continue;
++		const bool hostVisible = (type.propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0 && (type.propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
++		if (legacy == SIZE_MAX && (framebufferOnly || hostVisible)) {
++			legacy = i;
+ 		}
+ 
+-		if (!framebufferOnly && (type.propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) == 0) {
++		if (!gpuOnly && !hostVisible) {
  			continue;
  		}
  
@@ -7276,9 +7301,9 @@ index d6f86b31..2bdc198d 100644
 +			firstFit = i;
 +		}
 +
-+		if (!framebufferOnly || (type.propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0) {
++		// no early exit: the scan continues to find the legacy choice for the log
++		if (targetIndex == SIZE_MAX && (!gpuOnly || (type.propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0)) {
 +			targetIndex = i;
-+			break;
 +		}
 +	}
 +
@@ -7289,29 +7314,34 @@ index d6f86b31..2bdc198d 100644
 +		return targetIndex;
 +	}
 +
-+	// Once per (image, framebufferOnly, type) in the process, in Indium's device log.
-+	static std::atomic<uint64_t> logged[2] {};
-+	const size_t bit = ((internal ? 2u : 0u) + (framebufferOnly ? 1u : 0u)) * 32 + targetIndex;
++	// Once per (image, storage, type) in the process, in Indium's device log.
++	static std::atomic<uint64_t> logged[3] {};
++	const size_t storage = vramDrawable ? 2 : (framebufferOnly ? 1 : 0);
++	const size_t bit = ((internal ? 3u : 0u) + storage) * 32 + targetIndex;
 +	const uint64_t mask = uint64_t(1) << (bit & 63);
 +	if ((logged[bit >> 6].load(std::memory_order_relaxed) & mask) == 0 && (logged[bit >> 6].fetch_or(mask) & mask) == 0) {
 +		auto describe = [&](size_t index) {
++			if (index == SIZE_MAX) {
++				return std::string("none");
++			}
 +			const auto& type = memory.memoryTypes[index];
 +			return std::to_string(index) + " flags=" + memoryFlagsString(type.propertyFlags)
 +				+ " heap=" + std::to_string(type.heapIndex)
 +				+ " heapDeviceLocal=" + ((memory.memoryHeaps[type.heapIndex].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) ? "yes" : "no");
 +		};
++		static const char* storageNames[] = { "hostVisible", "framebufferOnly", "vram" };
 +		char typeBits[16];
 +		snprintf(typeBits, sizeof(typeBits), "0x%08x", (unsigned) reqs.memoryTypeBits);
 +		appendDeviceLog(std::string("memory alloc kind=") + (internal ? "drawable-internal" : "drawable")
-+			+ " storage=" + (framebufferOnly ? "framebufferOnly" : "hostVisible")
++			+ " storage=" + storageNames[storage]
 +			+ " typeBits=" + typeBits
 +			+ " type=" + describe(targetIndex)
-+			+ " firstFit=" + describe(firstFit)
-+			+ (targetIndex != firstFit ? " changed=yes" : " changed=no"));
++			+ " firstFit=" + describe(legacy)
++			+ (targetIndex != legacy ? " changed=yes" : " changed=no"));
  	}
  
  	return targetIndex;
-@@ -161,6 +317,11 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
+@@ -161,6 +340,11 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
  	_pixelFormat(pixelFormat),
  	_framebufferOnly(framebufferOnly)
  {
@@ -7323,7 +7353,7 @@ index d6f86b31..2bdc198d 100644
  	//
  	// create the images
  	//
-@@ -219,7 +380,7 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
+@@ -219,7 +403,7 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
  
  	DynamicVK::vkGetImageMemoryRequirements(_device->device(), _image, &reqs);
  
@@ -7332,7 +7362,7 @@ index d6f86b31..2bdc198d 100644
  
  	if (targetIndex == SIZE_MAX) {
  		throw std::runtime_error("No suitable memory region found for image");
-@@ -242,7 +403,7 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
+@@ -242,7 +426,7 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
  
  	DynamicVK::vkGetImageMemoryRequirements(_device->device(), _internalImage, &reqs);
  
@@ -7341,7 +7371,7 @@ index d6f86b31..2bdc198d 100644
  
  	if (targetIndex == SIZE_MAX) {
  		throw std::runtime_error("No suitable memory region found for internal image");
-@@ -380,16 +541,26 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
+@@ -380,16 +564,26 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
  		abort();
  	}
  
@@ -7370,7 +7400,7 @@ index d6f86b31..2bdc198d 100644
  
  	GLint prevTex = 0;
  	glGetIntegerv(GL_TEXTURE_BINDING_2D, &prevTex);
-@@ -401,10 +572,36 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
+@@ -401,10 +595,36 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
  	glTextureParameteri(_textureID, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
  	glTextureParameteri(_textureID, GL_TEXTURE_WRAP_S, GL_REPEAT);
  	glTextureParameteri(_textureID, GL_TEXTURE_WRAP_T, GL_REPEAT);
@@ -7409,7 +7439,7 @@ index d6f86b31..2bdc198d 100644
  
  	glBindTexture(GL_TEXTURE_2D, prevTex);
  };
-@@ -605,35 +802,16 @@ void CAMetalDrawableActual::present() {
+@@ -605,35 +825,16 @@ void CAMetalDrawableActual::present() {
  			return;
  		}
  
@@ -7420,16 +7450,16 @@ index d6f86b31..2bdc198d 100644
 -		if (_semaphore) {
 -			int fd = -1;
 -			VkSemaphoreGetFdInfoKHR info {};
--
--			info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR;
--			info.semaphore = _semaphore->semaphore;
--			info.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
 +        // present() may run on the deferred encoding worker. The window's
 +        // EGL context remains current on the main thread, so attempting to
 +        // import a semaphore here fails and leaks the exported syncobj FD.
 +        // Import it in synchronizeRender(), with the compositor context
 +        // current, immediately before the GPU-side wait.
  
+-			info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR;
+-			info.semaphore = _semaphore->semaphore;
+-			info.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+-
 -			if (DynamicVK::vkGetSemaphoreFdKHR(_semaphore->device->device(), &info, &fd) != VK_SUCCESS) {
 -				// TODO
 -				abort();
@@ -7451,7 +7481,7 @@ index d6f86b31..2bdc198d 100644
  	}
  }
  
-@@ -702,9 +880,46 @@ void CAMetalDrawableActual::reset() {
+@@ -702,9 +903,46 @@ void CAMetalDrawableActual::reset() {
  };
  
  void CAMetalDrawableActual::synchronizeRender() {

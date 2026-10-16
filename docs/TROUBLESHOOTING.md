@@ -193,7 +193,7 @@ The log also lists the selected device's memory heaps and types, and one line th
 [MetalDevice] pid=… memory alloc kind=texture storage=private typeBits=0x… type=1 flags=0x1(DEVICE_LOCAL) heap=0 heapDeviceLocal=yes firstFit=0 flags=0x0(none) heap=1 heapDeviceLocal=no changed=yes
 ```
 
-Resources only the GPU uses (`private`, `memoryless`, and `framebufferOnly` drawables) take the first allowed `DEVICE_LOCAL` type. Before 2026-10-16 they took the first allowed type (`firstFit`), which on NVIDIA can be system RAM; `changed=yes` marks where the two differ. `shared` and `managed` resources keep the first host-visible type. On the RX 6600 (RADV) type 0 is `DEVICE_LOCAL`, so nothing changes there.
+Resources only the GPU uses (`private`, `memoryless`, and drawables, including League's `framebufferOnly`-off ones unless `/tmp/metal-no-drawable-vram` exists) take the first allowed `DEVICE_LOCAL` type. Before 2026-10-16 they took the first allowed type (`firstFit`), which on NVIDIA can be system RAM; `changed=yes` marks where the two differ. `shared` and `managed` resources keep the first host-visible type. On the RX 6600 (RADV) type 0 is `DEVICE_LOCAL`, so nothing changes there.
 
 The first import of a drawable into the presenting OpenGL context, and the first semaphore import, are logged too; later ones only when they fail (at most five):
 
