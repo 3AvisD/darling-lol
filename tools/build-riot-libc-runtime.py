@@ -100,9 +100,8 @@ def compile_command(target_folder, source, object_path):
                 skip = True
                 continue
             cleaned.append(token)
-        if "-O2" not in cleaned:
-            cleaned.append("-O2")
-            cleaned.append("-fno-strict-aliasing")
+        cleaned = [t for t in cleaned if t not in ("-g", "-O0", "-O1", "-O2")]
+        cleaned.extend(["-O3", "-march=native", "-mtune=native", "-fno-strict-aliasing", "-fomit-frame-pointer"])
         return cleaned
     return None
 
