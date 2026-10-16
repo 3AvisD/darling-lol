@@ -7131,7 +7131,7 @@ index 5ad375f8..c8e83814 100644
 +- (BOOL) _treeHasAnimations;
  @end
 diff --git a/QuartzCore/CAMetalDrawable.mm b/QuartzCore/CAMetalDrawable.mm
-index d6f86b31..20e4e88b 100644
+index d6f86b31..687f05d5 100644
 --- a/QuartzCore/CAMetalDrawable.mm
 +++ b/QuartzCore/CAMetalDrawable.mm
 @@ -31,6 +31,13 @@
@@ -7148,7 +7148,7 @@ index d6f86b31..20e4e88b 100644
  namespace DynamicVK = Indium::DynamicVK;
  
  static void reportGLErrors(void) {
-@@ -50,8 +57,98 @@ static void reportGLErrors(void) {
+@@ -50,8 +57,111 @@ static void reportGLErrors(void) {
  namespace Indium::DynamicVK {
  	static DynamicFunction<PFN_vkGetSemaphoreFdKHR> vkGetSemaphoreFdKHR("vkGetSemaphoreFdKHR");
  	static DynamicFunction<PFN_vkGetMemoryFdKHR> vkGetMemoryFdKHR("vkGetMemoryFdKHR");
@@ -7244,10 +7244,23 @@ index d6f86b31..20e4e88b 100644
 +	});
 +}
 +
++// The internal image is shared with OpenGL as linear memory because of a Mesa bug with
++// optimal tiling on AMD. NVIDIA's proprietary GL rejects GL_LINEAR_TILING_EXT
++// (GL_INVALID_VALUE), leaving the texture optimal and its storage import failing, which
++// shows as a black window. Only NVIDIA's own driver takes the optimal path; the check
++// runs once, with the presenting GL context current.
++static bool interopUsesLinearTiling() {
++	static const bool linear = []() {
++		const GLubyte* vendor = glGetString(GL_VENDOR);
++		return !(vendor && strstr(reinterpret_cast<const char*>(vendor), "NVIDIA"));
++	}();
++	return linear;
++}
++
  //
  // helper classes
  //
-@@ -129,27 +226,109 @@ public:
+@@ -129,27 +239,109 @@ public:
  // texture
  //
  
@@ -7367,7 +7380,7 @@ index d6f86b31..20e4e88b 100644
  	}
  
  	return targetIndex;
-@@ -161,6 +340,11 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
+@@ -161,6 +353,11 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
  	_pixelFormat(pixelFormat),
  	_framebufferOnly(framebufferOnly)
  {
@@ -7379,7 +7392,16 @@ index d6f86b31..20e4e88b 100644
  	//
  	// create the images
  	//
-@@ -219,7 +403,7 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
+@@ -195,7 +392,7 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
+ 	// some drivers (e.g. AMD's drivers) don't play nice when sharing
+ 	// Vulkan images and OpenGL textures with optimal tiling
+ 	// (https://gitlab.freedesktop.org/mesa/mesa/-/issues/7657)
+-	imgInfo.tiling = VK_IMAGE_TILING_LINEAR;
++	imgInfo.tiling = interopUsesLinearTiling() ? VK_IMAGE_TILING_LINEAR : VK_IMAGE_TILING_OPTIMAL;
+ 
+ 	VkExternalMemoryImageCreateInfo extMemInfo {};
+ 
+@@ -219,7 +416,7 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
  
  	DynamicVK::vkGetImageMemoryRequirements(_device->device(), _image, &reqs);
  
@@ -7388,7 +7410,7 @@ index d6f86b31..20e4e88b 100644
  
  	if (targetIndex == SIZE_MAX) {
  		throw std::runtime_error("No suitable memory region found for image");
-@@ -242,7 +426,7 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
+@@ -242,7 +439,7 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
  
  	DynamicVK::vkGetImageMemoryRequirements(_device->device(), _internalImage, &reqs);
  
@@ -7397,7 +7419,7 @@ index d6f86b31..20e4e88b 100644
  
  	if (targetIndex == SIZE_MAX) {
  		throw std::runtime_error("No suitable memory region found for internal image");
-@@ -380,16 +564,26 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
+@@ -380,31 +577,70 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
  		abort();
  	}
  
@@ -7426,7 +7448,14 @@ index d6f86b31..20e4e88b 100644
  
  	GLint prevTex = 0;
  	glGetIntegerv(GL_TEXTURE_BINDING_2D, &prevTex);
-@@ -401,10 +595,36 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
+ 
+ 	glCreateTextures(GL_TEXTURE_2D, 1, &_textureID);
+ 	reportGLErrors();
+-	glTextureParameteri(_textureID, GL_TEXTURE_TILING_EXT, GL_LINEAR_TILING_EXT /*GL_OPTIMAL_TILING_EXT*/);
++	if (interopUsesLinearTiling()) {
++		glTextureParameteri(_textureID, GL_TEXTURE_TILING_EXT, GL_LINEAR_TILING_EXT);
++	}
+ 	glTextureParameteri(_textureID, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
  	glTextureParameteri(_textureID, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
  	glTextureParameteri(_textureID, GL_TEXTURE_WRAP_S, GL_REPEAT);
  	glTextureParameteri(_textureID, GL_TEXTURE_WRAP_T, GL_REPEAT);
@@ -7454,10 +7483,11 @@ index d6f86b31..20e4e88b 100644
 +		glGetTextureParameteriv(_textureID, GL_TEXTURE_TILING_EXT, &tiling);
 +		const GLenum queryError = glGetError();
 +		char line[512];
-+		snprintf(line, sizeof(line), "drawable GL import%s dedicated=%s size=%llu %dx%d memoryType=%zu tiling=linear glTiling=%s"
++		snprintf(line, sizeof(line), "drawable GL import%s dedicated=%s size=%llu %dx%d memoryType=%zu vkTiling=%s glTiling=%s"
 +			" dedicated_error=0x%x import_error=0x%x setup_error=0x%x storage_error=0x%x query_error=0x%x%s",
 +			first ? " (first)" : "", dedicatedReadBack == GL_TRUE ? "yes" : (dedicatedReadBack == -1 ? "unknown" : "no"),
 +			(unsigned long long) reqs.size, (int) _size.width, (int) _size.height, targetIndex,
++			interopUsesLinearTiling() ? "linear" : "optimal",
 +			tiling == GL_LINEAR_TILING_EXT ? "linear" : (tiling == GL_OPTIMAL_TILING_EXT ? "optimal" : "unknown"),
 +			dedicatedError, importError, setupError, storageError, queryError, failed ? " FAILED" : " ok");
 +		appendDeviceLog(line);
@@ -7465,7 +7495,7 @@ index d6f86b31..20e4e88b 100644
  
  	glBindTexture(GL_TEXTURE_2D, prevTex);
  };
-@@ -605,35 +825,16 @@ void CAMetalDrawableActual::present() {
+@@ -605,35 +841,16 @@ void CAMetalDrawableActual::present() {
  			return;
  		}
  
@@ -7507,7 +7537,7 @@ index d6f86b31..20e4e88b 100644
  	}
  }
  
-@@ -702,9 +903,46 @@ void CAMetalDrawableActual::reset() {
+@@ -702,9 +919,46 @@ void CAMetalDrawableActual::reset() {
  };
  
  void CAMetalDrawableActual::synchronizeRender() {
