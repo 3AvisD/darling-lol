@@ -2307,7 +2307,7 @@ index 18189404..c683f96a 100644
 +- (NSRect) frameForRootRect: (NSRect) rect;
  @end
 diff --git a/AppKit/X11.backend/X11Display.m b/AppKit/X11.backend/X11Display.m
-index 5ae29bf4..dc3fa95e 100644
+index 5ae29bf4..580386b4 100644
 --- a/AppKit/X11.backend/X11Display.m
 +++ b/AppKit/X11.backend/X11Display.m
 @@ -48,12 +48,271 @@
@@ -3593,7 +3593,7 @@ index 5ae29bf4..dc3fa95e 100644
          NSLog(@"FocusIn");
          if ([delegate attachedSheet]) {
              [[delegate attachedSheet] makeKeyAndOrderFront: delegate];
-@@ -1243,28 +2033,74 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1243,28 +2033,61 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                                   checkForAppDeactivation: NO];
              lastFocusedWindow = nil;
          }
@@ -3621,21 +3621,8 @@ index 5ae29bf4..dc3fa95e 100644
 +                            rclolFocusDetailName(ev->xfocus.detail), _relativeRequested, _relativeMouse.active,
 +                            (unsigned long) _confinedWindow,
 +                            [NSApp isActive]);
-+        if (ev->xfocus.detail == NotifyPointer || ev->xfocus.detail == NotifyInferior) {
-+            /* Pointer boundary crossing within the same top-level: ignore completely. */
-+            break;
-+        }
-+        if (ev->xfocus.mode == NotifyGrab || ev->xfocus.mode == NotifyUngrab) {
-+            /* A window manager grab (e.g. Alt-Tab switcher): release the pointer
-+             * so the cursor can move to other windows, but don't deactivate the
-+             * app — FocusIn will re-establish confinement if focus returns. */
-+            [self suspendRelativeMouse];
-+            if (_confinedWindow) {
-+                XUngrabPointer(_display, CurrentTime);
-+                _confinedWindow = None;
-+                _confinedWidth = 0;
-+                _confinedHeight = 0;
-+            }
++        if (ev->xfocus.detail == NotifyPointer || ev->xfocus.detail == NotifyInferior || ev->xfocus.mode == NotifyGrab || ev->xfocus.mode == NotifyUngrab) {
++            /* Pointer boundary crossing or grab transition in XWayland: do NOT release confinement or deactivate window */
 +            break;
 +        }
          NSLog(@"FocusOut");
@@ -3670,7 +3657,7 @@ index 5ae29bf4..dc3fa95e 100644
          O2Rect rect = NSMakeRect(ev->xexpose.x, ev->xexpose.y,
                                   ev->xexpose.width, ev->xexpose.height);
  
-@@ -1301,11 +2137,23 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1301,11 +2124,23 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case UnmapNotify:
@@ -3698,7 +3685,7 @@ index 5ae29bf4..dc3fa95e 100644
          break;
  
      case MapRequest:
-@@ -1317,10 +2165,15 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1317,10 +2152,15 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case ConfigureNotify:
@@ -3714,7 +3701,7 @@ index 5ae29bf4..dc3fa95e 100644
          break;
  
      case ConfigureRequest:
-@@ -1344,6 +2197,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1344,6 +2184,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case PropertyNotify:
@@ -3723,7 +3710,7 @@ index 5ae29bf4..dc3fa95e 100644
          if ([window respondsToSelector: @selector(propertyNotify:)]) {
              [window propertyNotify: &ev->xproperty];
          }
-@@ -1399,7 +2254,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1399,7 +2241,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      default:
@@ -3734,7 +3721,7 @@ index 5ae29bf4..dc3fa95e 100644
              [self _invalidateRRCache];
              break;
          }
-@@ -1433,6 +2290,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1433,6 +2277,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
      NSLog(@"Request code: %d:%d", errorEvent->request_code,
            errorEvent->minor_code);
      NSLog(@"Error code: %d", errorEvent->error_code);
@@ -3745,7 +3732,7 @@ index 5ae29bf4..dc3fa95e 100644
      return 0;
  }
  
-@@ -1476,54 +2337,286 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
+@@ -1476,54 +2324,285 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
      return frame;
  }
  
@@ -3791,8 +3778,8 @@ index 5ae29bf4..dc3fa95e 100644
 -                 position.x, position.y);
 -    XSync(_display, False);
 +    [self warpPointerToRootX: x y: y];
- }
- 
++}
++
 +/* Confinement preserves absolute motion and edge panning. Relative mode holds
 + * its own grab and is left alone while requested. */
 +- (void) updateMouseConfinementForWindow:(X11Window *)window {
@@ -3875,24 +3862,23 @@ index 5ae29bf4..dc3fa95e 100644
 +            unsigned long bypass = 2;
 +            XChangeProperty(_display, win, XInternAtom(_display, "_NET_WM_BYPASS_COMPOSITOR", False),
 +                            XA_CARDINAL, 32, PropModeReplace, (unsigned char *)&bypass, 1);
++            /* Ensure window is marked active in Mutter so top bar is hidden and pointer is confined */
++            Atom activeAtom = XInternAtom(_display, "_NET_ACTIVE_WINDOW", False);
++            XClientMessageEvent act = {0};
++            act.type = ClientMessage;
++            act.window = win;
++            act.message_type = activeAtom;
++            act.format = 32;
++            act.data.l[0] = 1;
++            act.data.l[1] = CurrentTime;
++            XSendEvent(_display, DefaultRootWindow(_display), False,
++                       SubstructureNotifyMask | SubstructureRedirectMask,
++                       (XEvent *)&act);
++            XRaiseWindow(_display, win);
++            XSetInputFocus(_display, win, RevertToPointerRoot, CurrentTime);
++            XFlush(_display);
++            if (getenv("RCLOL_INPUT_TRACE")) fprintf(stderr,"CONFINEMENT promoted to EWMH FULLSCREEN and ACTIVE for window %lu\n",win);
 +        }
-+
-+        /* Ensure window is marked active in Mutter so top bar is hidden and pointer is confined */
-+        Atom activeAtom = XInternAtom(_display, "_NET_ACTIVE_WINDOW", False);
-+        XClientMessageEvent act = {0};
-+        act.type = ClientMessage;
-+        act.window = win;
-+        act.message_type = activeAtom;
-+        act.format = 32;
-+        act.data.l[0] = 1;
-+        act.data.l[1] = CurrentTime;
-+        XSendEvent(_display, DefaultRootWindow(_display), False,
-+                   SubstructureNotifyMask | SubstructureRedirectMask,
-+                   (XEvent *)&act);
-+        XRaiseWindow(_display, win);
-+        XSetInputFocus(_display, win, RevertToPointerRoot, CurrentTime);
-+        XFlush(_display);
-+        if (getenv("RCLOL_INPUT_TRACE")) fprintf(stderr,"CONFINEMENT promoted to EWMH FULLSCREEN and ACTIVE for window %lu\n",win);
 +    }
 +
 +    /* Check focus to determine whether mouse confinement should be active. */
@@ -3942,8 +3928,8 @@ index 5ae29bf4..dc3fa95e 100644
 +        _confinedWidth = attrs.width;
 +        _confinedHeight = attrs.height;
 +    }
-+}
-+
+ }
+ 
 +/* Takes the relative-mode pointer grab on the key (else main) window, starting with the virtual cursor at the
 + * current pointer position. Returns the XGrabPointer result, or -1 without a window. */
 +- (int) beginRelativeMouseWithWindow: (NSWindow **) outWindow pick: (const char **) outPick {
