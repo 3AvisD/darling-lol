@@ -56,6 +56,20 @@ The installer fetcher no longer treats a missing archive `Info.plist` or the inf
 
 There is also a separate known compatibility gap: native LaunchAgent watch registration can return HTTP 409 after the League install path is accepted, leaving the download idle. A historical inspector hook handles this and interrupted `pending_verify` states in 28 mock cases, but that hook is disabled in normal launches and excluded from the manual workflow. There is no verified runtime-only replacement for that handoff in this snapshot. Do not assume the native permission and launcher fixes resolve every idle Install case, or enable debugger/API automation to work around it.
 
+## Riot closes after a network lookup is cancelled
+
+Two local crashes were traced to `CFNetwork::_HostCancel` calling `CFRetain(NULL)`.
+`CFHostCancelInfoResolution` scheduled its cancellation callback with an empty
+context, so processing that source triggered `SIGTRAP` in CoreFoundation and
+terminated RiotClientServices. The UI helpers then exited as a consequence.
+
+The CFNetwork patch supplies the host and retains it until the cancellation source
+is invalidated. The standalone `riot-cfhost-cancel-check` reproduces the old trap
+and passes 100 cancellations with the fix, including releasing the caller's host
+reference before callback delivery. This establishes the cancellation fix; a long
+Riot session still needs confirmation. With both clients and the game closed,
+run `./scripts/update.sh` to install it, then `sh scripts/run.sh`.
+
 ## UI crashes after a button opens an external link
 
 LaunchServices dereferenced a nullable error-output pointer in six paths. The patch checks the pointer itself and populates supplied outputs; the standalone regression covers missing handlers and null outputs. Electron opens LaunchServices through an absolute CoreServices subframework path, so the paired installer also replaces that binary in the stopped guest prefix. Updating only `RuntimeFrameworks/LaunchServices.framework` can leave the crash unfixed.
