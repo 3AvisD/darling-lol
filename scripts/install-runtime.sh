@@ -5,6 +5,8 @@ repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo"
 python3 scripts/configure.py
 if [ -d build/venv/bin ]; then PATH="$repo/build/venv/bin:$PATH"; export PATH; fi
+# A server killed by the base install leaves a stale .init.pid that makes darling shell fail.
+python3 build/runtime/tools/ensure-darling-runtime.py
 # Initialize the normal user-owned prefix before installing overrides.
 darling shell /usr/bin/true
 # The prefix has no /private/tmp of its own, so the guest falls through to the root-owned
@@ -20,7 +22,7 @@ if [ -f build/runtime/tools/build-riot-libs-runtime.sh ]; then
   python3 build/runtime/tools/install-riot-libs-runtime.py
 fi
 python3 build/runtime/tools/install-darling-system-profiler.py
-# darling-lol: install GNOME application launcher and icon.
-if [ -f build/runtime/tools/riot-desktop-entry.py ]; then
-  python3 build/runtime/tools/riot-desktop-entry.py || true
-fi
+# Every guest process loads these overlays; refuse a set the compiler broke (check-darwin-tlv-calls.py).
+find "$HOME/.darling/Users/$(id -un)/RuntimeLibraries" "$HOME/.darling/Users/$(id -un)/RuntimeFrameworks" \
+  -type f ! -name '*.before-*' ! -name '*.rt-*' ! -name '*.llvm*' -size +4k -print0 |
+  xargs -0 python3 build/runtime/tools/check-darwin-tlv-calls.py

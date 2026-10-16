@@ -173,7 +173,7 @@ StartupNotify=false
                 target_desktop_dirs.append(d)
     except Exception:
         pass
-    for cand in [HOST_HOME / "Desktop", HOST_HOME / "Asztal"]:
+    for cand in [HOST_HOME / "Desktop"]:
         if cand.is_dir() and cand not in target_desktop_dirs:
             target_desktop_dirs.append(cand)
 

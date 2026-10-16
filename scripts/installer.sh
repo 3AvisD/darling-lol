@@ -20,5 +20,4 @@ if [ ! -d "$prefix/Users/Shared/Riot Games/Riot Client.app/Contents/MacOS" ]; th
  echo "$prefix/Users/<guest user>/Library/Logs/Riot Games/Install League of Legends $region/Launcher" >&2
  exit 1
 fi
-python3 build/runtime/tools/riot-desktop-entry.py || true
 exec sh scripts/run.sh

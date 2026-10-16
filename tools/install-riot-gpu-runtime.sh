@@ -34,6 +34,8 @@ python3 tools/stop-darling-runtime.py
 # Host fileports own SCM_RIGHTS descriptors and must die with their last sender.
 if sudo -n true 2>/dev/null; then
   sudo make -C "$project_dir/build/darling-src/build/src/external/darlingserver" install -j12
+else
+  echo 'Skipped the darlingserver install (needs sudo); the base install already ships it: sudo cmake --install build/darling-src/build' >&2
 fi
 # Electron's window-visibility correction lives in the AppKit overlay
 # (NSWindow -occlusionState, cocotron.patch); no Riot binary is modified here.

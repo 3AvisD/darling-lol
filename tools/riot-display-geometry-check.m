@@ -111,7 +111,7 @@ int main(void) {
     assert(relative->virtualX == 3940 && relative->virtualY == 1010);
     NSPoint location = [d mouseLocation];
     assert(location.x == 100 && location.y == 1960);
-    X11RelativeMouseMotion motion = X11RelativeMouseHandleMotion(relative,3907,1009,false);
+    X11RelativeMouseMotion motion = X11RelativeMouseHandleMotion(relative,3907,1009,false,NextRequest([d display]));
     assert(motion.deltaX == 7 && motion.deltaY == 9);
     X11RelativeMouseEnd(relative);
     assert(CGWarpMouseCursorPosition(CGPointMake(100,200)) == 0);

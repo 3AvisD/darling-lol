@@ -156,6 +156,20 @@ A separate multi-window path stopped the active async presenter when another dif
 - **Prebuilt Swift file contains Git LFS pointer text:** install Git LFS and fetch the original upstream assets; pointer text is not a usable library.
 - **Submodule fetch stops with no output right after `src/external/sqlite`:** the next submodule is `src/external/swift`, whose pinned `.lfsconfig` points at the retired `git-lfs.darlinghq.org`. The checkout is blocked on that host, not on sqlite. `prepare.py` redirects that submodule's LFS requests to GitHub. To finish a fetch that was interrupted before any patches were applied, run `git -C build/darling-src -c lfs.url=https://github.com/darlinghq/darling-swift.git/info/lfs submodule update --init --recursive --progress`, then re-run `./scripts/build.sh`. Do not run that submodule update once `prepare.py` has applied patches: it resets every submodule working tree to the pinned revision and discards the patches.
 
+## launchd crashes at boot after changing compiler flags
+
+`darling shell` fails with `Error connecting to shellspawn` and `/tmp/lolsig.log` shows `LOLSIGFAIL pid=1 sig=11 code=1 addr=0x0` in `memmove`, called from `snprintf` in libkqueue's `epoll_event_dump`. The binaries were tuned for AMD Zen: clang 23 with `-mtune=znver*` (also selected by `-march=native` or `-mtune=native` on Zen) loads a thread-local variable's descriptor into a register other than `%rdi`, but dyld's `tlv_get_addr` reads `%rdi`, so every `__thread` and `thread_local` access returns NULL. Rebuild with `-mtune=generic` (the default in `scripts/build.sh` and the overlay builders), and check any binary with:
+
+```sh
+python3 tools/check-darwin-tlv-calls.py <binary>...
+```
+
+It prints each thread-local access that calls its thunk without the descriptor in `%rdi` and exits 1. A plain `darling shell` boot does not load the `RuntimeLibraries` overlays; to boot the way the launcher does, run `env DYLD_LIBRARY_PATH=/Users/<user>/RuntimeLibraries DYLD_FRAMEWORK_PATH=/Users/<user>/RuntimeFrameworks darling shell /usr/bin/true`.
+
+## Base install refuses to continue while Darling is not running
+
+`sudo cmake --install` prints `Darling currently running for <user>, shutting it down...` several times and then `Darling launchd PID … remains alive after shutdown`. A guest launchd outlived its darlingserver, so `darling shutdown` sees no container to stop. `python3 build/runtime/tools/ensure-darling-runtime.py` stops such a launchd (your own, only when no darlingserver runs); `scripts/run.sh` and `scripts/install-runtime.sh` run it too.
+
 ## Lower fight FPS than Windows
 
 The game code itself runs natively under Darling: the x86-64 slice of the universal binary executes unchanged, picks its instruction-set paths with `cpuid` on the real CPU, and sizes its worker pool from the real logical CPU count. What differs from Windows is the path around it. Every Metal call goes through Objective-C, the Metal wrapper, Indium and Vulkan instead of a native Direct3D driver, and kernel services go through the emulation and darlingserver. In an ARAM fight the game's own code now takes most of a frame; see [status](STATUS.md#game-fps-2026-10-1314) for measurements.
@@ -232,7 +246,7 @@ The X11 backend previously called `XSync` after every cursor-shape update, waiti
 
 A later input trace showed League setting the cursor about 190 times and unhiding it about 100 times per second, each time sending the same cursor to the X server. The backend now skips the update when the window already has that cursor. The effect on latency has not been measured.
 
-The backend's relative mouse mode (`CGAssociateMouseAndMouseCursorPosition(false)`) previously warped the pointer to the window center, treated the game's own cursor warps as motion and reported `deltaY` upside down. It now follows macOS: the cursor stays where it is, events carry the physical motion as deltas (positive `deltaY` downwards, also for ordinary motion), the game's warps move the cursor without a delta, and `+[NSEvent mouseLocation]` returns that cursor. On Xwayland a warp takes effect only while the cursor is hidden, so with a visible cursor the pointer is not held in place. `tools/test-x11-relative-mouse.c` checks this logic on the host (`cc tools/test-x11-relative-mouse.c && ./a.out` after `scripts/prepare.py`). League on the tested Hyprland setup never enters this mode, so it has not been confirmed in game.
+The backend's relative mouse mode (`CGAssociateMouseAndMouseCursorPosition(false)`) previously warped the pointer to the window center, treated the game's own cursor warps as motion and reported `deltaY` upside down. It now follows macOS: the cursor stays where it is, events carry the physical motion as deltas (positive `deltaY` downwards, also for ordinary motion), the game's warps move the cursor without a delta, and `+[NSEvent mouseLocation]` returns that cursor. On Xwayland a warp takes effect only while the cursor is hidden, so with a visible cursor the pointer is not held in place. `python3 tools/riot-input-offline-check.py` checks the shipped patch on the host without fetching Darling. Add `--xvfb /path/to/Xvfb` to exercise real Xorg protocol on an isolated virtual display; it never uses your desktop display. For Xorg/XLibre (issue #17), relative capture now starts from a fresh `XQueryPointer` snapshot and ignores older queued motion. Warp echoes match both their X request serial and position, so a real motion crossing the anchor cannot be mistaken for an echo. Application warp targets are clipped to the grabbed window in root coordinates, including on a secondary monitor; events, `mouseLocation`, and rewarps share that target. Queued motion before a pending warp does not generate another rewarp. A failed pointer query leaves relative capture suspended, and focus loss releases the grab until the window receives keyboard focus again. Host regression tests cover these paths, but League on the tested Hyprland setup never enters this mode; in-game confirmation on XLibre is still required.
 
 For a manual comparison, keep the scene, FPS cap, display refresh and compositor settings the same. Record whether the delay affects the cursor itself, camera movement, or actions after clicking, and compare the in-game VSync setting on and off. Include the desktop/compositor, X11 or Xwayland session, GPU/driver, monitor refresh and fullscreen/windowed mode in the report. Do not automate game input. The fullscreen cursor-shape problem below is a separate known symptom.
 
@@ -247,3 +261,11 @@ render {
 ```
 
 `hyprctl keyword render:direct_scanout 0` applies it until Hyprland restarts.
+
+### Black layer over a running Metal game
+
+The X11 Chromium presenter searches shared Core Animation frame slots by surface size. Native League game windows now bypass that presenter, so a same-size client frame cannot create a presentation child over the game's Metal drawable. This also disables the remote-frame polling timer for the game while preserving Chromium client presentation.
+
+`tools/riot-remote-frame-ownership-check.m` exercises the cached-frame path without creating a display or window. `tools/build-riot-x11-runtime.py` builds this probe. For an unidentified overlay, `python3 tools/trace-riot-windows.py --output build/riot-window-trace.jsonl` passively records Riot/League windows, including unmanaged windows and child stacking, for one hour. It requires the host `python-xlib` package and does not send input.
+
+If a black fullscreen game has only its normal Metal child and becomes visible after removing and restoring fullscreen, inspect the initial fullscreen transition. Automatic fullscreen now requires the window to cover an active monitor, so temporary 1x1 startup windows and ordinary windowed sizes are not promoted. Explicit Cocoa fullscreen requests are preserved. `riot-fullscreen-geometry-check` (built by the X11 builder) checks the policy against active XRandR monitor geometry using only read requests; the next game launch is still required to validate the startup sequence.

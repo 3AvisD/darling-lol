@@ -12,9 +12,12 @@ python3 scripts/prepare.py
 # darling-lol perf: inject -O3 and -march=native even with empty build type,
 # so the base Darling runtime is not compiled at -O0.  The empty build type
 # is required by objc4's debug-ness macro check.
+# -mtune=generic, not native: clang 23 tuning for AMD Zen (znver*) passes the thread-local
+# variable descriptor in the wrong register on Darwin targets, so every __thread access
+# returns NULL (launchd crashed in libkqueue's epoll_event_dump).
 cmake -S build/darling-src -B build/darling-src/build -G 'Unix Makefiles' \
   -DCMAKE_BUILD_TYPE= -DTARGET_i386=OFF -DCMAKE_INSTALL_PREFIX=/usr/local -DENABLE_METAL=ON \
-  -DCMAKE_C_FLAGS="-O3 -march=native -mtune=native -pipe" \
-  -DCMAKE_CXX_FLAGS="-O3 -march=native -mtune=native -pipe"
+  -DCMAKE_C_FLAGS="-O3 -march=native -mtune=generic -pipe" \
+  -DCMAKE_CXX_FLAGS="-O3 -march=native -mtune=generic -pipe"
 cmake --build build/darling-src/build --parallel "${JOBS:-$(nproc)}"
 echo 'Build complete. Install the base runtime with: sudo cmake --install build/darling-src/build'
