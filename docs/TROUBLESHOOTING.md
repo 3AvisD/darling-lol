@@ -222,6 +222,14 @@ A non-zero error or `FAILED` means the frames cannot reach the window. Before 20
 
 These are host settings, not game settings. Run on AC power, and use a performance power profile (`powerprofilesctl set performance`, or `asusctl profile -P Performance` on ASUS laptops). On the tested desktop the game is limited mostly by its own main thread on the CPU, not by the GPU (see [status](STATUS.md#game-fps-2026-10-1314)), so laptop CPU power limits matter as much as the GPU choice.
 
+## Mouse latency despite good FPS
+
+[Issue #10](https://github.com/lucannez64/darling-lol/issues/10) reports mouse latency with FPS comparable to Windows. FPS alone does not measure input-to-display latency, and the report does not yet identify which stage adds the delay.
+
+The X11 backend previously called `XSync` after every cursor-shape update, waiting for an X server reply on the input thread. It now uses `XFlush` to send the change immediately without waiting. This removes an avoidable round trip during cursor updates. A local manual retest on 2026-10-16 found that the mouse problem no longer occurred with VSync enabled. Input-to-display latency has not been measured, and confirmation from the original reporter is still pending. Rebuild and install with `./scripts/update.sh` after exiting the game and both clients.
+
+For a manual comparison, keep the scene, FPS cap, display refresh and compositor settings the same. Record whether the delay affects the cursor itself, camera movement, or actions after clicking, and compare the in-game VSync setting on and off. Include the desktop/compositor, X11 or Xwayland session, GPU/driver, monitor refresh and fullscreen/windowed mode in the report. Do not automate game input. The fullscreen cursor-shape problem below is a separate known symptom.
+
 ## Cursor stops changing shape in fullscreen
 
 On Hyprland the game's cursor can keep its first shape (for example, it never switches to the attack cursor) until you leave and re-enter fullscreen. Darling sends every change to the X server; what freezes the shape on screen is Hyprland's direct scanout of the fullscreen Xwayland window. Turn it off in `hyprland.conf`:
