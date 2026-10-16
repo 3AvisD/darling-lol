@@ -8,6 +8,7 @@ guest_home="${RIOT_GUEST_HOME:-$HOME/.darling@GUEST_HOME@}"
 make -C "$build_dir/src/external/xnu/darling/src/libsystem_kernel" system_kernel -j8
 make -C "$build_dir/src/external/libplatform" platform -j8
 make -C "$build_dir/src/external/corefoundation" CoreFoundation_x86_64 -j8
+make -C "$build_dir/src/external/cfnetwork/src" CFNetwork -j8
 make -C "$build_dir/src/external/configd/SystemConfiguration.fproj" SystemConfiguration -j8
 make -C "$build_dir/src/external/cocotron/QuartzCore" QuartzCore -j8
 make -C "$build_dir/src/external/cocotron/AppKit" AppKit X11_backend -j8
@@ -26,7 +27,7 @@ darling shutdown || true
 mv "$project_dir/build/libdarling-xshm.next.so" "$project_dir/build/libdarling-xshm.so"
 mv "$guest_home/libDarlingXShm.next.dylib" "$guest_home/libDarlingXShm.dylib"
 mkdir -p "$guest_home/RuntimeFrameworks"
-for framework in AppKit QuartzCore CoreFoundation SystemConfiguration; do
+for framework in AppKit QuartzCore CoreFoundation SystemConfiguration CFNetwork; do
   if [ ! -d "$guest_home/RuntimeFrameworks/$framework.framework" ]; then
     cp -a "@DARLING_SDK@/System/Library/Frameworks/$framework.framework" "$guest_home/RuntimeFrameworks/"
   fi
@@ -42,6 +43,8 @@ atomic_install "$build_dir/src/external/cocotron/QuartzCore/QuartzCore" "$guest_
 atomic_install "$build_dir/src/external/corefoundation/CoreFoundation" "$guest_home/RuntimeFrameworks/CoreFoundation.framework/Versions/A/CoreFoundation"
 
 atomic_install "$build_dir/src/external/configd/SystemConfiguration.fproj/SystemConfiguration" "$guest_home/RuntimeFrameworks/SystemConfiguration.framework/Versions/A/SystemConfiguration"
+
+atomic_install "$build_dir/src/external/cfnetwork/src/CFNetwork" "$guest_home/RuntimeFrameworks/CFNetwork.framework/Versions/A/CFNetwork"
 
 mkdir -p "$guest_home/RuntimeLibraries"
 atomic_install "$build_dir/src/external/libplatform/libsystem_platform.dylib" "$guest_home/RuntimeLibraries/libsystem_platform.dylib"

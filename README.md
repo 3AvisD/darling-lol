@@ -26,7 +26,7 @@ This is a development snapshot, not a finished launcher. Riot and League clients
 
 ## Included
 
-- Pinned upstream revisions and patches for 29 Darling components, including Metal/Indium, AppKit, QuartzCore, CoreAudio, the kernel shim and darlingserver.
+- Pinned upstream revisions and patches for 30 Darling components, including Metal/Indium, AppKit, QuartzCore, CoreAudio, the kernel shim and darlingserver.
 - Event-poll presentation and GPU synchronization fixes, floating-point-safe GL resolvers, multi-window presentation and nullable LaunchServices error handling.
 - Reusable server receive buffers and Darwin allocator hints translated to Linux lazy reclamation.
 - Build/install/launch wrappers, atomic incremental installers and standalone regression probes.

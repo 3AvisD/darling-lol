@@ -394,3 +394,19 @@ Observe host CPU/thread scheduling, GPU counters, temperatures and memory pressu
 Compare similar scene, ability and camera activity with the same power settings (and correct charger on a laptop). Do not report a paused, dead, unfocused or empty scene as a fight benchmark. If an allowed host measurement supplies frame times, report p99 in milliseconds; its reciprocal is percentile-equivalent FPS, not the mean of the slowest 1% of frames. Manual FPS readings alone do not establish p99 frame times.
 
 The CPU symbolizer offers `--leaf-only` because the host DWARF unwinder can drop guest Mach-O stacks. Successfully unwound samples alone are not a representative profile. Local API lockfiles, account data and raw logs must stay outside version control.
+
+## CFHost cancellation regression
+
+After configuring and building CFNetwork, build and run the isolated probe:
+
+```sh
+python3 build/runtime/tools/build-riot-cfhost-cancel-check.py
+python3 build/runtime/tools/run-riot-native-check.py riot-cfhost-cancel-check
+```
+
+Run against the installed CFNetwork override. Expect
+`CFHOST_CANCEL_CHECK cancel callback lifetime repeated pass=1`. The unpatched
+library traps in `CFRetain(NULL)`; the runner checks the success marker because
+Darling can return status zero even when the guest traps. The probe uses localhost
+and exercises 100 cancellations with both retained and early-released caller
+references, without launching or inspecting Riot.

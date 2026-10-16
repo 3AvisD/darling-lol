@@ -1,0 +1,17 @@
+diff --git a/src/Host/CFHost.c b/src/Host/CFHost.c
+index 91c0d0f..d6e3daf 100644
+--- a/src/Host/CFHost.c
++++ b/src/Host/CFHost.c
+@@ -2221,9 +2221,9 @@ CFHostCancelInfoResolution(CFHostRef theHost, CFHostInfoType info) {
+ 		
+ 		CFRunLoopSourceContext ctxt = {
+ 			0,								// version
+-			NULL,							// info
+-			NULL,							// retain
+-			NULL,							// release
++			host,							// info
++			CFRetain,						// retain
++			CFRelease,						// release
+ 			NULL,							// copyDescription
+ 			NULL,							// equal
+ 			NULL,							// hash
