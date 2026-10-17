@@ -3230,12 +3230,13 @@ index be2926c..a25882e 100644
  }
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/mac_syscall.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/mac_syscall.c
 new file mode 100644
-index 0000000..479294a
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/mac_syscall.c
-@@ -0,0 +1,53 @@
+@@ -0,0 +1,60 @@
 +#include <darling/emulation/xnu_syscall/bsd/impl/misc/mac_syscall.h>
 +
++#include <stdint.h>
++#include "security_user_access.h"
 +#include <darling/emulation/common/base.h>
 +#include <darling/emulation/common/simple.h>
 +#include <darling/emulation/conversion/duct_errno.h>
@@ -3261,7 +3262,8 @@ index 0000000..479294a
 +	}
 +
 +	for (i = 0; i < sizeof(name) - 1; i++) {
-+		char c = policy[i];
++		char c;
++        if (darling_security_read(&c, policy + i, 1)) return -EFAULT;
 +		name[i] = c;
 +		if (c == '\0') {
 +			break;
@@ -3275,14 +3277,18 @@ index 0000000..479294a
 +		return 0;
 +	}
 +
-+	if (memcmp(name, "AMFI", 5) == 0) {
-+		/* darling-lol: same posture as Seatbelt (Chromium's sandbox code
-+		 * probes AMFI status via ___sandbox_ms; ENOSYS trips its CHECK).
-+		 * No code-signing enforcement exists to report on. */
-+		__simple_printf("mac_syscall: AMFI call %d (arg=%p), no enforcement, succeeding\n",
-+			call, arg);
-+		return 0;
-+	}
++    if (memcmp(name, "AMFI", 5) == 0) {
++        if (call == 95) {
++            if (!arg) return -EFAULT;
++            struct trust_query { unsigned char cdhash[20]; uint64_t result; };
++            /* No Apple-authenticated trust cache is loaded. Clear stale output
++             * but report unsupported, rather than claiming a successful lookup. */
++            uint64_t result = 0;
++            void* output = (void*)((uintptr_t)arg + offsetof(struct trust_query, result));
++            if (darling_security_write(output, &result, sizeof(result))) return -EFAULT;
++        }
++        return -ENOTSUP;
++    }
 +
 +	__simple_printf("mac_syscall: unsupported policy \"%s\" call %d\n", name, call);
 +	return -ENOSYS;
@@ -6163,5 +6169,160 @@ index 0000000..eb90f43
 +    if (*text || !value || value > UINT64_MAX / 1000) return false;
 +    *result = value * 1000;
 +    return true;
++}
++#endif
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c
+@@ -1,38 +1,50 @@
+ #include <darling/emulation/xnu_syscall/bsd/impl/misc/csops.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/unistd/getpid.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/signal/kill.h>
++#include <darling/emulation/conversion/duct_errno.h>
++#include <sys/codesign.h>
++#include <stdint.h>
++#include "security_user_access.h"
+ 
+-#include <stdint.h>
+-#include <sys/codesign.h>
+-#include <strings.h>
+-
+-#include <darling/emulation/conversion/duct_errno.h>
+-
+-// TODO: actually implement this
+-// this is just a dummy implementation for now that returns no actual data for any operation
++/* The loader does not validate process pages, CMS chains or library policy.
++ * Never advertise CS_VALID or enforcement on the strength of a file name.
++ * A separate on-disk verifier cannot establish the live task's security state.
++ */
+ long sys_csops(int pid, unsigned int ops, void* useraddr, size_t usersize) {
+-	int ret = 0;
+-
+-	switch (ops) {
+-		case CS_OPS_STATUS: {
+-			*(uint32_t*)useraddr = CS_VALID;
+-		} break;
+-
+-		case CS_OPS_BLOB:
+-		case CS_OPS_ENTITLEMENTS_BLOB:
+-		case CS_OPS_IDENTITY: {
+-			memset(useraddr, 0, usersize);
+-		} break;
+-
+-		// all other operations are completely unsupported
+-		default: {
+-			ret = -ENOSYS;
+-		} break;
+-	}
+-
+-	return ret;
++    if (pid < 0) return -EINVAL;
++    if (pid != 0 && pid != sys_getpid()) {
++        long error = sys_kill(pid, 0, 1);
++        if (error == -ESRCH) return error;
++        return -ENOTSUP; /* no task signing state or PID-version binding */
++    }
++    switch (ops) {
++        case CS_OPS_STATUS:
++            if (!useraddr) return -EFAULT;
++            if (usersize < sizeof(uint32_t)) return -ERANGE;
++            { uint32_t flags = 0;
++              return darling_security_write(useraddr, &flags, sizeof(flags)); }
++        case CS_OPS_CDHASH:
++        case CS_OPS_BLOB:
++        case CS_OPS_ENTITLEMENTS_BLOB:
++        case CS_OPS_IDENTITY:
++        case CS_OPS_TEAMID:
++            return -EINVAL; /* no validated process CodeDirectory */
++        case CS_OPS_MARKINVALID:
++        case CS_OPS_MARKHARD:
++        case CS_OPS_MARKKILL:
++        case CS_OPS_MARKRESTRICT:
++        case CS_OPS_SET_STATUS:
++        case CS_OPS_CLEARINSTALLER:
++        case CS_OPS_CLEARPLATFORM:
++        case CS_OPS_CLEAR_LV:
++            return -ENOTSUP; /* no successful setters without enforcement */
++        default:
++            return -EINVAL;
++    }
+ }
+ 
+-// also more or less a stub
+-long sys_csops_audittoken(int pid, unsigned int ops, void* useraddr, size_t usersize, audit_token_t* audit_token) {
+-	// just defer to the regular csops
+-	return sys_csops(pid, ops, useraddr, usersize);
++long sys_csops_audittoken(int pid, unsigned int ops, void* useraddr, size_t usersize, audit_token_t* token) {
++    if (!token) return -EFAULT;
++    /* PID alone cannot validate an audit token's process generation/credentials. */
++    return -ENOTSUP;
+ }
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csrctl.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csrctl.c
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csrctl.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csrctl.c
+@@ -1,22 +1,20 @@
+ #include <darling/emulation/xnu_syscall/bsd/impl/misc/csrctl.h>
+-
+ #define PRIVATE
+ #include <sys/csr.h>
+-
+ #include <darling/emulation/conversion/duct_errno.h>
++#include "security_user_access.h"
+ 
+ long sys_csrctl(uint32_t op, void* useraddr, size_t usersize) {
+-	switch (op) {
+-		case CSR_SYSCALL_CHECK: {
+-			// allow everything
+-			return 0;
+-		} break;
+-		case CSR_SYSCALL_GET_ACTIVE_CONFIG: {
+-			// set everything to "allowed"
+-			*(uint32_t*)useraddr = CSR_VALID_FLAGS;
+-			return 0;
+-		} break;
+-		default:
+-			return ENOSYS;
+-	}
++    if (op != CSR_SYSCALL_CHECK && op != CSR_SYSCALL_GET_ACTIVE_CONFIG) return -ENOSYS;
++    if (usersize != sizeof(uint32_t)) return -EINVAL;
++    if (!useraddr) return -EFAULT;
++    /* All supported CSR exceptions are allowed: SIP is NOT enforced. The
++     * existing Linux filesystem/ptrace policy is not macOS SIP enforcement. */
++    uint32_t active = CSR_VALID_FLAGS;
++    if (op == CSR_SYSCALL_GET_ACTIVE_CONFIG) {
++        return darling_security_write(useraddr, &active, sizeof(active));
++    }
++    uint32_t requested;
++    if (darling_security_read(&requested, useraddr, sizeof(requested))) return -EFAULT;
++    return (requested & ~active) ? -EPERM : 0;
+ }
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/security_user_access.h b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/security_user_access.h
+new file mode 100644
+--- /dev/null
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/security_user_access.h
+@@ -0,0 +1,25 @@
++#ifndef DARLING_SECURITY_USER_ACCESS_H
++#define DARLING_SECURITY_USER_ACCESS_H
++#include <stddef.h>
++#include <darling/emulation/common/base.h>
++#include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
++#include <darling/emulation/conversion/duct_errno.h>
++
++/* Kernel-mediated copies avoid host SIGSEGV on inaccessible guest buffers.
++ * A short copy reports EFAULT; output may be partially copied across pages,
++ * just as other copyout interfaces may fail after writing part of a buffer. */
++static inline long darling_security_copy(void* local, void* remote, size_t size, int write) {
++    struct security_iovec { void* base; size_t length; };
++    struct security_iovec here = { local, size }, there = { remote, size };
++    long pid = LINUX_SYSCALL0(__NR_getpid);
++    long result = LINUX_SYSCALL(write ? __NR_process_vm_writev : __NR_process_vm_readv,
++                               pid, &here, 1, &there, 1, 0);
++    return result == (long)size ? 0 : -EFAULT;
++}
++static inline long darling_security_read(void* destination, const void* source, size_t size) {
++    return darling_security_copy(destination, (void*)source, size, 0);
++}
++static inline long darling_security_write(void* destination, const void* source, size_t size) {
++    return darling_security_copy((void*)source, destination, size, 1);
 +}
 +#endif

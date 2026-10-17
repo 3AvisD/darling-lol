@@ -274,7 +274,7 @@
       "revision": "fa29287aa2f0115271e091f1031f53c9e024005d",
       "repository": "https://github.com/darlinghq/darling-xnu.git",
       "patch": "patches/xnu.patch",
-      "modified_files": 64,
+      "modified_files": 66,
       "new_files": [
         "darling/src/libsystem_kernel/emulation/include/common/cpu_topology.h",
         "darling/src/libsystem_kernel/emulation/include/common/private_mutex.h",
@@ -285,7 +285,8 @@
         "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/guarded/change_fdguard_np.c",
         "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/mac_syscall.c",
         "libsyscall/wrappers/__sysctlbyname.S",
-        "darling/src/libsystem_kernel/emulation/include/common/cpu_frequency.h"
+        "darling/src/libsystem_kernel/emulation/include/common/cpu_frequency.h",
+        "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/security_user_access.h"
       ]
     },
     {

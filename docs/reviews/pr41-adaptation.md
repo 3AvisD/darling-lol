@@ -55,6 +55,10 @@ so patch regeneration noise was excluded from this review.
 - Log verbosity, descriptor leaks in shellspawn, CPU-frequency units, and other
   independent correctness fixes can be separate changes with focused checks.
 
+The separate [CPUID and security validation](pr41-cpuid-security-validation.md)
+records reproduced CPUID defects, the hardware limit on performance testing,
+file signature verification and the remaining enforcement requirements.
+
 ## Validation
 
 The patch-level C regression tests compile the actual patched function bodies
