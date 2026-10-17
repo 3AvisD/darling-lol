@@ -7597,19 +7597,22 @@ index 6fa2d088c..655554284 100644
  int sandbox_issue_fs_extension(const char *path, uint64_t flags, char **ext_token);
  int sandbox_issue_fs_rw_extension(const char *path, char **ext_token);
 diff --git a/src/shellspawn/shellspawn.c b/src/shellspawn/shellspawn.c
-index f5ba615bb..fea23d638 100644
+index f5ba615..53d04ad 100644
 --- a/src/shellspawn/shellspawn.c
 +++ b/src/shellspawn/shellspawn.c
-@@ -36,7 +36,7 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+@@ -34,9 +34,10 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+ #include <sys/ioctl.h>
+ #include <signal.h>
  #include "shellspawn.h"
++#include "shellspawn-fds.h"
  #include "duct_signals.h"
  
 -#define DBG 0
-+#define DBG 1
++#define DBG (getenv("DARLING_SHELLSPAWN_DEBUG") && strcmp(getenv("DARLING_SHELLSPAWN_DEBUG"), "1") == 0)
  
  int g_serverSocket = -1;
  struct sigaction sigchld_oldaction;
-@@ -50,6 +50,17 @@ void reapAll(void);
+@@ -50,6 +51,17 @@ void reapAll(void);
  
  int main(int argc, const char** argv)
  {
@@ -7627,6 +7630,123 @@ index f5ba615bb..fea23d638 100644
  	// shellspawn (daemon) --fork()--> shellspawn (child) --fork()--> exec /bin/bash
  	// in order to read the exit status of the shell process,
  	// we have to allow it to become a zombie, therefore we need to
+@@ -125,7 +137,7 @@ void spawnShell(int fd)
+ {
+ 	pid_t shell_pid = -1;
+ 	int shellfd[3] = { -1, -1, -1 };
+-	int pipefd[2];
++	int pipefd[2] = { -1, -1 };
+ 	int rv;
+ 	struct pollfd pfd[2];
+ 	char** argv = NULL;
+@@ -143,6 +155,14 @@ void spawnShell(int fd)
+ 
+ 	char* alloc_exec = NULL;
+ 
++	// Keep the control socket out of the stdio slots before receiving streams.
++	if (fd <= STDERR_FILENO) {
++		int moved = fcntl(fd, F_DUPFD_CLOEXEC, 3);
++		if (moved < 0) goto err;
++		close(fd);
++		fd = moved;
++	}
++
+ 	// Read commands from client
+ 	while (read_cmds)
+ 	{
+@@ -262,25 +282,20 @@ void spawnShell(int fd)
+ 	argv = (char**) realloc(argv, sizeof(char*) * (argc + 1));
+ 	argv[argc] = NULL;
+ 
+-	if (pipe(pipefd) == -1)
+-		goto err;
++	if (shellspawn_remap_stdio(shellfd) < 0) goto err;
++	if (pipe(pipefd) == -1) goto err;
+ 
+ 	setsid();
+ 	setpgrp();
+ 
+-	close(STDIN_FILENO);
+-	close(STDOUT_FILENO);
+-	close(STDERR_FILENO);
+-
+-	dup2(shellfd[0], STDIN_FILENO);
+-	dup2(shellfd[1], STDOUT_FILENO);
+-	dup2(shellfd[2], STDERR_FILENO);
+-
+ 	ioctl(STDIN_FILENO, TIOCSCTTY, STDIN_FILENO);
+ 
+ 	shell_pid = fork();
++	if (shell_pid < 0) goto err;
+ 	if (shell_pid == 0)
+ 	{
++		shellspawn_close_streams(shellfd);
++		close(pipefd[0]);
+ 		close(fd);
+ 
+ 		fcntl(pipefd[1], F_SETFD, FD_CLOEXEC);
+@@ -296,6 +311,7 @@ void spawnShell(int fd)
+ 		exit(EXIT_FAILURE);
+ 	}
+ 
++	shellspawn_close_streams(shellfd);
+ 	if (alloc_exec)
+ 	{
+ 		free(alloc_exec);
+@@ -304,12 +320,14 @@ void spawnShell(int fd)
+ 
+ 	// Check that exec succeeded
+ 	close(pipefd[1]); // close the write end
++	pipefd[1] = -1;
+ 	if (read(pipefd[0], &rv, sizeof(rv)) == sizeof(rv))
+ 	{
+ 		errno = rv;
+ 		goto err;
+ 	}
+ 	close(pipefd[0]);
++	pipefd[0] = -1;
+ 
+ 	// Now we start passing signals
+ 	// and check for child process exit
+@@ -372,7 +390,7 @@ void spawnShell(int fd)
+ 
+ 					if (darwin_signal != 0)
+ 					{
+-						int fg_pid = tcgetpgrp(shellfd[0]);
++						int fg_pid = tcgetpgrp(STDIN_FILENO);
+ 						if (fg_pid != -1)
+ 						{
+ 							if (DBG) printf("fg_pid = %d\n", fg_pid);
+@@ -394,11 +412,7 @@ void spawnShell(int fd)
+ 	kill(shell_pid, SIGKILL);
+ 
+ 	// Close shell fds
+-	for (int i = 0; i < 3; i++)
+-	{
+-		if (shellfd[i] != -1)
+-			close(shellfd[0]);
+-	}
++	shellspawn_close_streams(shellfd);
+ 
+ 	// Reap the child
+ 	int wstatus;
+@@ -415,13 +429,11 @@ void spawnShell(int fd)
+ 	reapAll();
+ 	return;
+ err:
++	if (pipefd[0] >= 0) close(pipefd[0]);
++	if (pipefd[1] >= 0) close(pipefd[1]);
+ 	if (DBG) fprintf(stderr, "Error spawning shell: %s\n", strerror(errno));
+ 
+-	for (int i = 0; i < 3; i++)
+-	{
+-		if (shellfd[i] != -1)
+-			close(shellfd[0]);
+-	}
++	shellspawn_close_streams(shellfd);
+ 
+ 	if (shell_pid != -1)
+ 		kill(shell_pid, SIGKILL);
 diff --git a/src/startup/mldr/commpage.c b/src/startup/mldr/commpage.c
 index d9a7aea96..cc76f7a85 100644
 --- a/src/startup/mldr/commpage.c
@@ -10537,3 +10657,46 @@ index 8077b7e..0556080 100644
  endif(NOT DEBIAN_PACKAGING)
  
  add_custom_target(uninstall
+diff --git a/src/shellspawn/shellspawn-fds.h b/src/shellspawn/shellspawn-fds.h
+new file mode 100644
+index 0000000..1f3c473
+--- /dev/null
++++ b/src/shellspawn/shellspawn-fds.h
+@@ -0,0 +1,37 @@
++#ifndef SHELLSPAWN_FDS_H
++#define SHELLSPAWN_FDS_H
++#include <errno.h>
++#include <fcntl.h>
++#include <unistd.h>
++
++// Preserve every source before replacing any standard descriptor: sources can
++// themselves be 0, 1 or 2 when the daemon was launched with closed stdio.
++static int shellspawn_remap_stdio(const int streams[3])
++{
++    int saved[3] = { -1, -1, -1 };
++    for (int i = 0; i < 3; ++i) {
++        saved[i] = fcntl(streams[i], F_DUPFD_CLOEXEC, 3);
++        if (saved[i] < 0) goto failure;
++    }
++    for (int i = 0; i < 3; ++i)
++        if (dup2(saved[i], i) < 0) goto failure;
++    for (int i = 0; i < 3; ++i) close(saved[i]);
++    return 0;
++failure: {
++    int error = errno;
++    for (int i = 0; i < 3; ++i) if (saved[i] >= 0) close(saved[i]);
++    errno = error;
++    return -1;
++}}
++
++static void shellspawn_close_streams(int streams[3])
++{
++    for (int i = 0; i < 3; ++i) {
++        int fd = streams[i];
++        streams[i] = -1;
++        for (int j = i + 1; j < 3; ++j)
++            if (streams[j] == fd) streams[j] = -1;
++        if (fd > STDERR_FILENO) close(fd);
++    }
++}
++#endif

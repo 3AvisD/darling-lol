@@ -1851,18 +1851,19 @@ index 7d5ef80..46debb8 100644
  	[521] = sys_abort_with_payload,
  	[524] = sys_setattrlistat,
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
-index f273989..1093a3a 100644
+index f273989..058b985 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
-@@ -9,6 +9,7 @@
+@@ -9,6 +9,8 @@
  #include <darling/emulation/xnu_syscall/bsd/helper/misc/sysctl_proc.h>
  #include <darling/emulation/linux_premigration/ext/sys/utsname.h>
  #include <darling/emulation/common/simple.h>
 +#include <darling/emulation/common/cpu_topology.h>
++#include <darling/emulation/common/cpu_frequency.h>
  #include <darling/emulation/common/string.h>
  
  extern kern_return_t mach_port_deallocate(ipc_space_t task, mach_port_name_t name);
-@@ -16,6 +17,7 @@ extern kern_return_t host_info(mach_port_name_t host, int itype, void* hinfo, ma
+@@ -16,6 +18,7 @@ extern kern_return_t host_info(mach_port_name_t host, int itype, void* hinfo, ma
  
  /* Darling specific */
  enum {
@@ -1870,10 +1871,13 @@ index f273989..1093a3a 100644
  	_HW_PHYSICAL_CPU = 1000,
  	_HW_PHYSICAL_CPU_MAX,
  	_HW_LOGICAL_CPU,
-@@ -25,9 +27,12 @@ enum {
+@@ -24,10 +27,14 @@ enum {
+ 	_HW_CPUSUBTYPE,
  	_HW_CPUTHREADTYPE,
  	_HW_64BITCAPABLE,
- 	_HW_CPUFREQUENCY = 15,
+-	_HW_CPUFREQUENCY = 15,
++	_HW_CPUFREQUENCY_COMPAT = 15,
++	_HW_CPUFREQUENCY = 1500,
 +	_HW_CACHECONFIG = 1200,
 +	_HW_CACHESIZE,
  };
@@ -1883,12 +1887,13 @@ index f273989..1093a3a 100644
  static sysctl_handler(handle_physicalcpu);
  static sysctl_handler(handle_physicalcpu_max);
  static sysctl_handler(handle_logicalcpu);
-@@ -39,11 +44,77 @@ static sysctl_handler(handle_cpusubtype);
+@@ -39,11 +46,78 @@ static sysctl_handler(handle_cpusubtype);
  static sysctl_handler(handle_cputhreadtype);
  static sysctl_handler(handle_cpu64bitcapable);
  static sysctl_handler(handle_machine);
 +static sysctl_handler(handle_model);
  static sysctl_handler(handle_cpufrequency);
++static sysctl_handler(handle_cpufrequency_compat);
 +static sysctl_handler(handle_cacheconfig);
 +static sysctl_handler(handle_cachesize);
 +
@@ -1962,19 +1967,21 @@ index f273989..1093a3a 100644
  	{ .oid = _HW_PHYSICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu", .handler = handle_physicalcpu },
  	{ .oid = _HW_PHYSICAL_CPU_MAX, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu_max", .handler = handle_physicalcpu_max },
  	{ .oid = _HW_LOGICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "logicalcpu", .handler = handle_logicalcpu },
-@@ -55,7 +126,11 @@ const struct known_sysctl sysctls_hw[] = {
+@@ -55,7 +129,12 @@ const struct known_sysctl sysctls_hw[] = {
  	{ .oid = _HW_CPUTHREADTYPE, .type = CTLTYPE_INT, .exttype = "", .name = "cputhreadtype", .handler = handle_cputhreadtype },
  	{ .oid = _HW_64BITCAPABLE, .type = CTLTYPE_INT, .exttype = "", .name = "cpu64bit_capable", .handler = handle_cpu64bitcapable },
  	{ .oid = HW_MACHINE, .type = CTLTYPE_STRING, .exttype = "S", .name = "machine", .handler = handle_machine },
+-	{ .oid = _HW_CPUFREQUENCY, .type = CTLTYPE_INT, .exttype = "", .name = "cpufrequency", .handler = handle_cpufrequency },
 +	{ .oid = _HW_OPTIONAL, .type = CTLTYPE_NODE, .exttype = "", .name = "optional", .subctls = sysctls_hw_optional },
 +	{ .oid = HW_MODEL, .type = CTLTYPE_STRING, .exttype = "S", .name = "model", .handler = handle_model },
- 	{ .oid = _HW_CPUFREQUENCY, .type = CTLTYPE_INT, .exttype = "", .name = "cpufrequency", .handler = handle_cpufrequency },
++	{ .oid = _HW_CPUFREQUENCY, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "cpufrequency", .handler = handle_cpufrequency },
++	{ .oid = _HW_CPUFREQUENCY_COMPAT, .type = CTLTYPE_INT, .exttype = "I", .name = "cpufrequency_compat", .handler = handle_cpufrequency_compat },
 +	{ .oid = _HW_CACHECONFIG, .type = CTLTYPE_OPAQUE, .exttype = "Q", .name = "cacheconfig", .handler = handle_cacheconfig },
 +	{ .oid = _HW_CACHESIZE, .type = CTLTYPE_OPAQUE, .exttype = "Q", .name = "cachesize", .handler = handle_cachesize },
  	{ .oid = -1 }
  };
  
-@@ -71,6 +146,32 @@ static const struct host_basic_info* gethostinfo(void)
+@@ -71,6 +150,32 @@ static const struct host_basic_info* gethostinfo(void)
  		hself = mach_host_self();
  		host_info(hself, HOST_BASIC_INFO, &hinfo, &hcount);
  		mach_port_deallocate(mach_task_self(), hself);
@@ -2007,7 +2014,7 @@ index f273989..1093a3a 100644
  	}
  
  	return &hinfo;
-@@ -83,6 +184,13 @@ sysctl_handler(handle_availcpu)
+@@ -83,6 +188,13 @@ sysctl_handler(handle_availcpu)
  	return 0;
  }
  
@@ -2021,16 +2028,64 @@ index f273989..1093a3a 100644
  sysctl_handler(handle_physicalcpu)
  {
  	sysctl_handle_size(sizeof(int));
-@@ -174,6 +282,8 @@ sysctl_handler(handle_cpufrequency)
- 	int freq = 2400000;
- 	char buf[16];
+@@ -169,16 +281,49 @@ sysctl_handler(handle_cputhreadtype)
+ 	return 0;
+ }
  
-+	sysctl_handle_size(sizeof(int));
++static long cpu_frequency(uint64_t* frequency)
++{
++	char buffer[32];
++	const char* paths[] = {
++		"/Volumes/SystemRoot/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq",
++		"/Volumes/SystemRoot/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq",
++		"/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq",
++		"/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq"
++	};
++	for (unsigned i = 0; i < sizeof(paths)/sizeof(paths[0]); ++i)
++		if (read_string(paths[i], buffer, sizeof(buffer)) && darling_frequency_hz(buffer, frequency)) return 0;
++#if defined(__i386__) || defined(__x86_64__)
++	unsigned int a, b, c, d;
++	__asm__("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "0"(0), "2"(0));
++	if (a >= 0x16) {
++		__asm__("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "0"(0x16), "2"(0));
++		if (a & 0xffff) {
++			*frequency = (uint64_t)(a & 0xffff) * 1000000;
++			return 0;
++		}
++	}
++#endif
++	return -ENOENT;
++}
 +
- 	if (read_string("/sys/bus/cpu/devices/cpu0/cpufreq/cpuinfo_max_freq", buf, sizeof(buf)))
- 		freq = __simple_atoi(buf, NULL);
- 	*((int*) old) = freq;
-@@ -193,3 +303,104 @@ sysctl_handler(handle_machine)
+ sysctl_handler(handle_cpufrequency)
+ {
+-	int freq = 2400000;
+-	char buf[16];
++	uint64_t frequency;
++	sysctl_handle_size(sizeof(frequency));
++	long result = cpu_frequency(&frequency);
++	if (!result) *((uint64_t*)old) = frequency;
++	return result;
++}
+ 
+-	if (read_string("/sys/bus/cpu/devices/cpu0/cpufreq/cpuinfo_max_freq", buf, sizeof(buf)))
+-		freq = __simple_atoi(buf, NULL);
+-	*((int*) old) = freq;
+-	
+-	return 0;
++sysctl_handler(handle_cpufrequency_compat)
++{
++	// Numeric HW_CPU_FREQ retains XNU's legacy 32-bit ABI. Modern by-name
++	// queries use the separate 64-bit OID above, as in kern_mib.c.
++	uint64_t frequency;
++	sysctl_handle_size(sizeof(uint32_t));
++	long result = cpu_frequency(&frequency);
++	if (!result) *((uint32_t*)old) = (uint32_t)frequency;
++	return result;
+ }
+ 
+ sysctl_handler(handle_cpu64bitcapable)
+@@ -193,3 +338,104 @@ sysctl_handler(handle_machine)
  	copyout_string(need_uname()->machine, (char*) old, oldlen);
  	return 0;
  }
@@ -6083,3 +6138,30 @@ index 0000000..f185f6c
 +__sysctlbyname:
 +    /* Just jump to the syscall stub */
 +    jmp ___sysctlbyname
+diff --git a/darling/src/libsystem_kernel/emulation/include/common/cpu_frequency.h b/darling/src/libsystem_kernel/emulation/include/common/cpu_frequency.h
+new file mode 100644
+index 0000000..eb90f43
+--- /dev/null
++++ b/darling/src/libsystem_kernel/emulation/include/common/cpu_frequency.h
+@@ -0,0 +1,21 @@
++#ifndef DARLING_CPU_FREQUENCY_H
++#define DARLING_CPU_FREQUENCY_H
++#include <stdint.h>
++#include <stdbool.h>
++
++// Linux cpufreq exposes kHz; Darwin's hw.cpufrequency is an unsigned 64-bit Hz value.
++static inline bool darling_frequency_hz(const char* text, uint64_t* result)
++{
++    uint64_t value = 0;
++    if (!text || !result || *text < '0' || *text > '9') return false;
++    do {
++        unsigned digit = (unsigned)(*text++ - '0');
++        if (value > (UINT64_MAX - digit) / 10) return false;
++        value = value * 10 + digit;
++    } while (*text >= '0' && *text <= '9');
++    while (*text == ' ' || *text == '\t' || *text == '\r' || *text == '\n') ++text;
++    if (*text || !value || value > UINT64_MAX / 1000) return false;
++    *result = value * 1000;
++    return true;
++}
++#endif
