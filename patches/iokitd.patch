@@ -3522,10 +3522,10 @@ index 90155ed..e955bd4 100644
  	static std::unordered_map<uint64_t, IORegistryEntry*> m_entriesById;
 diff --git a/src/PlatformIdentity.h b/src/PlatformIdentity.h
 new file mode 100644
-index 0000000..1f83b65
+index 0000000..6c87959
 --- /dev/null
 +++ b/src/PlatformIdentity.h
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,81 @@
 +#ifndef DARLING_PLATFORM_IDENTITY_H
 +#define DARLING_PLATFORM_IDENTITY_H
 +#import <Foundation/Foundation.h>
@@ -3553,17 +3553,18 @@ index 0000000..1f83b65
 +    if (![schema isKindOfClass:[NSNumber class]] || CFGetTypeID((CFTypeRef)schema) == CFBooleanGetTypeID() ||
 +        strchr("fd", [schema objCType][0]) || [schema longLongValue] != 1) return nil;
 +    id source = [configuration objectForKey:@"properties"];
-+    if (![source isKindOfClass:[NSDictionary class]] || [source count] > 9) return nil;
++    if (![source isKindOfClass:[NSDictionary class]] || [source count] > 10) return nil;
 +    NSMutableDictionary* result = [NSMutableDictionary dictionary];
 +    for (id key in source) {
 +        if (![key isKindOfClass:[NSString class]]) return nil;
 +        id value = [source objectForKey:key];
-+        if ([key isEqual:@"IOPlatformUUID"]) {
++        if ([key isEqual:@"IOPlatformUUID"] || [key isEqual:@"provisioning_UDID"]) {
 +            if (!printable(value, 36) || [value length] != 36) return nil;
 +            uuid_t uuid;
 +            if (uuid_parse([value UTF8String], uuid) || uuid_is_null(uuid)) return nil;
 +            uuid_string_t text; uuid_unparse_upper(uuid, text);
 +            result[key] = [NSString stringWithUTF8String:text];
++            if ([key isEqual:@"provisioning_UDID"]) continue;
 +            unsigned char bytes[16]; memcpy(bytes, uuid, sizeof(bytes));
 +            for (int i = 0; i < 4; ++i) bytes[i] = uuid[3-i];
 +            bytes[4] = uuid[5]; bytes[5] = uuid[4]; bytes[6] = uuid[7]; bytes[7] = uuid[6];
@@ -3583,6 +3584,8 @@ index 0000000..1f83b65
 +            result[key] = [NSData dataWithBytes:text length:strlen(text)+1];
 +        } else return nil;
 +    }
++    if (result[@"provisioning_UDID"] && result[@"IOPlatformUUID"] &&
++        ![result[@"provisioning_UDID"] isEqual:result[@"IOPlatformUUID"]]) return nil;
 +    if (result[@"model"] && !result[@"product-name"]) result[@"product-name"] = result[@"model"];
 +    return result;
 +}

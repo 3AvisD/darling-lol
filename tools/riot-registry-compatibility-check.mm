@@ -64,12 +64,23 @@ static void checkProperties(Fixture& fixture) {
 }
 static void checkIdentity() {
     NSString* uuid = @"00112233-4455-4677-8899-AABBCCDDEEFF";
-    auto* valid = DarlingPlatformIdentity::properties(@{@"schema": @1, @"properties": @{@"model": @"ExampleModel1,1", @"IOPlatformUUID": uuid, @"IOPlatformSerialNumber": @"SUPPLIED"}});
+    auto* valid = DarlingPlatformIdentity::properties(@{@"schema": @1, @"properties": @{@"model": @"ExampleModel1,1", @"provisioning_UDID": uuid, @"IOPlatformUUID": uuid, @"IOPlatformSerialNumber": @"SUPPLIED"}});
     assert(valid && [valid[@"IOPlatformUUID"] isEqual:uuid]);
+    assert([valid[@"provisioning_UDID"] isEqual:uuid]);
+    NSMutableDictionary* complete = [@{@"IOPlatformSerialNumber": @"SYNTHETIC123", @"IOPlatformUUID": uuid,
+        @"provisioning_UDID": uuid, @"model": @"ExampleModel", @"product-name": @"ExampleModel",
+        @"manufacturer": @"Example", @"board-id": @"Board", @"mlb-serial-number": @"SYNTHETIC-BOARD",
+        @"ROM": [NSData dataWithBytes:"abcdef" length:6]} mutableCopy];
+    complete[@"system-id"] = valid[@"system-id"];
+    assert([complete count] == 10);
+    assert(DarlingPlatformIdentity::properties(@{@"schema": @1, @"properties": complete}));
+    [complete release];
     assert([valid[@"model"] isKindOfClass:[NSData class]] && [valid[@"model"] isEqual:valid[@"product-name"]]);
     const unsigned char bytes[] = {0x33,0x22,0x11,0,0x55,0x44,0x77,0x46,0x88,0x99,0xaa,0xbb,0xcc,0xdd,0xee,0xff};
     assert([valid[@"system-id"] isEqual:[NSData dataWithBytes:bytes length:16]]);
     for (NSDictionary* invalid in @[
+        @{@"schema": @1, @"properties": @{@"provisioning_UDID": @"bad"}},
+        @{@"schema": @1, @"properties": @{@"IOPlatformUUID": uuid, @"provisioning_UDID": @"11112233-4455-4677-8899-AABBCCDDEEFF"}},
         @{@"schema": @2, @"properties": @{}}, @{@"schema": @YES, @"properties": @{}},
         @{@"schema": @1, @"properties": @{@"unknown": @"value"}},
         @{@"schema": @1, @"properties": @{@"ROM": [NSData data]}},

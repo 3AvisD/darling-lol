@@ -53,7 +53,8 @@ above the 32-bit range should use the named 64-bit API.
 [Platform identity configuration](../PLATFORM_IDENTITY.md) documents the schema,
 OpenCore/GenSMBIOS/legacy imports, startup snapshot, defaults, and rollback.
 Neither installation nor launch generates an override file. Existing host-based
-identifiers remain stable unless the user explicitly supplies replacements.
+identifiers remain stable unless the user explicitly supplies replacements or
+requests synthetic per-prefix provisioning.
 
 ## Validation
 
@@ -96,3 +97,12 @@ darling shell /Volumes/SystemRoot/ABSOLUTE_PROJECT_PATH/build/riot-cpu-frequency
 Local validation also ran the fd helper inside Darling and used an isolated
 kernel override for the frequency probe. The configured production runtime was
 not replaced, no real identity was changed, and no match capture is required.
+
+
+Opt-in provisioning now fills missing synthetic serial/MLB, UUID, system-id,
+provisioning UUID alias and ROM fields. It repairs the two known shared defaults
+while retaining custom values, synchronizes the canonical and legacy config,
+and copies actual runtime SystemVersion metadata. Disposable-prefix tests cover
+concurrent writers, idempotency, migration, backups, live-prefix refusal, and
+preflight failures. The registry probe validates all ten allowed properties.
+See [platform identity usage](../PLATFORM_IDENTITY.md#opt-in-provisioning).
