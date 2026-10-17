@@ -11,6 +11,11 @@ runner_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 python3 "$runner_dir/ensure-darling-runtime.py"
 python3 "$runner_dir/ensure-darling-service-accounts.py"
 python3 "$runner_dir/ensure-league-runtime-layout.py"
+# Security's system trust domain (SecTrustSettingsCopyCertificates) needs a root keychain and
+# trust record built from the host CA bundle. Only a changed bundle starts Darling; a failure
+# is reported but does not stop the launch.
+python3 "$runner_dir/ensure-darling-root-certificates.py" ||
+ echo 'Continuing without a Darling system root store; TLS clients may report untrusted roots' >&2
 # Discard argument-rewriting settings from the former injected shim.
 unset RCLOL_APP_ARGS RCLOL_APP_ARGS_SLOT RCLOL_APP_ARG2 RCLOL_APP_ARG2_SLOT
 unset RCLOL_APP_ARG3 RCLOL_APP_ARG3_SLOT RCLOL_UX_ARG1 RCLOL_UX_ARG1_SLOT

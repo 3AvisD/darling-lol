@@ -12,6 +12,7 @@ python3 tools/riot-launcher-offline-check.py
 python3 tools/riot-memory-installer-offline-check.py
 python3 tools/riot-foundation-installer-offline-check.py
 python3 tools/riot-llvm-version-offline-check.py
+python3 -m unittest tests.test_root_certificates
 ```
 
 The Metal device-report check compiles on the host and needs no Darling:

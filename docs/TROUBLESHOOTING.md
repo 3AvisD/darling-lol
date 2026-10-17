@@ -56,6 +56,18 @@ The installer fetcher no longer treats a missing archive `Info.plist` or the inf
 
 There is also a separate known compatibility gap: native LaunchAgent watch registration can return HTTP 409 after the League install path is accepted, leaving the download idle. A historical inspector hook handles this and interrupted `pending_verify` states in 28 mock cases, but that hook is disabled in normal launches and excluded from the manual workflow. There is no verified runtime-only replacement for that handoff in this snapshot. Do not assume the native permission and launcher fixes resolve every idle Install case, or enable debugger/API automation to work around it.
 
+## `Unable to read system root certificates` or `Error -25263`
+
+Riot logs `CertBundle: Unable to read system root certificates` and Chromium logs `[known_roots_mac.cc(60)] Unable to determine trusted roots; assuming all roots are trusted! Error -25263` when the prefix has no system trust domain. Security reads that domain from `/System/Library/Keychains/SystemRootCertificates.keychain` and `SystemTrustSettings.plist`, which Darling does not ship, so `SecTrustSettingsCopyCertificates` returns `errSecNoTrustSettings`.
+
+`tools/ensure-darling-root-certificates.py` builds both from the host CA bundle (`/etc/ssl/cert.pem` or whichever bundle Python's `ssl` reports; `--bundle` overrides it). The launcher and `scripts/install-runtime.sh` run it. Each self-signed root gets an unrestricted trust entry. The keychain is built with the guest `security` tool in a single `darling shell`. A stamp in the same directory records the bundle's digest, so later launches skip it without starting Darling until the host bundle changes. If Darling was already running and the guest could not write the directory, the script installs the files on the host and says they apply after `darling shutdown`. A failure prints `Darling system root certificates were not installed: …` and the launch continues. To rebuild by hand:
+
+```sh
+python3 build/runtime/tools/ensure-darling-root-certificates.py --force
+```
+
+`python3 -m unittest tests.test_root_certificates` compares the generated SHA-1 keys, issuer names and serial numbers with OpenSSL, and checks that an unchanged bundle is skipped. It uses stub `darling` and `security` commands. Reading the keychain and the system trust domain inside a real guest (`security find-certificate -a /System/Library/Keychains/SystemRootCertificates.keychain`, `security dump-trust-settings -s`) is not yet confirmed.
+
 ## Riot closes after a network lookup is cancelled
 
 Two local crashes were traced to `CFNetwork::_HostCancel` calling `CFRetain(NULL)`.
