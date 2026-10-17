@@ -34,10 +34,51 @@ index 80c92bc07..2a80df649 100644
 +
 +FOUNDATION_EXPORT NSString *const NSUserActivityTypeBrowsingWeb;
 diff --git a/src/NSProcessInfo.m b/src/NSProcessInfo.m
-index 1c21f176d..f9f354c80 100644
+index 1c21f17..420955a 100644
 --- a/src/NSProcessInfo.m
 +++ b/src/NSProcessInfo.m
-@@ -305,6 +305,13 @@ SINGLETON_RR()
+@@ -251,12 +251,13 @@ SINGLETON_RR()
+     }
+ #else
+ 	NSDictionary* dict = (NSDictionary*) _CFCopySystemVersionDictionary();
+-	NSString* string = [dict objectForKey: @"ProductVersion"];
++	NSString* string = [dict objectForKey: @"FullVersionString"];
++	if (![string length]) string = [dict objectForKey: @"ProductVersion"];
+ 
+ 	[string retain];
+ 	[dict release];
+ 
+-	return [string autorelease];
++	return [string autorelease] ?: @"Unknown";
+ #endif
+ }
+ 
+@@ -285,13 +286,17 @@ SINGLETON_RR()
+ 
+ - (unsigned long long)physicalMemory
+ {
+-    unsigned long long amt = 1;
+-    size_t len = sizeof(unsigned long long);
+-    if (sysctlbyname("hw.physmem", &amt, &len, 0, 0) != 0)
+-    {
+-        amt = 1;
+-    }
+-    return amt;
++    uint64_t memory = 0;
++    size_t length = sizeof(memory);
++    if (sysctlbyname("hw.memsize", &memory, &length, NULL, 0) == 0)
++        return memory;
++
++    // hw.physmem is a legacy 32-bit value; reset the buffer width on fallback.
++    uint32_t legacyMemory = 0;
++    length = sizeof(legacyMemory);
++    if (sysctlbyname("hw.physmem", &legacyMemory, &length, NULL, 0) == 0)
++        return legacyMemory;
++    return 1;
+ }
+ 
+ - (NSTimeInterval)systemUptime
+@@ -305,12 +310,23 @@ SINGLETON_RR()
      return t.tv_sec + t.tv_usec / (NSTimeInterval)USEC_PER_SEC;
  }
  
@@ -51,7 +92,19 @@ index 1c21f176d..f9f354c80 100644
  - (NSOperatingSystemVersion)operatingSystemVersion
  {
  	NSOperatingSystemVersion version = { 0, 0, 0 };
-@@ -396,3 +403,5 @@ void __NSInitializeProcess(int argc,const char *argv[]) {
+ 
+-	NSString* string = [self operatingSystemVersionString];
+-	NSArray* arr = [string componentsSeparatedByString:@"."];
++	// Parse the numeric product version independently of its localized display string.
++	NSDictionary* dict = (NSDictionary*) _CFCopySystemVersionDictionary();
++	NSArray* arr = [[dict objectForKey: @"ProductVersion"] componentsSeparatedByString:@"."];
++	[arr retain];
++	[dict release];
++	[arr autorelease];
+ 
+ 	if ([arr count] >= 1)
+ 	{
+@@ -396,3 +412,5 @@ void __NSInitializeProcess(int argc,const char *argv[]) {
      }
  }
  #endif

@@ -3276,9 +3276,18 @@ index c2f70fb..af904ed 100644
  		default:
  			__simple_printf("sys_proc_info(): Unsupported callnum: %d\n",
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/ptrace.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/ptrace.c
-index 0a8f1e4..55aadbe 100644
+index 0a8f1e4..a19f12e 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/ptrace.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/ptrace.c
+@@ -22,7 +22,7 @@ extern int getpid(void);
+ long sys_ptrace(int request, int pid, void* addr, int data)
+ {
+ 	const char* cmd = NULL;
+-	int ret;
++	int ret = -EINVAL;
+ 
+ 	switch (request)
+ 	{
 @@ -171,6 +171,17 @@ long sys_ptrace(int request, int pid, void* addr, int data)
  			// return ret;
  			cmd = "PT_THUPDATE"; break;
