@@ -27,10 +27,12 @@ for name, suffix in [('CALayer', 'm'), ('CALayerContext', 'm'), ('CATransaction'
     link[link.index('CMakeFiles/QuartzCore.dir/' + name + '.' + suffix + '.o')] = str(obj)
 link[link.index('-o') + 1] = str(root / 'build/riot-QuartzCore')
 subprocess.run(link, cwd=folder, check=True)
-obj = root / 'build/riot-metal-presentation-check.o'
-subprocess.run(['clang++', *flags['CXX_DEFINES'], *flags['CXX_INCLUDES'], *flags['CXX_FLAGS'],
-                '-c', str(root / 'tools/riot-metal-presentation-check.mm'), '-o', str(obj)], check=True)
-subprocess.run(['clang++', '-target', 'x86_64-apple-macosx11.0', '-fuse-ld=lld', '-nostdlib',
-                '-isysroot', sdk, str(obj), '-lSystem', '-lc++', '-lobjc',
-                '-framework', 'AppKit', '-framework', 'OpenGL', '-framework', 'Foundation', str(root / 'build/riot-Metal'),
-                str(root / 'build/riot-QuartzCore'), '-o', str(root / 'build/riot-metal-presentation-check')], check=True)
+for name in ('riot-metal-presentation-check', 'riot-ca-render-policy-check'):
+    obj = root / f'build/{name}.o'
+    subprocess.run(['clang++', *flags['CXX_DEFINES'], *flags['CXX_INCLUDES'], *flags['CXX_FLAGS'],
+                    '-c', str(root / f'tools/{name}.mm'), '-o', str(obj)], check=True)
+    subprocess.run(['clang++', '-target', 'x86_64-apple-macosx11.0', '-fuse-ld=lld', '-nostdlib',
+                    '-isysroot', sdk, str(obj), '-lSystem', '-lc++', '-lobjc',
+                    '-framework', 'AppKit', '-framework', 'OpenGL', '-framework', 'Foundation',
+                    '-framework', 'IOSurface', str(root / 'build/riot-Metal'),
+                    str(root / 'build/riot-QuartzCore'), '-o', str(root / f'build/{name}')], check=True)
