@@ -23,7 +23,9 @@ import shutil
 import stat
 import tempfile
 
-ROOT = Path(__file__).resolve().parent.parent
+from runtime_paths import validate_runtime_paths
+
+ROOT = Path(__file__).resolve().parents[1]
 
 # (built artifact, file name in the guest's RuntimeLibraries directory). The
 # artifacts are the ones tools/build-riot-libs-runtime.sh builds.
@@ -91,6 +93,7 @@ def install(libraries, backup_folder):
                 else:
                     shutil.copy2(destination, backup)
             metadata = destination.stat() if destination.is_file() else None
+            destination.parent.mkdir(parents=True, exist_ok=True)
             descriptor, temporary = tempfile.mkstemp(prefix="." + destination.name + "-staged-",
                                                      dir=destination.parent)
             staged.append((Path(temporary), destination))
@@ -186,9 +189,18 @@ def main(argv=None):
             parser.exit(1, str(error) + "\n")
         return
     config = json.loads((ROOT / "build/config.json").read_text())
-    prefix = arguments.prefix or config["prefix"]
-    guest_home = arguments.guest_home or config["guest_home"]
-    libraries = destinations(prefix, guest_home)
+    prefix = arguments.prefix or Path(os.environ.get("DPREFIX") or config["prefix"])
+    if arguments.guest_home:
+        host_guest_home = prefix / arguments.guest_home.lstrip("/")
+    elif os.environ.get("RIOT_GUEST_HOME"):
+        host_guest_home = Path(os.environ["RIOT_GUEST_HOME"])
+    else:
+        host_guest_home = prefix / config["guest_home"].lstrip("/")
+    try:
+        prefix, host_guest_home = validate_runtime_paths(prefix, host_guest_home)
+    except (ValueError, OSError) as error:
+        parser.exit(1, str(error) + "\n")
+    libraries = destinations(host_guest_home, "")
     if arguments.only:
         wanted = set(arguments.only.split(","))
         unknown = wanted - {name for _, name in LIBRARIES}
