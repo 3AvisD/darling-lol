@@ -12,6 +12,7 @@ python3 tools/riot-launcher-offline-check.py
 python3 tools/riot-memory-installer-offline-check.py
 python3 tools/riot-foundation-installer-offline-check.py
 python3 tools/riot-llvm-version-offline-check.py
+python3 -m unittest tests.test_root_certificates
 ```
 
 The LLVM version check compiles Iridium's actual dynamic loader against small stub libraries. It verifies that a matching major initializes, older/newer majors produce a version mismatch, and a missing library fails initialization. It does not start Darling. The native AIR translator (`python3 tools/build-riot-air-check.py --native`) selects both headers and the shared library from the same `llvm-config`; its build prints those paths so shader results can be attributed to the tested LLVM installation.
