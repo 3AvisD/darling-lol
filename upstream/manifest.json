@@ -244,6 +244,7 @@
         "private-include/Metal/MTLArgumentInternal.h",
         "private-include/Metal/MTLBlitCommandEncoderInternal.h",
         "private-include/Metal/MTLDepthStencilInternal.h",
+        "private-include/Metal/MTLDeviceInfo.h",
         "private-include/Metal/MTLSamplerStateInternal.h",
         "private-include/Metal/MTLVertexDescriptorInternal.h",
         "src/Metal/MTLArgument.mm",
