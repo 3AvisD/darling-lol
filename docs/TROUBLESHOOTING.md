@@ -234,6 +234,18 @@ A non-zero error or `FAILED` means the frames cannot reach the window. Before 20
 
 An additional NVIDIA report on `68f816d` showed successful optimal-tiling import but repeated `Metal Device timed out giving us a Drawable to present` messages. Its [presentation trace](https://github.com/lucannez64/darling-lol/issues/3#issuecomment-6214732591) shows all three drawables queued and all three main-thread presentation callbacks running, followed by timeouts with three frames still queued. The compositor only prepared a Metal layer when it was the root layer, skipping nested Metal layers. It now prepares Metal layers throughout the tree. A standalone nested-layer reproduction exhausts the pool before this correction and passes ten presentations with pixel readback after it; the root-layer probe also passes. Confirmation on the reporter's NVIDIA system is still needed.
 
+### What Metal reports about the GPU
+
+`MTLDevice.name` is the selected Vulkan device's name in macOS style: the trailing driver note in brackets and the `(R)`/`(TM)` marks are removed (`AMD Radeon RX 6800 XT (RADV NAVI21)` becomes `AMD Radeon RX 6800 XT`, `Intel(R) UHD Graphics 630 (CML GT2)` becomes `Intel UHD Graphics 630`, `llvmpipe (LLVM …)` becomes `llvmpipe`). NVIDIA names are unchanged. The name is never replaced with another vendor's GPU. Before 2026-10-17 it was always `Darling Indium Device`.
+
+`recommendedMaxWorkingSetSize` is the size of the device-local Vulkan heaps (the VRAM) on a discrete GPU. On integrated and software GPUs it is the size of all heaps, because their device-local heap can be just the firmware carve-out while they also use system RAM; macOS likewise reports a large share of system RAM for unified-memory GPUs. It falls back to the old 1 GiB when Vulkan reports no usable heap. `hasUnifiedMemory` stays `YES` by default: with `NO`, apps switch to managed and private resource paths (`synchronizeResource:`, private buffers created with data) that are not implemented here. Set these in the game's environment to override:
+
+- `DARLING_METAL_GPU_NAME=<name>`: report this name.
+- `DARLING_METAL_VRAM_MB=<positive integer>`: report this working-set size in MiB. Other values are ignored.
+- `DARLING_METAL_HOST_UNIFIED_MEMORY=1`: report `hasUnifiedMemory` from the GPU type (`YES` for integrated and software GPUs, `NO` for discrete ones). This is experimental; on a discrete GPU it can break rendering.
+
+Each process reads these once.
+
 ### Host-side checks
 
 These are host settings, not game settings. Run on AC power, and use a performance power profile (`powerprofilesctl set performance`, or `asusctl profile -P Performance` on ASUS laptops). On the tested desktop the game is limited mostly by its own main thread on the CPU, not by the GPU (see [status](STATUS.md#game-fps-2026-10-1314)), so laptop CPU power limits matter as much as the GPU choice.
