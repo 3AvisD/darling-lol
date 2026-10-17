@@ -20,4 +20,8 @@ cmake -S build/darling-src -B build/darling-src/build -G 'Unix Makefiles' \
   -DCMAKE_C_FLAGS="-O3 -march=native -mtune=generic -pipe" \
   -DCMAKE_CXX_FLAGS="-O3 -march=native -mtune=generic -pipe"
 cmake --build build/darling-src/build --parallel "${JOBS:-$(nproc)}"
-echo 'Build complete. Install the base runtime with: sudo cmake --install build/darling-src/build'
+if [ -n "${DARLING_WORKSPACE:-}" ]; then
+  echo 'Build complete. Install the base runtime with: cmake --install build/darling-src/build'
+else
+  echo 'Build complete. Install the base runtime with: sudo cmake --install build/darling-src/build'
+fi

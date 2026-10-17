@@ -1,0 +1,38 @@
+diff --git a/cctools/ld64/src/3rd/strlcpy.h b/cctools/ld64/src/3rd/strlcpy.h
+--- a/cctools/ld64/src/3rd/strlcpy.h
++++ b/cctools/ld64/src/3rd/strlcpy.h
+@@ -7,8 +7,15 @@
+ extern "C" {
+ #endif
+ #include <stddef.h>
++#include <string.h>
+
++#if defined(__GLIBC__)
++# if !__GLIBC_PREREQ(2, 38)
+ size_t strlcpy(char *dst, const char *src, size_t siz);
++# endif
++#else
++size_t strlcpy(char *dst, const char *src, size_t siz);
++#endif
+
+ #ifdef __cplusplus
+ }
+diff --git a/cctools/ld64/src/3rd/strlcat.h b/cctools/ld64/src/3rd/strlcat.h
+--- a/cctools/ld64/src/3rd/strlcat.h
++++ b/cctools/ld64/src/3rd/strlcat.h
+@@ -7,8 +7,15 @@
+ extern "C" {
+ #endif
+ #include <stddef.h>
++#include <string.h>
+
++#if defined(__GLIBC__)
++# if !__GLIBC_PREREQ(2, 38)
+ size_t strlcat(char *dst, const char *src, size_t siz);
++# endif
++#else
++size_t strlcat(char *dst, const char *src, size_t siz);
++#endif
+
+ #ifdef __cplusplus
+ }
