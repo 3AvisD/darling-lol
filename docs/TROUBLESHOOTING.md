@@ -56,6 +56,18 @@ The installer fetcher no longer treats a missing archive `Info.plist` or the inf
 
 There is also a separate known compatibility gap: native LaunchAgent watch registration can return HTTP 409 after the League install path is accepted, leaving the download idle. A historical inspector hook handles this and interrupted `pending_verify` states in 28 mock cases, but that hook is disabled in normal launches and excluded from the manual workflow. There is no verified runtime-only replacement for that handoff in this snapshot. Do not assume the native permission and launcher fixes resolve every idle Install case, or enable debugger/API automation to work around it.
 
+## `Unable to read system root certificates` or `Error -25263`
+
+Riot logs `CertBundle: Unable to read system root certificates` and Chromium logs `[known_roots_mac.cc(60)] Unable to determine trusted roots; assuming all roots are trusted! Error -25263` when the prefix has no system trust domain. Security reads that domain from `/System/Library/Keychains/SystemRootCertificates.keychain` and `SystemTrustSettings.plist`, which Darling does not ship, so `SecTrustSettingsCopyCertificates` returns `errSecNoTrustSettings`.
+
+`tools/ensure-darling-root-certificates.py` builds both from the host CA bundle (`/etc/ssl/cert.pem` or whichever bundle Python's `ssl` reports; `--bundle` overrides it). The launcher and `scripts/install-runtime.sh` run it. Each self-signed root gets an unrestricted trust entry. The keychain is built with the guest `security` tool in a single `darling shell`. A stamp in the same directory records the bundle's digest, so later launches skip it without starting Darling until the host bundle changes. If Darling was already running and the guest could not write the directory, the script installs the files on the host and says they apply after `darling shutdown`. A failure prints `Darling system root certificates were not installed: …` and the launch continues. To rebuild by hand:
+
+```sh
+python3 build/runtime/tools/ensure-darling-root-certificates.py --force
+```
+
+`python3 -m unittest tests.test_root_certificates` compares the generated SHA-1 keys, issuer names and serial numbers with OpenSSL, and checks that an unchanged bundle is skipped. It uses stub `darling` and `security` commands. Reading the keychain and the system trust domain inside a real guest (`security find-certificate -a /System/Library/Keychains/SystemRootCertificates.keychain`, `security dump-trust-settings -s`) is not yet confirmed.
+
 ## Riot closes after a network lookup is cancelled
 
 Two local crashes were traced to `CFNetwork::_HostCancel` calling `CFRetain(NULL)`.
@@ -233,6 +245,18 @@ The first import of a drawable into the presenting OpenGL context, and the first
 A non-zero error or `FAILED` means the frames cannot reach the window. Before 2026-10-16 the import did not mark the memory as dedicated, which the extension requires; Mesa ignores it, and it is the suspected cause of the NVIDIA black screen (not yet confirmed). An NVIDIA log of 2026-10-16 showed `glTiling=optimal` with `setup_error=0x501 storage_error=0x501 FAILED`: NVIDIA's GL rejects `GL_LINEAR_TILING_EXT`, so the linear Vulkan image could not be imported. Since then the internal image and the GL texture use optimal tiling when `GL_VENDOR` contains NVIDIA (`vkTiling=optimal glTiling=optimal ok` is the expected line); everything else keeps linear. If the game shows a black screen on NVIDIA, report it with this file.
 
 An additional NVIDIA report on `68f816d` showed successful optimal-tiling import but repeated `Metal Device timed out giving us a Drawable to present` messages. Its [presentation trace](https://github.com/lucannez64/darling-lol/issues/3#issuecomment-6214732591) shows all three drawables queued and all three main-thread presentation callbacks running, followed by timeouts with three frames still queued. The compositor only prepared a Metal layer when it was the root layer, skipping nested Metal layers. It now prepares Metal layers throughout the tree. A standalone nested-layer reproduction exhausts the pool before this correction and passes ten presentations with pixel readback after it; the root-layer probe also passes. Confirmation on the reporter's NVIDIA system is still needed.
+
+### What Metal reports about the GPU
+
+`MTLDevice.name` is the selected Vulkan device's name in macOS style: the trailing driver note in brackets and the `(R)`/`(TM)` marks are removed (`AMD Radeon RX 6800 XT (RADV NAVI21)` becomes `AMD Radeon RX 6800 XT`, `Intel(R) UHD Graphics 630 (CML GT2)` becomes `Intel UHD Graphics 630`, `llvmpipe (LLVM …)` becomes `llvmpipe`). NVIDIA names are unchanged. The name is never replaced with another vendor's GPU. Before 2026-10-17 it was always `Darling Indium Device`.
+
+`recommendedMaxWorkingSetSize` is the size of the device-local Vulkan heaps (the VRAM) on a discrete GPU. On integrated and software GPUs it is the size of all heaps, because their device-local heap can be just the firmware carve-out while they also use system RAM; macOS likewise reports a large share of system RAM for unified-memory GPUs. It falls back to the old 1 GiB when Vulkan reports no usable heap. `hasUnifiedMemory` stays `YES` by default: with `NO`, apps switch to managed and private resource paths (`synchronizeResource:`, private buffers created with data) that are not implemented here. Set these in the game's environment to override:
+
+- `DARLING_METAL_GPU_NAME=<name>`: report this name.
+- `DARLING_METAL_VRAM_MB=<positive integer>`: report this working-set size in MiB. Other values are ignored.
+- `DARLING_METAL_HOST_UNIFIED_MEMORY=1`: report `hasUnifiedMemory` from the GPU type (`YES` for integrated and software GPUs, `NO` for discrete ones). This is experimental; on a discrete GPU it can break rendering.
+
+Each process reads these once.
 
 ### Host-side checks
 
