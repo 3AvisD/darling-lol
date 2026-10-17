@@ -204,6 +204,7 @@ exit "${CHECK_FAIL:-0}"''')
         vdsp = self.prefix / 'System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libvDSP.dylib'
         vdsp.unlink(missing_ok=True)
         self.assertNotEqual(self.run_script('build/runtime/tools/validate-riot-runtime.py').returncode, 0)
+        vdsp.write_bytes(b'\xcf\xfa\xed\xfe' + b'\0' * 5000)
         shutil.rmtree(self.guest)
         self.assertNotEqual(self.run_script('build/runtime/tools/validate-riot-runtime.py').returncode, 0)
 
