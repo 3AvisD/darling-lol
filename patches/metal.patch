@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 431f29a..7f10875 100644
+index 431f29a..eb3eec8 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -42,8 +42,10 @@ add_framework(Metal
@@ -13,6 +13,17 @@ index 431f29a..7f10875 100644
  		src/Metal/MTLCommandQueue.mm
  		src/Metal/MTLCompileOptions.mm
  		src/Metal/MTLComputeCommandEncoder.mm
+@@ -97,6 +99,10 @@ if (BUILD_METAL)
+ 	target_compile_definitions(Metal PUBLIC
+ 		DARLING_METAL_ENABLED=1
+ 	)
++	# MTLDevice.mm reads the Vulkan device properties from Indium's private headers.
++	target_link_libraries(Metal PRIVATE
++		indium_private
++	)
+ endif()
+ 
+ #
 diff --git a/include/Metal/MTLCommandBuffer.h b/include/Metal/MTLCommandBuffer.h
 index ef43df8..9045a84 100644
 --- a/include/Metal/MTLCommandBuffer.h
@@ -1123,10 +1134,10 @@ index 2a57796..0cbedf2 100644
 -
  @end
 diff --git a/src/Metal/MTLDevice.mm b/src/Metal/MTLDevice.mm
-index f58184a..6cfc697 100644
+index f58184a..a80a625 100644
 --- a/src/Metal/MTLDevice.mm
 +++ b/src/Metal/MTLDevice.mm
-@@ -2,13 +2,26 @@
+@@ -2,14 +2,32 @@
  // SPDX-License-Identifier: MPL-2.0
  
  #import <Metal/MTLDeviceInternal.h>
@@ -1151,9 +1162,15 @@ index f58184a..6cfc697 100644
 +#import <Metal/MTLVertexDescriptor.h>
 +#include <type_traits>
  #import <Metal/MTLRenderPipelineInternal.h>
++#import <Metal/MTLDeviceInfo.h>
++#if DARLING_METAL_ENABLED
++#include <indium/device.private.hpp>
++#include <cstdlib>
++#endif
  
  MTL_EXTERN const MTLDeviceNotificationName MTLDeviceWasAddedNotification = @"MTLDeviceWasAdded";
-@@ -88,6 +101,37 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+ MTL_EXTERN const MTLDeviceNotificationName MTLDeviceRemovalRequestedNotification = @"MTLDeviceRemovalRequested";
+@@ -88,6 +106,37 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  	[observer release];
  };
  
@@ -1191,7 +1208,73 @@ index f58184a..6cfc697 100644
  @implementation MTLDeviceInternal
  
  #if DARLING_METAL_ENABLED
-@@ -153,12 +197,46 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -96,6 +145,9 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+ 	NSThread* _pollingThread;
+ 	NSCondition* _threadExitCondition;
+ 	BOOL _threadIsRunning;
++	NSString* _name;
++	uint64_t _workingSetSize;
++	BOOL _sharesSystemMemory;
+ }
+ 
+ @synthesize device = _device;
+@@ -116,6 +168,39 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+ 	[_threadExitCondition unlock];
+ }
+ 
++// Real host GPU facts, computed once per device in -initWithDevice: (games may query them per frame).
++- (void)loadHostDeviceInfo
++{
++	// Overrides are read once per process.
++	static const char* const nameOverride = getenv("DARLING_METAL_GPU_NAME");
++	static const uint64_t vramOverride = MTLDeviceInfo::parseMegabytes(getenv("DARLING_METAL_VRAM_MB"));
++
++	std::string vulkanName = _device->name();
++	_name = [[NSString alloc] initWithUTF8String: MTLDeviceInfo::resolveName(nameOverride, vulkanName.c_str()).c_str()];
++	if (_name == nil) {
++		_name = [[NSString alloc] initWithUTF8String: MTLDeviceInfo::kFallbackName];
++	}
++
++	uint64_t workingSet = 0;
++	_sharesSystemMemory = NO;
++	if (auto priv = dynamic_cast<Indium::PrivateDevice*>(_device.get())) {
++		const VkPhysicalDeviceType type = priv->properties().deviceType;
++		_sharesSystemMemory = type == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU || type == VK_PHYSICAL_DEVICE_TYPE_CPU;
++		const VkPhysicalDeviceMemoryProperties memory = priv->memoryProperties();
++		MTLDeviceInfo::Heap heaps[VK_MAX_MEMORY_HEAPS];
++		const size_t count = memory.memoryHeapCount < VK_MAX_MEMORY_HEAPS ? memory.memoryHeapCount : VK_MAX_MEMORY_HEAPS;
++		for (size_t i = 0; i < count; ++i) {
++			heaps[i] = { memory.memoryHeaps[i].size, (memory.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0 };
++		}
++		workingSet = MTLDeviceInfo::workingSetBytes(heaps, count, _sharesSystemMemory);
++	}
++	if (vramOverride != 0) {
++		workingSet = vramOverride;
++	}
++	// 1 GiB was the previous fixed value; keep it when Vulkan reports nothing usable.
++	_workingSetSize = workingSet != 0 ? workingSet : (1ull << 30);
++}
++
+ - (instancetype)initWithDevice: (std::shared_ptr<Indium::Device>)device
+ {
+ 	self = [super init];
+@@ -123,6 +208,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+ 		_device = device;
+ 		_threadExitCondition = [NSCondition new];
+ 		_threadIsRunning = NO;
++		[self loadHostDeviceInfo];
+ 		_pollingThread = [[NSThread alloc] initWithTarget: self selector: @selector(pollingLoop) object: nil];
+ 		[_pollingThread start];
+ 	}
+@@ -133,6 +219,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+ {
+ 	[_pollingThread release];
+ 	[_threadExitCondition release];
++	[_name release];
+ 
+ 	[super dealloc];
+ }
+@@ -153,12 +240,60 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  	[_threadExitCondition unlock];
  }
  
@@ -1207,13 +1290,27 @@ index f58184a..6cfc697 100644
 +
 +/* darling-lol M57: feature queries ANGLE's Metal backend needs. */
 +- (BOOL)isDepth24Stencil8PixelFormatSupported { return _device->supportsDepth24Stencil8PixelFormat(); }
-+- (BOOL)hasUnifiedMemory { return YES; }
++- (BOOL)hasUnifiedMemory
++{
++	// Stays YES by default: with NO, ANGLE and games take the Managed/Private paths
++	// (synchronizeResource:, Private uploads) that this Metal/Indium does not fully implement.
++	// DARLING_METAL_HOST_UNIFIED_MEMORY=1 reports the host GPU type instead
++	// (YES for integrated and CPU devices, NO for discrete ones).
++	static const bool reportHost = [] {
++		const char* value = getenv("DARLING_METAL_HOST_UNIFIED_MEMORY");
++		return value && value[0] == '1' && value[1] == '\0';
++	}();
++	return reportHost ? _sharesSystemMemory : YES;
++}
 +- (NSUInteger)maxBufferLength { return 256u * 1024u * 1024u; }
-+- (NSUInteger)recommendedMaxWorkingSetSize { return 1ull << 30; }
++- (NSUInteger)recommendedMaxWorkingSetSize
++{
++	return _workingSetSize > NSUIntegerMax ? NSUIntegerMax : static_cast<NSUInteger>(_workingSetSize);
++}
 +- (BOOL)isLowPower { return NO; }
 +- (BOOL)isRemovable { return NO; }
 +- (BOOL)isHeadless { return NO; }
-+- (NSString*)name { return @"Darling Indium Device"; }
++- (NSString*)name { return _name; }
 +- (uint64_t)registryID { return 0; }
 +- (BOOL)supportsFamily: (NSUInteger)family { return YES; }
 +- (BOOL)supportsFeatureSet: (NSUInteger)featureSet { return YES; }
@@ -1239,7 +1336,7 @@ index f58184a..6cfc697 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -166,6 +244,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -166,6 +301,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1247,7 +1344,7 @@ index f58184a..6cfc697 100644
  	return [[MTLComputePipelineStateInternal alloc] initWithState: pso device: self label: descriptor.label];
  }
  
-@@ -183,7 +262,13 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -183,7 +319,13 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
                                                          reflection: (MTLAutoreleasedComputePipelineReflection*)reflection 
                                                               error: (NSError**)error
  {
@@ -1262,7 +1359,7 @@ index f58184a..6cfc697 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -191,13 +276,44 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -191,13 +333,44 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1308,7 +1405,7 @@ index f58184a..6cfc697 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -205,7 +321,114 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -205,7 +378,114 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1424,7 +1521,7 @@ index f58184a..6cfc697 100644
  }
  
  - (id<MTLCommandQueue>)newCommandQueue
-@@ -275,8 +498,21 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -275,8 +555,21 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  - (id<MTLLibrary>)newLibraryWithData: (dispatch_data_t)data
                                 error: (NSError**)error
  {
@@ -3369,6 +3466,159 @@ new file mode 100644
 +const std::shared_ptr<Indium::DepthStencilState>& MTLDepthStencilGetIndium(id object);
 +
 +#endif
+diff --git a/private-include/Metal/MTLDeviceInfo.h b/private-include/Metal/MTLDeviceInfo.h
+new file mode 100644
+--- /dev/null
++++ b/private-include/Metal/MTLDeviceInfo.h
+@@ -0,0 +1,148 @@
++// SPDX-FileCopyrightText: 2026 Darling Developers
++// SPDX-License-Identifier: MPL-2.0
++
++#ifndef _METAL_MTLDEVICEINFO_H_
++#define _METAL_MTLDEVICEINFO_H_
++
++// Host-testable helpers for the values MTLDevice reports about the GPU.
++// Plain C++ only (no Objective-C, Vulkan or Indium) so tools/test-metal-device-info.cpp
++// can compile this header on the host.
++
++#include <cstddef>
++#include <cstdint>
++#include <string>
++
++namespace MTLDeviceInfo {
++
++// Used when neither the cleaned nor the raw Vulkan name has any characters.
++static constexpr const char* kFallbackName = "Darling Indium Device";
++
++static inline bool isSpace(char c) {
++	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
++}
++
++static inline std::string collapseWhitespace(const std::string& text) {
++	std::string out;
++	bool pendingSpace = false;
++	for (char c: text) {
++		if (isSpace(c)) {
++			pendingSpace = !out.empty();
++			continue;
++		}
++		if (pendingSpace) {
++			out.push_back(' ');
++			pendingSpace = false;
++		}
++		out.push_back(c);
++	}
++	return out;
++}
++
++static inline char lower(char c) {
++	return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
++}
++
++// Removes "(R)" and "(TM)" in any letter case (Intel's Vulkan names use both).
++static inline std::string removeTrademarks(const std::string& text) {
++	std::string out;
++	for (size_t i = 0; i < text.size();) {
++		if (text[i] == '(') {
++			if (i + 2 < text.size() && lower(text[i + 1]) == 'r' && text[i + 2] == ')') {
++				i += 3;
++				continue;
++			}
++			if (i + 3 < text.size() && lower(text[i + 1]) == 't' && lower(text[i + 2]) == 'm' && text[i + 3] == ')') {
++				i += 4;
++				continue;
++			}
++		}
++		out.push_back(text[i++]);
++	}
++	return out;
++}
++
++// Drops one trailing parenthetical group (Mesa/driver annotation such as
++// " (RADV NAVI21)", " (CML GT2)" or " (LLVM 22.1.0, 256 bits)"), but never when
++// the group is the whole name. Expects whitespace already collapsed and trimmed.
++static inline std::string removeTrailingGroup(const std::string& text) {
++	if (text.empty() || text.back() != ')') {
++		return text;
++	}
++	int depth = 0;
++	for (size_t i = text.size(); i-- > 0;) {
++		if (text[i] == ')') {
++			++depth;
++		} else if (text[i] == '(' && --depth == 0) {
++			std::string prefix = collapseWhitespace(text.substr(0, i));
++			return prefix.empty() ? text : prefix;
++		}
++	}
++	return text; // unbalanced: leave it alone
++}
++
++// Converts a VkPhysicalDeviceProperties::deviceName into macOS Metal style,
++// e.g. "AMD Radeon RX 6800 XT (RADV NAVI21)" -> "AMD Radeon RX 6800 XT" and
++// "Intel(R) UHD Graphics 630 (CML GT2)" -> "Intel UHD Graphics 630".
++// This only cleans the real name; it never substitutes another GPU.
++static inline std::string metalNameFromVulkanName(const char* vulkanName) {
++	std::string raw = vulkanName ? vulkanName : "";
++	std::string cleaned = removeTrailingGroup(collapseWhitespace(removeTrademarks(raw)));
++	if (!cleaned.empty()) {
++		return cleaned;
++	}
++	std::string rawTrimmed = collapseWhitespace(raw);
++	return rawTrimmed.empty() ? std::string(kFallbackName) : rawTrimmed;
++}
++
++// DARLING_METAL_GPU_NAME (used verbatim when non-empty) wins over the Vulkan name.
++static inline std::string resolveName(const char* overrideName, const char* vulkanName) {
++	if (overrideName && overrideName[0] != '\0') {
++		return overrideName;
++	}
++	return metalNameFromVulkanName(vulkanName);
++}
++
++// Parses DARLING_METAL_VRAM_MB: a positive decimal integer of mebibytes, digits only.
++// Returns 0 (meaning "ignore") for anything else, including overflow.
++static inline uint64_t parseMegabytes(const char* text) {
++	if (!text || text[0] == '\0') {
++		return 0;
++	}
++	uint64_t megabytes = 0;
++	for (const char* p = text; *p; ++p) {
++		if (*p < '0' || *p > '9') {
++			return 0;
++		}
++		uint64_t digit = static_cast<uint64_t>(*p - '0');
++		if (megabytes > (UINT64_MAX / (1024ull * 1024ull) - digit) / 10) {
++			return 0;
++		}
++		megabytes = megabytes * 10 + digit;
++	}
++	return megabytes * 1024ull * 1024ull;
++}
++
++struct Heap {
++	uint64_t size;
++	bool deviceLocal;
++};
++
++// Working-set size from the Vulkan memory heaps; 0 when nothing usable is reported.
++// Discrete GPUs report their device-local (VRAM) heaps. GPUs sharing system RAM
++// (integrated/CPU device types) report every heap: their device-local heap may be
++// only the firmware carve-out (RADV APUs) while the GPU can also use the system heap,
++// which matches macOS reporting a large share of system RAM for unified-memory GPUs.
++static inline uint64_t workingSetBytes(const Heap* heaps, size_t count, bool sharesSystemMemory) {
++	uint64_t total = 0;
++	for (size_t i = 0; i < count; ++i) {
++		if (!sharesSystemMemory && !heaps[i].deviceLocal) {
++			continue;
++		}
++		total = heaps[i].size > UINT64_MAX - total ? UINT64_MAX : total + heaps[i].size;
++	}
++	return total;
++}
++
++} // namespace MTLDeviceInfo
++
++#endif // _METAL_MTLDEVICEINFO_H_
 diff --git a/private-include/Metal/MTLSamplerStateInternal.h b/private-include/Metal/MTLSamplerStateInternal.h
 new file mode 100644
 --- /dev/null
