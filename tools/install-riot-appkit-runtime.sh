@@ -3,7 +3,7 @@
 # Manually exit the game and both clients, then shut down Darling before use.
 set -eu
 project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-guest_home=${RIOT_GUEST_HOME:-$HOME/.darling@GUEST_HOME@}
+. "$project_dir/tools/runtime-paths.sh"
 framework="$guest_home/RuntimeFrameworks/AppKit.framework/Versions/C"
 backup_dir=${RIOT_APPKIT_BACKUP_DIR:-$project_dir/build/appkit-runtime-backups}
 # Preflight both artifacts and destinations before replacing either binary.
