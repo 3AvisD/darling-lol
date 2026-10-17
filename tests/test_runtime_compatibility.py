@@ -29,14 +29,19 @@ class CompatibilityChecks(unittest.TestCase):
         repo = ROOT / 'build/darling-src' / component['path']
         if not (repo / '.git').exists():
             self.skipTest('prepared Darling sources required')
-        original = subprocess.check_output(['git', '-C', str(repo), 'show', component['revision'] + ':' + path])
+        original = (None if path in component['new_files'] else
+                    subprocess.check_output(['git', '-C', str(repo), 'show', component['revision'] + ':' + path]))
         marker = 'diff --git a/' + path + ' b/' + path + '\n'
-        patch = (ROOT / component['patch']).read_text().split(marker, 1)[1].split('\ndiff --git ', 1)[0]
+        patch_text = (ROOT / component['patch']).read_text()
+        if marker not in patch_text:
+            return original.decode()
+        patch = patch_text.split(marker, 1)[1].split('\ndiff --git ', 1)[0]
         with tempfile.TemporaryDirectory() as folder:
             target = Path(folder) / path
             target.parent.mkdir(parents=True)
-            target.write_bytes(original)
-            subprocess.run(['patch', '--silent', '-p1', '-d', folder], input=marker + patch,
+            if original is not None:
+                target.write_bytes(original)
+            subprocess.run(['patch', '--silent', '-p1', '-d', folder], input=marker + patch + ("" if patch.endswith("\n") else "\n"),
                            text=True, check=True, capture_output=True)
             return target.read_text()
 

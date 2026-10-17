@@ -9,6 +9,7 @@ import tempfile
 
 root = Path(__file__).resolve().parent.parent
 checks = {
+    "riot-registry-compatibility-check": "REGISTRY_COMPAT",
     "riot-cfhost-cancel-check": "CFHOST_CANCEL_CHECK",
     "riot-launchservices-null-error-check": "LAUNCHSERVICES_NULL_ERROR",
     "m327-cgl-resolver-check": "GL_RESOLVER",

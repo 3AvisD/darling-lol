@@ -25,6 +25,8 @@ from main after PRs #43 and #42. It does not claim to resolve account bans.
   the address of its input pointer. Hardware debug-state support remains
   unsupported.
 
+The deferred compatibility groups are implemented in the [following stack layer](pr41-deferred-implementation.md).
+
 ## Work left outside this adaptation
 
 The original PR's rendered source changes were inspected against its merge base,
