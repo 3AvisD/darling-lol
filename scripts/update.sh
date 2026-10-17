@@ -1,10 +1,29 @@
 #!/bin/sh
 # Bring an existing build and installation up to date after `git pull`: re-apply the patches that changed
 # (prepare.py reverts the earlier version it finds applied), rebuild incrementally, and reinstall the base
-# runtime and the per-user overrides. Run it with no Riot/League session open; it never stops one.
+# runtime, and the per-user overrides. Run it after manually closing Riot/League.
+# Rootless callers must remain in their original namespace; the outer launcher
+# refuses a live prefix marker instead of trying to reconnect or stop a session.
 set -eu
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo"
+if [ -n "${DARLING_WORKSPACE:-}" ]; then
+  python3 scripts/nix-idle.py
+  # Initial setup and upgrades use the same supported user-owned install path.
+  # Keep each package closure rooted: copied ELF files can retain its loader.
+  package=${DARLING_PACKAGE_ID%/share/darling-lol}
+  case "$package" in /nix/store/*) ;; *) echo 'Missing Nix package identity' >&2; exit 1;; esac
+  mkdir -p build/nix-gcroots
+  nix-store --realise "$package" --add-root "$repo/build/nix-gcroots/$(basename "$package")" --indirect >/dev/null
+  python3 scripts/nix-state.py invalidate-base
+  ./scripts/build.sh
+  python3 build/runtime/tools/stop-darling-runtime.py
+  cmake --install build/darling-src/build
+  python3 scripts/nix-state.py stamp-base
+  ./scripts/install-runtime.sh
+  echo 'Rootless update installed. In this shell use scripts/run.sh; otherwise exit this shell and start darling-lol.'
+  exit 0
+fi
 if [ ! -d build/darling-src/build ]; then
 	echo 'No existing build; follow the first-time setup in README.md instead.' >&2
 	exit 1

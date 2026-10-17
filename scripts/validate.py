@@ -12,6 +12,9 @@ errors=[]
 secret_patterns=[r'gh[pousr]_[A-Za-z0-9]{30,}',r'AKIA[0-9A-Z]{16}',r'eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}',r'-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----']
 for name in filter(None,files):
     p=ROOT/name;data=p.read_bytes()
+    # The Nix desktop package intentionally ships this icon, not a runtime binary.
+    if name == 'darling-lol.png' and data.startswith(b'\x89PNG\r\n\x1a\n'):
+        continue
     if data.startswith((b'\x7fELF',b'MZ',b'\xcf\xfa\xed\xfe',b'\xca\xfe\xba\xbe')) or b'\0' in data:
         errors.append(name+': binary content is not part of this source package');continue
     try:text=data.decode()

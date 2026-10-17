@@ -1,5 +1,74 @@
 # Setup and portability
 
+## NixOS package
+
+Use `darling-lol`, `darling-lol --installer`, or `darling-lol-shell` rather than
+invoking the raw FHS environment. The launcher uses `unshare --map-auto` before
+bubblewrap, so the user needs subordinate UID/GID ranges (`/etc/subuid` and
+`/etc/subgid`, or NixOS `users.users.<name>.autoSubUidGidRange = true`).
+Namespace root maps to a subordinate host ID, not host root. The FHS entrypoint
+restores the real Linux user's IDs while retaining namespace-only capabilities;
+the Darling shim temporarily switches effective IDs for mounts. No `sudo`,
+root-owned binary in a writable workspace, or host setuid installation is needed.
+
+The launcher refreshes managed scripts with executable bits and owner-write access,
+rejecting symlinks in that managed tree. It preserves `build/`, `usr-local/`, and
+the guest prefix. Edit the source checkout, not copied workspace tools.
+
+First setup: run `darling-lol --installer` in an interactive terminal, choose the
+build when prompted, then choose the Riot region. The desktop entry uses
+`Terminal=true` and delegates terminal selection to the desktop environment.
+A launch with EOF stdin fails with a command to run in a terminal; it does not
+try a hard-coded list of terminal emulators or silently abandon a prompt.
+
+Update: after manually exiting League and both Riot clients, shut down Darling
+in the ORIGINAL `darling-lol-shell` terminal with `darling shutdown`, then exit
+that shell. Upgrade the Nix package and run `darling-lol --update` in a terminal.
+This rebuilds incrementally, installs into the user-owned `/usr/local` bind,
+and installs paired per-prefix overlays without sudo. For a first-time setup,
+the same rootless update path performs the base build/install. Native/manual
+(non-Nix) instructions below still use their normal privileged base install.
+
+Readiness JSON under `build/nix-ready/` is keyed by canonical prefix and checks
+the configured guest and resolved host guest home, UID/GID, package path,
+maintained patch/tool identities, executable modes, base SDK/runtime metadata
+and required-overlay inventory. Stamping reuses required-artifact validation.
+Changing `RIOT_GUEST_HOME` invalidates readiness. Explicit `DPREFIX` and
+`RIOT_GUEST_HOME` environment overrides take precedence over saved configuration;
+clear stale values before selecting a different installation. A separate base
+manifest avoids rebuilding when only a new prefix needs overlays.
+Updates invalidate readiness before replacing the base; failed/interrupted setup
+cannot leave the previous prefix stamp authoritative. Existing app bundles never
+bypass these checks. Normal ready launches only check state, not rebuild.
+
+Operational limits: each workspace supports one foreground namespace session.
+The launcher holds a lock while its child runs, even if bubblewrap closes file
+descriptors. It refuses a live `.init.pid` rather than reconnecting across new
+user namespaces or killing anything. A stale/reused live PID can therefore block
+a launch conservatively; inspect it before taking manual action. Never remove a
+marker just to force another launch. Manual stop/reconnect and game lifecycle
+acceptance have not been exercised with this repaired package. Keep the original
+shell open if you need to stop a session. Maintenance requires that prefix idle;
+rootless CMake's shutdown hook checks only that prefix, never enumerates and
+shuts down every user's launchd. The inherited scoped stop helper remains used
+by overlay installers; it is fixture-tested, not live-game tested here.
+
+Mutable Linux ELF outputs can retain Nix-store interpreter/library references.
+A native compiler probe executed successfully with its store-path interpreter;
+there is no evidence that all such outputs require `patchelf`. The update path
+creates indirect closure roots under `build/nix-gcroots/` before compiling and
+retains old package roots for incremental outputs. Keep those roots while using
+the workspace; remove them only when discarding/rebuilding all dependent mutable
+outputs. This trades disk retention for GC safety, not a claim of full runtime
+relocatability. A full Darling build/upgrade and GC acceptance test remains open.
+
+The FFmpeg dependency is explicitly 8.x: generated Darling AV wrappers reference
+`libavformat.so.62`, `libavcodec.so.62`, and `libavutil.so.60`; FFmpeg 9 cannot
+replace those ABI versions.
+
+Run the package regression suite with `python3 -m unittest discover -s tests -v`.
+
+
 The patch manifest pins Darling to `60ba801decee7a00782f74f6be4c8ffb013f79ff` and records every changed submodule's revision. `scripts/prepare.py` checks each revision before applying patches and never resets an existing checkout to make a patch apply. Re-running it accepts an already-applied patch.
 
 Git LFS must be available before fetching the upstream submodules. The pinned `darling-swift` submodule's `.lfsconfig` points at the retired `git-lfs.darlinghq.org`, which no longer accepts connections; `prepare.py` redirects that submodule's LFS requests to GitHub, which still serves the objects. Without that override a fresh `git submodule update` blocks with no output right after `src/external/sqlite` is checked out. The local development checkout had removed prebuilt Swift files from its working directory; that deletion is deliberately not exported. A fresh upstream checkout keeps its original Swift assets and licensing. Do not install Git LFS pointer text as a library.
@@ -12,22 +81,7 @@ python3 scripts/configure.py --guest-user my-linux-user
 python3 scripts/configure.py --sdk /usr/local/libexec/darling
 ```
 
-The runtime installation wrappers resolve `DPREFIX` first, otherwise the saved
-`configure.py --prefix` setting. The configured guest account supplies the
-default guest home. `RIOT_GUEST_HOME`, when set, is an absolute **host** path
-inside the selected prefix, not a guest `/Users/...` path. Installers, runtime
-validation and the Riot launcher's guest library paths use that selection.
-Paths containing spaces are supported by isolated regression fixtures. Explicit
-environment overrides win over saved configuration; clear stale values before
-selecting a different installation.
-
-A complete real installation using a custom prefix has not been verified.
-Archived tools may still assume the default layout. Runtime validation fails on
-missing expected binaries, unreadable/missing directories or checker errors;
-an empty input set is not a successful validation.
-
-Runtime installation requires the selected runtime to stop before overlay
-replacement. Failed shutdown blocks replacement.
+The normal wrappers currently support the default `~/.darling` prefix and `/usr/local` base installation. The configurator exposes a custom prefix for developers, but several archived tools assume the default layout. Custom prefixes/install locations have not been tested end to end.
 
 The build uses Unix Makefiles because the incremental runtime helpers read CMake `flags.make` and `link.txt`. Ninja is not a drop-in replacement for those helpers.
 
@@ -39,7 +93,7 @@ Linux 5.14 or newer is required for `MADV_POPULATE_WRITE`, used when Darwin's al
 
 The runtime installer requires native `pkg-config` entries for `x11`, `x11-xcb`, `xcb-shm` and `xext`, plus the base Darling SDK.
 
-Run configuration, builds and the per-user runtime installation as your ordinary account. Use sudo only for the base CMake installation and the incremental server installer. Running the whole build or per-user install under sudo can create root-owned files and configure the wrong guest home. `scripts/install-runtime.sh` initializes the selected user prefix and creates its `private/tmp` directory with mode `1777`, so the installer can write guest temporary files. It then shuts down Darling before replacing the paired runtime: first exit the game and both clients manually.
+Run configuration, builds and the per-user runtime installation as your ordinary account. Use sudo only for the base CMake installation and the incremental server installer. Running the whole build or per-user install under sudo can create root-owned files and configure the wrong guest home. `scripts/install-runtime.sh` initializes the default user prefix and creates `~/.darling/private/tmp` with mode `1777`, so the installer can write guest temporary files. It then shuts down Darling before replacing the paired runtime: first exit the game and both clients manually.
 
 The normal launcher starts neither an Electron inspector nor client API/UI helpers. It clears inherited `DYLD_INSERT_LIBRARIES`, retains Darling runtime library/framework overrides, supplies an absolute log directory to the launcher, and selects the League product. The log-directory/Chromium argument shim, empty-autofill hook and optional native VPX bridge are no longer injected or built by runtime installation. Existing copies on disk are inactive and may remain. Child-process log-directory rewriting and Chromium feature overrides previously supplied by the shim are removed; client startup without those workarounds needs manual validation. The first-time installer uses `--skip-to-install` and omits the installed client's `--app-root`, avoiding an immediate exit or inaccessible intro screen. The project ships no inspector hooks, client API helpers, input automation or client binary patches. Keep account data, logs and captures private.
 
