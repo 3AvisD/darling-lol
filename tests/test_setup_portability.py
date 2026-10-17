@@ -13,8 +13,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 
 
-VALIDATION_INPUTS = (
-    'RuntimeFrameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libvDSP.dylib',
+GUEST_VALIDATION_INPUTS = (
     'libDarlingXShm.dylib',
     *(f'RuntimeLibraries/{name}.dylib' for name in (
         'libsystem_kernel', 'libsystem_c', 'libsystem_platform', 'libsystem_malloc',
@@ -29,6 +28,12 @@ VALIDATION_INPUTS = (
     'RuntimeFrameworks/AppKit.framework/Versions/C/Resources/Backends/X11.backend/Contents/MacOS/X11',
     'RuntimeFrameworks/OpenGL.framework/Versions/A/Libraries/libGL.dylib',
     'Library/Audio/Plug-Ins/Components/DarlingRiotAudio.component/Contents/MacOS/CoreAudio',
+)
+PREFIX_VALIDATION_INPUTS = (
+    'usr/lib/system/libsystem_kernel.dylib',
+    'System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libvDSP.dylib',
+    'System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/LaunchServices',
+    'System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/CarbonCore.framework/Versions/A/CarbonCore',
 )
 
 
@@ -159,10 +164,12 @@ exec REAL_INSTALL "$@"'''.replace('REAL_INSTALL', shutil.which('install')))
 
     def prepare_validation(self):
         self.configure()
-        for relative in VALIDATION_INPUTS:
-            path = self.guest / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(b'\xcf\xfa\xed\xfe' + b'\0' * 5000)
+        for root, inputs in ((self.guest, GUEST_VALIDATION_INPUTS),
+                             (self.prefix, PREFIX_VALIDATION_INPUTS)):
+            for relative in inputs:
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b'\xcf\xfa\xed\xfe' + b'\0' * 5000)
         self.stub('llvm-objdump', '''printf '%s\\n' "$*" >> "$FIXTURE_LOG"
 exit "${CHECK_FAIL:-0}"''')
 
@@ -170,6 +177,11 @@ exit "${CHECK_FAIL:-0}"''')
     def test_launcher_selects_paths_before_prefix_helpers(self):
         source = (ROOT / 'tools/run-riot-client.sh').read_text()
         self.assertLess(source.index('runtime-paths.sh'), source.index('ensure-darling-runtime.py'))
+
+    def test_metal_pair_uses_shared_runtime_paths(self):
+        source = (ROOT / 'tools/install-riot-metal-pair.sh').read_text()
+        self.assertIn('runtime-paths.sh', source)
+        self.assertNotIn('$HOME/.darling', source)
 
     def test_paths_reject_symlink_escape(self):
         self.configure()
@@ -189,7 +201,7 @@ exit "${CHECK_FAIL:-0}"''')
         self.env['CHECK_FAIL'] = '1'
         self.assertNotEqual(self.run_script('build/runtime/tools/validate-riot-runtime.py').returncode, 0)
         self.env.pop('CHECK_FAIL')
-        vdsp = self.guest / 'RuntimeFrameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libvDSP.dylib'
+        vdsp = self.prefix / 'System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libvDSP.dylib'
         vdsp.unlink(missing_ok=True)
         self.assertNotEqual(self.run_script('build/runtime/tools/validate-riot-runtime.py').returncode, 0)
         shutil.rmtree(self.guest)
@@ -203,6 +215,27 @@ exit "${CHECK_FAIL:-0}"''')
         result = self.run_script('build/runtime/tools/validate-riot-runtime.py')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(str(override), self.log.read_text())
+
+    def test_libs_cli_prefix_revalidates_environment_guest_home(self):
+        self.configure()
+        self.env['RIOT_GUEST_HOME'] = str(self.guest)
+        other_prefix = Path(self.tmp.name) / 'other prefix'
+        result = self.run_script('build/runtime/tools/install-riot-libs-runtime.py',
+                                 '--prefix', str(other_prefix), '--only', 'libsystem_c.dylib')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('inside DPREFIX', result.stderr)
+
+    def test_libs_cli_guest_home_overrides_invalid_environment(self):
+        self.configure()
+        self.env['RIOT_GUEST_HOME'] = str(self.home / 'outside prefix')
+        other_prefix = Path(self.tmp.name) / 'other prefix'
+        artifact = self.root / 'build/riot-libsystem_c.dylib'
+        artifact.write_bytes(b'\xcf\xfa\xed\xfe' + b'library')
+        result = self.run_script('build/runtime/tools/install-riot-libs-runtime.py',
+                                 '--prefix', str(other_prefix), '--guest-home', '/Users/New Guest',
+                                 '--only', 'libsystem_c.dylib')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((other_prefix / 'Users/New Guest/RuntimeLibraries/libsystem_c.dylib').is_file())
 
 
     def test_failed_stop_with_all_compile_outputs_available(self):
