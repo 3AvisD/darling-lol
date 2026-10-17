@@ -13,11 +13,15 @@
 > - don't use your main account.
 >
 > 3-Day Suspension ("UNSUPPORTED_THIRD_PARTY_TOOLS") DON'T USE IT RN
+>
 > Even with all of that, you will probably still get permabanned.
 >
 > **3. Takedown.** Riot may well shut this project down. If that happens, I will publish a fork of Darling containing only the changes made here (none of them breach anything), and release the small script as a gist or similar.
 >
 > **4. To Riot.** If you are reading this, it means a lot of people want to play your game on Linux and are disappointed that they currently can't. As with macOS for your other games (TFT, Valorant), it feels like Riot doesn't care about a part of its players who have been waiting the longest. If you want to fix this, make LoL Next compatible with Linux, either natively or through a layer like Proton. Yes, that includes your kernel anticheat: Epic Games did it with Easy Anti-Cheat. Follow the trend. This is the year of Linux, and people shouldn't be locked out of a platform or forced to dual boot for a single game.
+> Since Riot have heard of the repo if you want to contact me you can at darling-lolriot@proton.me (especially if you want to do an official or supported version of league of legends on linux)
+
+If someone else wants to contact me know that i'm open to jobs, part-time remote only as a employee and full time remote as a freelancer for a mission
 
 https://github.com/user-attachments/assets/140df3e0-3790-46b6-bab5-578139b84a7c
 
