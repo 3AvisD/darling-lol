@@ -12,7 +12,22 @@ python3 scripts/configure.py --guest-user my-linux-user
 python3 scripts/configure.py --sdk /usr/local/libexec/darling
 ```
 
-The normal wrappers currently support the default `~/.darling` prefix and `/usr/local` base installation. The configurator exposes a custom prefix for developers, but several archived tools assume the default layout. Custom prefixes/install locations have not been tested end to end.
+The runtime installation wrappers resolve `DPREFIX` first, otherwise the saved
+`configure.py --prefix` setting. The configured guest account supplies the
+default guest home. `RIOT_GUEST_HOME`, when set, is an absolute **host** path
+inside the selected prefix, not a guest `/Users/...` path. Installers, runtime
+validation and the Riot launcher's guest library paths use that selection.
+Paths containing spaces are supported by isolated regression fixtures. Explicit
+environment overrides win over saved configuration; clear stale values before
+selecting a different installation.
+
+A complete real installation using a custom prefix has not been verified.
+Archived tools may still assume the default layout. Runtime validation fails on
+missing expected binaries, unreadable/missing directories or checker errors;
+an empty input set is not a successful validation.
+
+Runtime installation requires the selected runtime to stop before overlay
+replacement. Failed shutdown blocks replacement.
 
 The build uses Unix Makefiles because the incremental runtime helpers read CMake `flags.make` and `link.txt`. Ninja is not a drop-in replacement for those helpers.
 
