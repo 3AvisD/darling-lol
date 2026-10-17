@@ -60,7 +60,8 @@ with open({str(log)!r}, "a") as output:
         records = [json.loads(line) for line in log.read_text().splitlines()]
         maintenance = [r for r in records if r["command"] == "python3"]
         assert [Path(r["args"][0]).name for r in maintenance] == [
-            "ensure-darling-runtime.py", "ensure-darling-service-accounts.py", "ensure-league-runtime-layout.py"
+            "ensure-darling-runtime.py", "ensure-darling-service-accounts.py", "ensure-league-runtime-layout.py",
+            "ensure-darling-root-certificates.py",
         ], "unexpected automatic helper"
         launches = [r for r in records if r["command"] == "darling"]
         assert len(launches) == 1, "unexpected launch count"
