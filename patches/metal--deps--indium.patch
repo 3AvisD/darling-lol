@@ -2447,7 +2447,7 @@ index 43f4a84..aaa1acb 100644
 +    if ((calls.fetch_add(1,std::memory_order_relaxed) & 63)==0)
 +        bindingReuse.store(access("/tmp/metal-no-binding-reuse",F_OK)!=0,std::memory_order_relaxed);
 +}
-+// OFF by default (round-3 behaviour: a presenting commit waits for the whole worker queue with drain()). Guest flag file
++// Frame-end drain waits for a snapshot of queued work. The opt-in guest flag file
 +// /tmp/metal-present-dispatch-wait (checked once per process) makes the frame-end sync narrower: the caller waits only
 +// until this commit's own task has run (its present dispatch, and by FIFO order every replay queued before it), not for
 +// tasks queued after it. Round 4 had this on by default; that round regressed in matches, so it is opt-in now.
@@ -2487,7 +2487,7 @@ index 43f4a84..aaa1acb 100644
 +			token.wait("presentDispatchWait");
 +			return;
 +		}
-+		// Default (round 3): post first, then check the flag file and wait for the whole worker queue.
++		// Post first, then wait for the work already queued; later producers cannot extend this wait.
 +		SubmitThread::post([self]() {
 +			AsyncEncode::PoolScope pool;
 +			self->commit();
@@ -8050,7 +8050,7 @@ diff --git a/private-include/indium/submit-thread.private.hpp b/private-include/
 new file mode 100644
 --- /dev/null
 +++ b/private-include/indium/submit-thread.private.hpp
-@@ -0,0 +1,159 @@
+@@ -0,0 +1,175 @@
 +#pragma once
 +
 +// Ordered queue-submission worker.
@@ -8067,6 +8067,8 @@ new file mode 100644
 +
 +#include <condition_variable>
 +#include <deque>
++#include <cstdint>
++#include <limits>
 +#include <functional>
 +#include <mutex>
 +#include <thread>
@@ -8080,6 +8082,9 @@ new file mode 100644
 +			std::condition_variable idle;
 +			std::deque<std::function<void()>> queue;
 +			size_t active = 0;
++			uint64_t posted = 0, completed = 0;
++			size_t drainWaiters = 0;
++			uint64_t drainTarget = std::numeric_limits<uint64_t>::max();
 +			bool started = false;
 +			const bool enabled = access("/tmp/metal-submit-thread", F_OK) == 0;
 +		};
@@ -8095,8 +8100,10 @@ new file mode 100644
 +				{
 +					std::lock_guard<std::mutex> lock(mutex);
 +					done = true;
++					// The waiter may destroy this stack token as soon as it sees done.
++					// Finish notifying while the token's mutex still protects its lifetime.
++					condvar.notify_all();
 +				}
-+				condvar.notify_all();
 +			}
 +			// blocks until the task carrying this token has finished (counting the block under `site`)
 +			void wait(const char* site) {
@@ -8133,7 +8140,8 @@ new file mode 100644
 +				{
 +					std::lock_guard<std::mutex> lock(s.mutex);
 +					--s.active;
-+					if (s.queue.empty() && s.active == 0) s.idle.notify_all();
++					++s.completed;
++					if (s.drainWaiters && s.completed >= s.drainTarget) s.idle.notify_all();
 +				}
 +			}
 +		}
@@ -8158,6 +8166,7 @@ new file mode 100644
 +				// mutex as the worker's wait to avoid losing that transition.
 +				needsWake = s.active == 0 && s.queue.empty();
 +				s.queue.push_back(std::move(task));
++				++s.posted;
 +			}
 +			if (needsWake) s.wake.notify_one();
 +		}
@@ -8190,6 +8199,7 @@ new file mode 100644
 +				// mutex as the worker's wait to avoid losing that transition.
 +				needsWake = s.active == 0 && s.queue.empty();
 +				s.queue.push_back(std::move(task));
++				++s.posted;
 +			}
 +			if (needsWake) s.wake.notify_one();
 +		}
@@ -8206,7 +8216,13 @@ new file mode 100644
 +			auto& s = state();
 +			if (onWorker()) return;
 +			std::unique_lock<std::mutex> lock(s.mutex);
-+			Waits::blockOn(site, s.idle, lock, [&] { return s.queue.empty() && s.active == 0; });
++			const uint64_t target = s.posted;
++			if (s.completed >= target) return;
++			++s.drainWaiters;
++			if (target < s.drainTarget) s.drainTarget = target;
++			// FIFO completion is sufficient: later producers must not extend this wait.
++			Waits::blockOn(site, s.idle, lock, [&] { return s.completed >= target; });
++			if (--s.drainWaiters == 0) s.drainTarget = std::numeric_limits<uint64_t>::max();
 +		}
 +	}
 +}

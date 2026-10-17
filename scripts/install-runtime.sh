@@ -15,6 +15,9 @@ darling shell /usr/bin/true
 prefix=$prefix_dir
 mkdir -p "$prefix/private/tmp"
 chmod 1777 "$prefix/private/tmp"
+# Build the system root store now that the prefix exists; Darling is stopped next anyway.
+python3 build/runtime/tools/ensure-darling-root-certificates.py ||
+  echo 'Darling system root store not installed; the launcher retries it' >&2
 python3 build/runtime/tools/stop-darling-runtime.py
 sh build/runtime/tools/install-riot-presentation-runtime.sh
 sh build/runtime/tools/install-riot-gpu-runtime.sh
