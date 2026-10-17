@@ -12,6 +12,7 @@
 > - don't play ranked;
 > - don't use your main account.
 >
+> 3-Day Suspension ("UNSUPPORTED_THIRD_PARTY_TOOLS") DON'T USE IT RN
 > Even with all of that, you will probably still get permabanned.
 >
 > **3. Takedown.** Riot may well shut this project down. If that happens, I will publish a fork of Darling containing only the changes made here (none of them breach anything), and release the small script as a gist or similar.
