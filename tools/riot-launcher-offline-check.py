@@ -39,6 +39,10 @@ with open({str(log)!r}, "a") as output:
         prefix = folder / "prefix"
         (prefix / "Applications/Riot Client.app").mkdir(parents=True)
         env["DPREFIX"] = str(prefix)
+        env.pop("RIOT_GUEST_HOME", None)
+        (folder / "runtime-paths.sh").write_text(
+            (ROOT / "tools/runtime-paths.sh").read_text()
+            .replace("@DPREFIX@", str(prefix)).replace("@GUEST_HOME@", "/Users/offline-check"))
         env["DYLD_INSERT_LIBRARIES"] = "/Users/offline-check/zzlogdir.dylib:/tmp/inherited.dylib"
         env["RCLOL_APP_ARGS"] = "--inherited-shim-argument"
         env["RCLOL_APP_ARG2"] = "--inherited-shim-argument-2"
@@ -60,7 +64,7 @@ with open({str(log)!r}, "a") as output:
         records = [json.loads(line) for line in log.read_text().splitlines()]
         maintenance = [r for r in records if r["command"] == "python3"]
         assert [Path(r["args"][0]).name for r in maintenance] == [
-            "ensure-darling-runtime.py", "ensure-darling-service-accounts.py", "ensure-league-runtime-layout.py"
+            "runtime_paths.py", "ensure-darling-runtime.py", "ensure-darling-service-accounts.py", "ensure-league-runtime-layout.py"
         ], "unexpected automatic helper"
         launches = [r for r in records if r["command"] == "darling"]
         assert len(launches) == 1, "unexpected launch count"

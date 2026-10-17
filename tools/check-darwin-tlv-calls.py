@@ -51,6 +51,9 @@ def bad_accesses(path):
     return found
 
 
+if len(sys.argv) < 2:
+    sys.exit('No runtime binaries supplied for validation')
+
 status = 0
 for binary in sys.argv[1:]:
     problems = bad_accesses(binary)
