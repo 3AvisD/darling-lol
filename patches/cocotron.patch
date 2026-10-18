@@ -9418,13 +9418,14 @@ index 5dcac115..5de4f03f 100644
 +
  @end
 diff --git a/QuartzCore/CALayerContext.m b/QuartzCore/CALayerContext.m
-index 5dce8c5..3a7f937 100644
+index 5dce8c56..8e636724 100644
 --- a/QuartzCore/CALayerContext.m
 +++ b/QuartzCore/CALayerContext.m
-@@ -1,47 +1,77 @@
+@@ -1,47 +1,92 @@
  #import <Foundation/NSString.h>
 +#import <Foundation/NSMutableArray.h>
  #import <QuartzCore/CALayer.h>
++#import <QuartzCore/CAMetalLayer.h>
  #import <QuartzCore/CALayerContext.h>
  #import <QuartzCore/CARenderer.h>
  #import "CALayerInternal.h"
@@ -9444,6 +9445,20 @@ index 5dce8c5..3a7f937 100644
 +    for (CALayer *child in layer.sublayers)
 +        if (hasMetalLayer(child))return YES;
 +    return NO;
++}
++
++/* One window has one swap interval. Any synchronized Metal layer requests
++ * VSync for that window; -1 leaves non-Metal windows on their existing policy.
++ * Re-evaluate at flush so toggles and nested/replaced layers take effect. */
++static GLint metalSwapInterval(CALayer *layer) {
++    GLint interval = -1;
++    if ([[layer class] isSubclassOfClass: [CAMetalLayerInternal class]])
++        interval = [(CAMetalLayer *)layer displaySyncEnabled] ? 1 : 0;
++    for (CALayer *child in layer.sublayers) {
++        GLint childInterval = metalSwapInterval(child);
++        if (childInterval > interval) interval = childInterval;
++    }
++    return interval;
 +}
 +
 +/* The X11 transport presents Chromium's flattened full-window surface.
@@ -9518,7 +9533,7 @@ index 5dce8c5..3a7f937 100644
      [super dealloc];
  }
  
-@@ -51,12 +81,22 @@
+@@ -51,12 +96,22 @@
  }
  
  - (void) setLayer: (CALayer *) layer {
@@ -9541,7 +9556,7 @@ index 5dce8c5..3a7f937 100644
  }
  
  - (void) setSubwindow: (CGSubWindow*) subwindow
-@@ -68,16 +108,50 @@
+@@ -68,16 +123,50 @@
      }
  
      _subwindow = [subwindow retain];
@@ -9593,7 +9608,7 @@ index 5dce8c5..3a7f937 100644
  }
  
  - (void) assignTextureIdsToLayerTree: (CALayer *) layer {
-@@ -93,8 +167,27 @@
+@@ -93,8 +182,27 @@
          [self assignTextureIdsToLayerTree: child];
  }
  
@@ -9621,7 +9636,7 @@ index 5dce8c5..3a7f937 100644
  
      glEnable(GL_DEPTH_TEST);
      glShadeModel(GL_SMOOTH);
-@@ -118,27 +211,62 @@
+@@ -118,27 +226,62 @@
  
      [_deleteTextureIds removeAllObjects];
  
@@ -9689,7 +9704,7 @@ index 5dce8c5..3a7f937 100644
  }
  
  - (void) startTimerIfNeeded {
-@@ -147,7 +275,7 @@
+@@ -147,7 +290,7 @@
                                                     target: self
                                                   selector: @selector(timer:)
                                                   userInfo: nil
@@ -9698,14 +9713,25 @@ index 5dce8c5..3a7f937 100644
  }
  
  - (void) deleteTextureId: (NSNumber *) textureId {
-@@ -155,7 +283,9 @@
+@@ -155,7 +298,20 @@
  }
  
  - (void) flush {
 -    CGLFlushDrawable(_glContext);
 +    if(skipLocalRender(_layer, _frame.size))return;
-+    if (_glContext != NULL && _cglWindow != NULL)
++    if (_glContext != NULL && _cglWindow != NULL) {
++        CGLContextObj previous = CGLGetCurrentContext();
++        // EGL applies the interval to the current draw surface, so attach this
++        // window before setting it (including after late window attachment).
++        if (CGLContextMakeCurrentAndAttachToWindow(_glContext, _cglWindow) != kCGLNoError)
++            return;
++        GLint interval = metalSwapInterval(_layer);
++        if (interval >= 0)
++            CGLSetParameter(_glContext, kCGLCPSwapInterval, &interval);
 +        CGLFlushDrawable(_glContext);
++        if (previous != _glContext)
++            CGLSetCurrentContext(previous);
++    }
  }
  
  @end

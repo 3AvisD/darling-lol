@@ -541,3 +541,18 @@ Recovery requires every matching client to be at least 60 seconds old and a
 complete Hyprland window record (`class`, `title`, `mapped`, `hidden`). A second
 process scan after window inspection must find the same client identities and
 no game. Missing information or shutdown failure leaves normal launch in charge.
+
+## VSync and frame caps (#46)
+
+The Metal layer's `displaySyncEnabled` property previously had no effect on
+the window swap interval. A game that delegates pacing to VSync could run
+uncapped when VSync was enabled. The compositor now applies that property to
+the window before swapping, including nested Metal layers and setting changes.
+If several Metal layers share a window, any layer requesting VSync enables it
+for that window. Other windows retain independent swap settings.
+
+Exit the game and both clients, then run `./scripts/update.sh` to rebuild and
+install the QuartzCore and OpenGL changes. Until updated, disable in-game
+VSync to use the game's frame cap, as the issue reporter confirmed. Physical
+scanout timing still depends on the driver and desktop compositor; the fix
+has standalone regression coverage but needs an in-game timing retest.

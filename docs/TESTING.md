@@ -167,7 +167,7 @@ Useful probes (build tokenized Python helpers from `build/runtime/tools/`):
 - `riot-event-coalescing-check`: preserve key events and latest mouse motion.
 - `m327-cgl-resolver-check`: first calls through dynamically looked-up GL functions retain floating-point arguments; expected `first_sampler_linear=1 first_color_arguments=1 errors=0,0`. Build with `build-m58f327-opengl.py` and run with `run-riot-native-check.py m327-cgl-resolver-check`.
 - `m327-cgl-direct-check`: with `RCLOL_GPU_DIRECT_OTHER_WINDOW_TEST=1` and an owned 337x339 native target, interleave 338x339 fallback surfaces; expected `active_presenter_preserved=1 fallback_frames=357`. This needs the native presentation fixture; it is not a `run-riot-native-check.py` choice.
-- `riot-metal-presentation-check`: Vulkan clear reaches the GL texture, including late window/context attachment. Set `RIOT_PRESENTATION_NESTED=1` to place the Metal layer beneath two ordinary layers and verify that its drawables are still presented and recycled past the three-drawable pool limit.
+- `riot-metal-presentation-check`: Vulkan clear reaches the GL texture, including late window/context attachment. Each frame toggles `displaySyncEnabled` and checks the CGL window swap interval. Set `RIOT_PRESENTATION_NESTED=1` to place the Metal layer beneath two ordinary layers and verify that its drawables are still presented and recycled past the three-drawable pool limit.
 - `riot-ca-render-policy-check`: headless check of the actual compositor render policy. A nested Metal layer must still be prepared when a full-window IOSurface is present; surface-only trees should retain the local-render shortcut. Built by `build-riot-metal-presentation.py`; expected `PASS: mixed-tree Metal preparation survives IOSurface shortcut`. Creates no window or GPU work and does not publish its test surface.
 - `riot-metal-concurrency-check`: submission ordering, resource lifetime and concurrent recording.
 
@@ -533,3 +533,21 @@ launch, window placement, click alignment and edge panning before rollout.
 
 After installing the tested X11 and CoreGraphics binaries locally, the user
 reported that everything was working (2026-10-16). Fullscreen policy was unchanged.
+
+## Metal VSync regression (#46)
+
+```sh
+python3 -m unittest discover -s tests -p 'test_metal_vsync.py'
+```
+
+These host checks compile the patched layer-tree policy, flush body and CGL
+swap methods against inert fixtures. They cover nested layers, VSync toggles,
+shared-window requests, independent contexts, late attachment and failed
+context/interval changes. They do not measure physical display refresh.
+
+For manual validation after updating with the clients closed, compare the
+same scene with in-game VSync on and off. With VSync on, presentation should
+follow the display/compositor cadence; with it off, the game's frame cap
+should continue to work. Record monitor refresh, compositor, X11/Xwayland,
+GPU/driver and window mode. The window presentation probe above checks the
+API wiring; an in-game/compositor timing comparison remains necessary.

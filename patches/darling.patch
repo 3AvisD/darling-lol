@@ -6257,7 +6257,7 @@ index deca16b87..d75d5e22d 100644
  
  set_property(TARGET OpenGL APPEND_STRING PROPERTY LINK_FLAGS
 diff --git a/src/frameworks/OpenGL/OpenGL.c b/src/frameworks/OpenGL/OpenGL.c
-index ffd7fe054..f25fd9aa5 100644
+index ffd7fe054..a40a634d3 100644
 --- a/src/frameworks/OpenGL/OpenGL.c
 +++ b/src/frameworks/OpenGL/OpenGL.c
 @@ -2,11 +2,22 @@
@@ -6358,7 +6358,7 @@ index ffd7fe054..f25fd9aa5 100644
  static EGLConfig config;
  static int num_config;
  
-@@ -48,10 +124,18 @@ struct _CGLContextObj {
+@@ -48,10 +124,19 @@ struct _CGLContextObj {
      GLuint retain_count;
      pthread_mutex_t lock;
      EGLContext egl_context;
@@ -6368,6 +6368,7 @@ index ffd7fe054..f25fd9aa5 100644
      // EGL has no function for getting the current swap interval,
      // so we need to save the last set value. The default is 1.
      int swap_interval;
++    int swap_interval_requested;
 +    EGLSurface native_present_surface;
 +    EGLContext native_present_context;
 +    DarlingNativePresentTarget *native_present_target;
@@ -6377,7 +6378,7 @@ index ffd7fe054..f25fd9aa5 100644
  };
  
  struct _CGLPixelFormatObj {
-@@ -59,6 +143,24 @@ struct _CGLPixelFormatObj {
+@@ -59,6 +144,24 @@ struct _CGLPixelFormatObj {
      CGLPixelFormatAttribute *attributes;
  };
  
@@ -6402,7 +6403,7 @@ index ffd7fe054..f25fd9aa5 100644
  static inline int attribute_has_argument(CGLPixelFormatAttribute attr) {
      switch (attr) {
      case kCGLPFAAuxBuffers:
-@@ -69,6 +171,9 @@ static inline int attribute_has_argument(CGLPixelFormatAttribute attr) {
+@@ -69,6 +172,9 @@ static inline int attribute_has_argument(CGLPixelFormatAttribute attr) {
      case kCGLPFAAccumSize:
      case kCGLPFARendererID:
      case kCGLPFADisplayMask:
@@ -6412,7 +6413,7 @@ index ffd7fe054..f25fd9aa5 100644
          return 1;
      default:
          return 0;
-@@ -78,6 +183,7 @@ static inline int attribute_has_argument(CGLPixelFormatAttribute attr) {
+@@ -78,6 +184,7 @@ static inline int attribute_has_argument(CGLPixelFormatAttribute attr) {
  __attribute__((constructor))
  static void _CGLInitialize(void)
  {
@@ -6420,7 +6421,7 @@ index ffd7fe054..f25fd9aa5 100644
      g_displays = CFDictionaryCreateMutable(NULL, 0, NULL, NULL);
  }
  
-@@ -93,41 +199,71 @@ static int attributes_count(const CGLPixelFormatAttribute *attrs) {
+@@ -93,41 +200,71 @@ static int attributes_count(const CGLPixelFormatAttribute *attrs) {
  
  CGLError CGLRegisterNativeDisplay(void *native_display) {
  
@@ -6500,7 +6501,7 @@ index ffd7fe054..f25fd9aa5 100644
  
          pthread_mutex_lock(&g_displaysMutex);
          CFDictionaryAddValue(g_displays, (const void*)(unsigned long) cid, rv);
-@@ -139,6 +275,8 @@ static struct _CGLDisplay* getCGLDisplay(CGSConnectionID cid)
+@@ -139,6 +276,8 @@ static struct _CGLDisplay* getCGLDisplay(CGSConnectionID cid)
  
  CGLError CGLSetSurface(CGLContextObj gl, CGSConnectionID cid, CGSWindowID wid, CGSSurfaceID sid)
  {
@@ -6509,7 +6510,7 @@ index ffd7fe054..f25fd9aa5 100644
      struct _CGLDisplay* disp = getCGLDisplay(cid);
      if (!disp)
          return kCGLBadConnection;
-@@ -152,7 +290,7 @@ CGLError CGLSetSurface(CGLContextObj gl, CGSConnectionID cid, CGSWindowID wid, C
+@@ -152,7 +291,7 @@ CGLError CGLSetSurface(CGLContextObj gl, CGSConnectionID cid, CGSWindowID wid, C
      if (!window)
          return kCGLBadWindow;
  
@@ -6518,7 +6519,7 @@ index ffd7fe054..f25fd9aa5 100644
      if (gl->egl_surface == EGL_NO_SURFACE)
          return kCGLBadState;
      return kCGLNoError;
-@@ -161,7 +299,7 @@ CGLError CGLSetSurface(CGLContextObj gl, CGSConnectionID cid, CGSWindowID wid, C
+@@ -161,7 +300,7 @@ CGLError CGLSetSurface(CGLContextObj gl, CGSConnectionID cid, CGSWindowID wid, C
  CGLWindowRef CGLGetWindow(void *native_window) {
  
      EGLNativeWindowType window = (EGLNativeWindowType) native_window;
@@ -6527,7 +6528,7 @@ index ffd7fe054..f25fd9aa5 100644
  
      if (surface == EGL_NO_SURFACE) {
          return NULL;
-@@ -170,15 +308,53 @@ CGLWindowRef CGLGetWindow(void *native_window) {
+@@ -170,15 +309,53 @@ CGLWindowRef CGLGetWindow(void *native_window) {
      return (CGLWindowRef) surface;
  }
  
@@ -6583,7 +6584,7 @@ index ffd7fe054..f25fd9aa5 100644
  }
  
  static pthread_key_t current_context_key;
-@@ -198,18 +374,42 @@ CGLContextObj CGLGetCurrentContext(void) {
+@@ -198,18 +375,42 @@ CGLContextObj CGLGetCurrentContext(void) {
      return pthread_getspecific(key);
  }
  
@@ -6631,7 +6632,7 @@ index ffd7fe054..f25fd9aa5 100644
  }
  
  CGLError CGLSetFullScreen(CGLContextObj ctx) {
-@@ -223,11 +423,13 @@ CGLError CGLChoosePixelFormat(
+@@ -223,11 +424,13 @@ CGLError CGLChoosePixelFormat(
      CGLPixelFormatObj *result,
      GLint *number_of_screens
  ) {
@@ -6646,7 +6647,7 @@ index ffd7fe054..f25fd9aa5 100644
      for (int i = 0; i < count; i++) {
          format->attributes[i] = attrs[i];
      }
-@@ -251,6 +453,10 @@ CGLError CGLDescribePixelFormat(
+@@ -251,6 +454,10 @@ CGLError CGLDescribePixelFormat(
      CGLPixelFormatAttribute attr,
      GLint *value
  ) {
@@ -6657,7 +6658,7 @@ index ffd7fe054..f25fd9aa5 100644
      for (int i = 0; format->attributes[i] != 0; i++) {
          int has_arg = attribute_has_argument(format->attributes[i]);
  
-@@ -303,37 +509,98 @@ GLuint CGLGetPixelFormatRetainCount(CGLPixelFormatObj pixelFormat) {
+@@ -303,37 +510,99 @@ GLuint CGLGetPixelFormatRetainCount(CGLPixelFormatObj pixelFormat) {
      return pixelFormat->retain_count;
  }
  
@@ -6719,6 +6720,7 @@ index ffd7fe054..f25fd9aa5 100644
 +    context->egl_config = contextConfig;
      context->egl_surface = NULL;
      context->swap_interval = 1;
++    context->swap_interval_requested = 0;
 +    context->native_present_surface=EGL_NO_SURFACE;
 +    context->native_present_context=EGL_NO_CONTEXT;
 +    context->native_present_target=NULL;
@@ -6759,7 +6761,7 @@ index ffd7fe054..f25fd9aa5 100644
      return context;
  }
  
-@@ -342,11 +609,17 @@ void CGLReleaseContext(CGLContextObj context) {
+@@ -342,11 +611,17 @@ void CGLReleaseContext(CGLContextObj context) {
          return;
      }
  
@@ -6780,7 +6782,7 @@ index ffd7fe054..f25fd9aa5 100644
  
      if (CGLGetCurrentContext() == context) {
          CGLSetCurrentContext(NULL);
-@@ -354,7 +627,11 @@ void CGLReleaseContext(CGLContextObj context) {
+@@ -354,7 +629,11 @@ void CGLReleaseContext(CGLContextObj context) {
  
      pthread_mutex_destroy(&(context->lock));
  
@@ -6793,12 +6795,9 @@ index ffd7fe054..f25fd9aa5 100644
  
      free(context);
  }
-@@ -383,9 +660,330 @@ CGLError CGLUnlockContext(CGLContextObj context) {
-     return kCGLNoError;
+@@ -384,8 +663,325 @@ CGLError CGLUnlockContext(CGLContextObj context) {
  }
  
-+static int swapIntervalRequested;
-+
  CGLError CGLFlushDrawable(CGLContextObj context) {
 -    eglSwapBuffers(display,context->egl_surface);
 -    return kCGLNoError;
@@ -6807,11 +6806,9 @@ index ffd7fe054..f25fd9aa5 100644
 +    /* darling-lol: EGL defaults to a swap interval of 1. When the window is covered or the compositor throttles it
 +     * (Xwayland answers about once a second), every swap blocks that long and the game's frame rate collapses to ~1 fps.
 +     * macOS apps get an unthrottled flush unless they ask for vsync through kCGLCPSwapInterval, which is handled in
-+     * CGLSetParameter; apply "no vsync" once per context here, while it is current. */
-+    static CGLContextObj swapIntervalContext;
-+    if (!swapIntervalRequested && context != swapIntervalContext && p_eglSwapInterval && CGLGetCurrentContext() == context) {
++     * CGLSetParameter; apply "no vsync" to unconfigured contexts while current. */
++    if (!context->swap_interval_requested && p_eglSwapInterval && CGLGetCurrentContext() == context) {
 +        p_eglSwapInterval(context->egl_display, 0);
-+        swapIntervalContext = context;
 +    }
 +    return p_eglSwapBuffers(context->egl_display, context->egl_surface) ? kCGLNoError : kCGLBadState;
 +}
@@ -7126,18 +7123,21 @@ index ffd7fe054..f25fd9aa5 100644
  }
  
  CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, const GLint *value) {
-@@ -394,8 +992,9 @@ CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, c
- 
+@@ -395,9 +991,11 @@ CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, c
      if (parameter == kCGLCPSwapInterval)
      {
-+        swapIntervalRequested = 1;
          GLint v = *value;
 -        EGLBoolean success = eglSwapInterval(display, v);
+-        if (success)
 +        EGLBoolean success = p_eglSwapInterval(display, v);
-         if (success)
++        if (success) {
              context->swap_interval = v;
++            context->swap_interval_requested = 1;
++        }
          return success ? kCGLNoError : kCGLBadValue;
-@@ -417,14 +1016,19 @@ CGLError CGLGetParameter(CGLContextObj context, CGLContextParameter parameter, G
+     }
+     fprintf(stderr, "CGLSetParameter unimplemented for parameter %d\n", parameter);
+@@ -417,14 +1015,19 @@ CGLError CGLGetParameter(CGLContextObj context, CGLContextParameter parameter, G
      return kCGLNoError;
  }
  
