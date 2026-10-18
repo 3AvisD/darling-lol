@@ -129,6 +129,12 @@ With clients closed, run `build/riot-client-resize-check --handoff` through Darl
 
 The probe cycles through 1280×720, 1600×900, 1024×576 and 1280×720. Each stage changes the frame color and samples its own X11 window near the bottom-right corner, beyond the original frame's extent when growing. It waits up to 2.5 seconds for presentation and prints `RESIZE_PIXEL ... pass=1` for every stage. This verifies presented pixels rather than only view properties. Success does not reproduce League's own resize callbacks; the reported League UI failure remains open, with the opt-in [geometry trace](TROUBLESHOOTING.md#language-dropdown-closes-riot-or-client-resize-leaves-a-clipped-ui) needed to locate the remaining mismatch.
 
+### X11 drag and drop
+
+`python3 build/runtime/tools/build-riot-x11-drag-check.py` builds an independent AppKit check for the in-process drag loop that the X11 backend uses (`-[NSWindow dragImage:at:offset:event:pasteboard:source:slideBack:]`). It needs the cocotron AppKit built with the drag-and-drop patch. With clients closed, run `build/riot-x11-drag-check` through Darling with the same framework/library overrides as the other probes. It opens its own source and destination windows, posts synthetic events to its own application queue, and does not inject X11 input or touch other clients.
+
+It prints `PASS` or `FAIL` for seven cases: a drop onto a destination without `prepareForDragOperation:` (the default must proceed), a drag ending outside any destination, Escape cancel, two drags back to back with a source lacking `pasteboardChangedOwner:`, main-queue blocks and run loop timers firing during the drag, a mouse-down reaching a view afterwards, and a destination view removed from its window mid-drag. Each drag must call `draggedImage:endedAt:operation:` exactly once. The process exits nonzero on any failure, and a case that makes no progress for 20 seconds is reported as a hang, which is the original failure mode. Success covers the AppKit drag loop only; it does not exercise Chromium's own drag source.
+
 ## Legacy operating-system version query
 
 ```sh
