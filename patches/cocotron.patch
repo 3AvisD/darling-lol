@@ -2176,7 +2176,7 @@ index d545120a..79760f47 100644
      case NSMouseMoved: {
          NSView *hit = [_backgroundView hitTest: [event locationInWindow]];
  
-@@ -2478,6 +2857,190 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2478,6 +2857,197 @@ static BOOL _allowsAutomaticWindowTabbing;
      _draggedTypes = nil;
  }
  
@@ -2267,13 +2267,17 @@ index d545120a..79760f47 100644
 +                }
 +            }
 +            info->_screenPoint = screenPoint;
-+            info->_destinationWindow = window;
++            if (info->_destinationWindow != window) {
++                [info->_destinationWindow release];
++                info->_destinationWindow = [window retain];
++            }
 +            NSView *view = [window _localDragDestinationAt: screenPoint types: types];
 +
 +            if (view != destination) {
 +                if ([destination respondsToSelector: @selector(draggingExited:)])
 +                    [destination draggingExited: info];
-+                destination = view;
++                [destination release];
++                destination = [view retain];
 +                operation = NSDragOperationNone;
 +                if ([destination respondsToSelector: @selector(draggingEntered:)])
 +                    operation = [destination draggingEntered: info];
@@ -2361,13 +2365,16 @@ index d545120a..79760f47 100644
 +
 +    if ([source respondsToSelector: @selector(draggedImage:endedAt:operation:)])
 +        [source draggedImage: image endedAt: screenPoint operation: operation];
++    [destination release];
++    [info->_destinationWindow release];
++    info->_destinationWindow = nil;
 +    [info release];
 +}
 +
  - (void) dragImage: (NSImage *) image
                  at: (NSPoint) location
              offset: (NSSize) offset
-@@ -2486,6 +3049,10 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2486,6 +3056,10 @@ static BOOL _allowsAutomaticWindowTabbing;
              source: (id) source
           slideBack: (BOOL) slideBack
  {
@@ -2378,7 +2385,7 @@ index d545120a..79760f47 100644
      [[NSDraggingManager draggingManager] dragImage: image
                                                  at: location
                                              offset: offset
-@@ -2536,6 +3103,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2536,6 +3110,7 @@ static BOOL _allowsAutomaticWindowTabbing;
      } else {
          [[self platformWindow] hideWindow];
      }
@@ -2386,7 +2393,7 @@ index d545120a..79760f47 100644
  }
  
  - (void) orderFront: (id) sender {
-@@ -3064,6 +3632,13 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -3064,6 +3639,13 @@ static BOOL _allowsAutomaticWindowTabbing;
      if (didSize) {
          // Don't redraw everything unless we really have to.
          [_backgroundView setFrameSize: _frame.size];
@@ -2400,7 +2407,7 @@ index d545120a..79760f47 100644
          [_backgroundView setNeedsDisplay: YES];
          [self resetCursorRects];
          [self saveFrameUsingName: _autosaveFrameName];
-@@ -3260,8 +3835,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -3260,8 +3842,7 @@ static BOOL _allowsAutomaticWindowTabbing;
                  mouseWasInside && !mouseIsInside) {
                  [exited addObject: area];
              }
@@ -2410,7 +2417,7 @@ index d545120a..79760f47 100644
                  [moved addObject: area];
              }
              if (options & NSTrackingCursorUpdate && !mouseWasInside &&
-@@ -3459,7 +4033,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -3459,7 +4040,7 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (CGSubWindow *) _createSubWindowWithFrame: (CGRect) frame {
