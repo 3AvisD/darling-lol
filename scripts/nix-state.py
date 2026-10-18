@@ -71,10 +71,12 @@ def inventory(root):
 
     for directory, dirs, files in os.walk(root, followlinks=False,
                                          onerror=enumeration_error):
+        excluded = ('.before-', '.rt-', '.llvm')
+        dirs[:] = sorted(name for name in dirs if not any(token in name for token in excluded))
         for name in sorted(dirs + files):
-            path = Path(directory) / name
-            if any(token in path.name for token in ('.before-', '.rt-', '.llvm')):
+            if any(token in name for token in excluded):
                 continue
+            path = Path(directory) / name
             info = path.lstat()
             target_str = ''
             if path.is_symlink():

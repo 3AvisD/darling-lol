@@ -71,6 +71,8 @@ one of the following methods.
 
 ```sh
 nix profile add github:lucannez64/darling-lol#default
+# Older Nix/Lix versions without `profile add`:
+# nix profile install github:lucannez64/darling-lol#default
 ```
 
 Then launch from your application menu or terminal:
