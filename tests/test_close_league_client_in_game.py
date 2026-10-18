@@ -91,6 +91,17 @@ class InGameCloseTests(unittest.TestCase):
         self.assertIn('closed the client UI for the running match (2 processes: 123,124)',
                       self.output.getvalue())
 
+    def test_match_soon_after_boot_still_closes_the_client_ui(self):
+        # time.monotonic() counts from boot; a fresh machine (or CI runner) is
+        # still inside the first cooldown window.
+        self.client_ui(123)
+        self.process(125, GAME)
+        with patch.object(in_game.time, 'monotonic', return_value=5.0):
+            result, calls = self.run_once()
+        self.assertEqual(result, 0)
+        self.assertEqual(sorted(calls), sorted([(123, in_game.signal.SIGTERM),
+                                                (123, in_game.signal.SIGKILL)]))
+
     def test_marker_in_arguments_does_not_make_a_process_client_ui(self):
         self.client_ui(123)
         self.process(124, CRASH_HANDLER, args=CRASH_ARGUMENTS)
@@ -209,7 +220,8 @@ class InGameCloseTests(unittest.TestCase):
 
     def test_close_decision_covers_limits_and_cooldown(self):
         state = {'game': True, 'ui': {'123': 1}}
-        self.assertEqual(in_game.close_decision(state, 0, 0.0, 100.0), 'close')
+        self.assertEqual(in_game.close_decision(state, 0, None, 100.0), 'close')
+        self.assertEqual(in_game.close_decision(state, 0, None, 5.0), 'close')
         self.assertIsNone(in_game.close_decision(state, 0, 90.0, 100.0))
         self.assertEqual(in_game.close_decision(state, in_game.MAX_CLOSES, 0.0, 100.0), 'limit')
         self.assertIsNone(in_game.close_decision({'game': False, 'ui': {'123': 1}}, 0, 0.0, 100.0))
