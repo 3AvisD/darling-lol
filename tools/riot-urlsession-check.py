@@ -54,15 +54,18 @@ Thread(target=server.serve_forever, daemon=True).start()
 prefix = Path(tempfile.mkdtemp(prefix='urlsession-prefix-', dir=root / 'build'))
 env = {key: os.environ[key] for key in ('PATH', 'HOME', 'USER', 'LOGNAME', 'DISPLAY',
        'XAUTHORITY', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS', 'LANG') if key in os.environ}
-env.update(DPREFIX=str(prefix), EGL_PLATFORM='x11', LC_ALL='en_US.UTF-8',
-           DYLD_FRAMEWORK_PATH='/Volumes/SystemRoot' + str(frameworks.resolve()),
-           DYLD_LIBRARY_PATH='/Volumes/SystemRoot' + str(libraries.resolve()))
+env.update(DPREFIX=str(prefix), EGL_PLATFORM='x11', LC_ALL='en_US.UTF-8')
 log = args.log
 result = None
 try:
     with log.open('w') as stream:
         os.chmod(log, 0o600)
-        result = subprocess.run(['darling', str(args.probe.resolve()),
+        # Apply overlays to the probe only, after the private namespace boots.
+        # launchd/shellspawn must start against the installed base runtime.
+        result = subprocess.run(['darling', 'shell', 'env',
+                                 'DYLD_FRAMEWORK_PATH=/Volumes/SystemRoot' + str(frameworks.resolve()),
+                                 'DYLD_LIBRARY_PATH=/Volumes/SystemRoot' + str(libraries.resolve()),
+                                 '/Volumes/SystemRoot' + str(args.probe.resolve()),
                                  f'http://127.0.0.1:{server.server_port}/payload',
                                  f'http://127.0.0.1:{reserved.getsockname()[1]}/payload'],
                                 env=env, stdout=stream, stderr=subprocess.STDOUT, timeout=90)

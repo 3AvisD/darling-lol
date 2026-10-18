@@ -23,9 +23,13 @@ with open(TRACE, 'a') as stream:
     stream.write(json.dumps({'args':sys.argv[1:], 'prefix':os.environ['DPREFIX']}) + '\\n')
 if sys.argv[1] == 'shutdown':
     raise SystemExit(0)
-assert urllib.request.urlopen(sys.argv[2]).read() == b'darling-session-ok'
+assert sys.argv[1:3] == ['shell', 'env']
+assert 'DYLD_FRAMEWORK_PATH' not in os.environ and 'DYLD_LIBRARY_PATH' not in os.environ
+urls = [arg for arg in sys.argv[1:] if arg.startswith('http://')]
+assert len(urls) == 2
+assert urllib.request.urlopen(urls[0]).read() == b'darling-session-ok'
 try:
-    urllib.request.urlopen(sys.argv[3], timeout=2)
+    urllib.request.urlopen(urls[1], timeout=2)
 except OSError:
     pass
 else:
