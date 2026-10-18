@@ -13,6 +13,14 @@ import sys
 import time
 
 
+def warn(message):
+    """Diagnostics must not discard the namespace after a terminal hangup."""
+    try:
+        print(message, file=sys.stderr, flush=True)
+    except OSError:
+        pass
+
+
 def main():
     scripts = Path(__file__).resolve().parent
     spec = importlib.util.spec_from_file_location('nix_idle', scripts / 'nix-idle.py')
@@ -42,7 +50,7 @@ def main():
         if result < 0:
             result = 128 - result
     except OSError as error:
-        print(f'Cannot start client: {error}', file=sys.stderr)
+        warn(f'Cannot start client: {error}')
     finally:
         # A launcher can return while guest clients remain. Do not tear down
         # their server, or discard the only namespace capable of shutting it down.
@@ -54,21 +62,21 @@ def main():
                 last_error = None
             except (OSError, RuntimeError) as error:
                 if str(error) != last_error:
-                    print(f'{error}; retaining original namespace and retrying. '
-                          'Exit clients to allow safe shutdown.', file=sys.stderr)
+                    warn(f'{error}; retaining original namespace and retrying. '
+                         'Exit clients to allow safe shutdown.')
                     last_error = str(error)
             time.sleep(1)
         while True:
             try:
                 shutdown = subprocess.run(['bash', str(scripts / 'darling-rootless.sh'), 'shutdown']).returncode
             except OSError as error:
-                print(f'Cannot run namespace-local shutdown: {error}', file=sys.stderr)
+                warn(f'Cannot run namespace-local shutdown: {error}')
                 shutdown = 1
             if not shutdown:
                 break
-            print(f'Darling namespace-local shutdown failed (status {shutdown}); '
-                  'retaining the original namespace and retrying in 5 seconds. '
-                  'Keep this terminal open.', file=sys.stderr)
+            warn(f'Darling namespace-local shutdown failed (status {shutdown}); '
+                 'retaining the original namespace and retrying in 5 seconds. '
+                 'Keep this terminal open.')
             time.sleep(5)
         result = interrupted or result
     return result

@@ -18,6 +18,8 @@ To install permanently, adding the launcher to your user profile:
 
 ```sh
 nix profile add github:lucannez64/darling-lol#default
+# Older Nix/Lix versions without `profile add`:
+# nix profile install github:lucannez64/darling-lol#default
 ```
 
 Then run `darling-lol` or use the desktop application menu. See
