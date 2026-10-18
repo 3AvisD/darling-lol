@@ -26,10 +26,227 @@ index 84161fd..5b23944 100644
  	src/IOSurface.mm
  	src/IOUserClient.mm
 diff --git a/src/IORegistryEntry.mm b/src/IORegistryEntry.mm
-index 50c10fe..bd501cf 100644
+index 50c10fe..7026e1c 100644
 --- a/src/IORegistryEntry.mm
 +++ b/src/IORegistryEntry.mm
-@@ -513,3 +513,86 @@ kern_return_t is_io_registry_entry_get_property_bin
+@@ -1,11 +1,15 @@
+ #include "IORegistryEntry.h"
+ #include <stack>
+ #include <IOKit/IOCFSerialize.h>
++#include <CoreFoundation/CFNumber.h>
+ #include <cstring>
+ #include <vector>
+ #include <IOKit/IOKitLib.h>
+ #include <IOKit/IOReturn.h>
+ #include <sstream>
++#include <limits>
++#import <Foundation/NSData.h>
++#import <Foundation/NSNumber.h>
+ #include "IOIterator.h"
+ extern "C" {
+ #include "iokitmigServer.h"
+@@ -29,6 +33,12 @@ IORegistryEntry::~IORegistryEntry()
+ {
+ 	std::unique_lock l(m_entriesByIdMutex);
+ 	m_entriesById.erase(m_id);
++	// Registry requests and object teardown run on iokitd's main dispatch queue.
++	// Detach both directions so a later traversal cannot follow a deleted entry.
++	for (auto& plane : m_parents)
++		for (auto* parent : plane.second) parent->m_children[plane.first].erase(this);
++	for (auto& plane : m_children)
++		for (auto* child : plane.second) child->m_parents[plane.first].erase(this);
+ }
+ 
+ IORegistryEntry* IORegistryEntry::findById(uint64_t id)
+@@ -79,29 +89,42 @@ std::set<IORegistryEntry*> IORegistryEntry::getChildren(const char* plane)
+ 
+ void IORegistryEntry::registerInPlane(const char* plane, const char* pathName, IORegistryEntry* parent)
+ {
++	if (!plane || !*plane || !pathName || !*pathName || !parent || parent == this) return;
++	std::set<IORegistryEntry*> visited;
++	std::vector<IORegistryEntry*> pending { parent };
++	while (!pending.empty()) {
++		auto* current = pending.back(); pending.pop_back();
++		if (current == this) return; // refuse cycles, including indirect ones
++		if (!visited.insert(current).second) continue;
++		for (auto* ancestor : current->getParents(plane)) pending.push_back(ancestor);
++	}
+ 	m_name[plane] = pathName;
++	if (parent == root()) parent->m_name.emplace(plane, "Root");
+ 
+ 	auto it = m_parents.find(plane);
+ 
+ 	if (it == m_parents.end())
+-		it = m_parents.insert(std::make_pair(std::string_view(plane), std::set<IORegistryEntry*>())).first;
++		it = m_parents.insert(std::make_pair(std::string(plane), std::set<IORegistryEntry*>())).first;
+ 	
+ 	it->second.insert(parent);
+ 	
+ 	it = parent->m_children.find(plane);
+ 	if (it == parent->m_children.end())
+-		it = parent->m_children.insert(std::make_pair(std::string_view(plane), std::set<IORegistryEntry*>())).first;
++		it = parent->m_children.insert(std::make_pair(std::string(plane), std::set<IORegistryEntry*>())).first;
+ 
+ 	it->second.insert(this);
+ }
+ 
+ std::string IORegistryEntry::getPath(const char* plane)
+ {
++	if (!inPlane(plane)) return "?unsup_plane?";
+ 	std::stack<std::string> components;
++	std::set<IORegistryEntry*> visited;
+ 	IORegistryEntry* cur = this;
+ 
+ 	while (true)
+ 	{
++		if (!visited.insert(cur).second) return "?unsup_plane?";
+ 		std::set<IORegistryEntry*> parents = cur->getParents(plane);
+ 		if (parents.empty())
+ 		{
+@@ -113,18 +136,22 @@ std::string IORegistryEntry::getPath(const char* plane)
+ 
+ 		components.push(cur->getName(plane));
+ 		
+-		IORegistryEntry* parent = *parents.begin();
++		IORegistryEntry* parent = nullptr;
++		for (auto* candidate : parents) if (candidate->inPlane(plane)) { parent = candidate; break; }
++		if (!parent) return "?unsup_plane?";
+ 		cur = parent;
+ 	}
+ 
+ 	std::string path = plane;
+ 	path += ":";
++	if (components.empty()) path += "/";
+ 
+ 	while (!components.empty())
+ 	{
+ 		path += "/";
+ 		path += components.top();
+ 		components.pop();
++		if (path.size() > 65535) return "?unsup_plane?";
+ 	}
+ 
+ 	return path;
+@@ -166,11 +193,15 @@ kern_return_t is_io_registry_entry_get_path
+ 	io_string_t path
+ )
+ {
++	if (!path) return kIOReturnBadArgument;
+     IORegistryEntry* e = dynamic_cast<IORegistryEntry*>(IOObject::lookup(registry_entry));
+ 	if (!e)
+ 		return kIOReturnBadArgument;
+ 
++	if (!plane || !memchr(plane, 0, sizeof(io_name_t)) || !e->inPlane(plane)) return kIOReturnBadArgument;
+ 	std::string mypath = e->getPath(plane);
++	if (mypath == "?unsup_plane?") return kIOReturnBadArgument;
++	if (mypath.size() >= sizeof(io_string_t)) { path[0] = 0; return kIOReturnNoSpace; }
+ 	strlcpy(path, mypath.c_str(), sizeof(io_string_t));
+ 
+ 	return kIOReturnSuccess;
+@@ -386,55 +417,59 @@ kern_return_t is_io_registry_entry_get_location_in_plane
+     return KERN_NOT_SUPPORTED;
+ }
+ 
+-kern_return_t is_io_registry_entry_from_path
+-(
+-	mach_port_t master_port,
+-	io_string_t path,
+-	mach_port_t *registry_entry
+-)
++bool IORegistryEntry::inPlane(const char* plane) const
+ {
+-	*registry_entry = 0;
+-
+-	std::vector<std::string> components;
+-    std::istringstream iss(path);
+-
+-    for (std::string token; std::getline(iss, token, '/'); )
+-	{
+-		if (!token.empty())
+-        	components.push_back(std::move(token));
++	if (!plane || !*plane || m_name.find(plane) == m_name.end()) return false;
++	std::set<const IORegistryEntry*> visited;
++	std::vector<const IORegistryEntry*> pending { this };
++	while (!pending.empty()) {
++		auto* current = pending.back(); pending.pop_back();
++		if (current == root()) return true;
++		if (!visited.insert(current).second) continue;
++		auto parents = current->m_parents.find(plane);
++		if (parents != current->m_parents.end())
++			for (auto* parent : parents->second) pending.push_back(parent);
+ 	}
+-    
+-	if (components.empty())
+-		return kIOReturnBadArgument;
+-	
+-	std::string& planeName = components[0];
+-	if (planeName[planeName.length()-1] != ':')
+-		return kIOReturnBadArgument;
+-	else
+-		planeName.resize(planeName.length()-1); // remove the final colon
+-
+-	IORegistryEntry* current = IORegistryEntry::root();
+-	for (size_t i = 1; i < components.size(); i++)
+-	{
+-		auto children = current->getChildren(planeName.c_str());
+-		IORegistryEntry* next = nullptr;
++	return false;
++}
+ 
+-		for (IORegistryEntry* e : children)
+-		{
+-			if (strcasecmp(e->getName(planeName.c_str()).c_str(), components[i].c_str()) == 0)
+-			{
+-				next = e;
+-				break;
+-			}
++IORegistryEntry* IORegistryEntry::fromPath(std::string_view path)
++{
++	if (path.empty() || path.size() > 65535 || path.find('\0') != std::string_view::npos) return nullptr;
++	auto colon = path.find(':');
++	if (colon == 0 || colon == std::string_view::npos || colon >= sizeof(io_name_t)) return nullptr;
++	std::string plane(path.substr(0, colon));
++	if (plane.find('/') != std::string::npos) return nullptr;
++	auto* current = root();
++	if (!current->inPlane(plane.c_str())) return nullptr;
++	path.remove_prefix(colon + 1);
++	if (!path.empty() && path.front() != '/') return nullptr;
++	while (!path.empty()) {
++		path.remove_prefix(1);
++		auto slash = path.find('/');
++		auto name = path.substr(0, slash);
++		if (!name.empty()) {
++			if (name == "." || name == "..") return nullptr;
++			IORegistryEntry* next = nullptr;
++			for (auto* child : current->getChildren(plane.c_str()))
++				if (child->getName(plane.c_str()) == name) { next = child; break; }
++			if (!next) return nullptr;
++			current = next;
+ 		}
+-
+-		if (!next)
+-			return kIOReturnNoDevice;
+-		current = next;
++		if (slash == std::string_view::npos) break;
++		path.remove_prefix(slash);
+ 	}
++	return current; // borrowed until this main-queue request completes
++}
+ 
+-	*registry_entry = current->port();
+-
++kern_return_t is_io_registry_entry_from_path(mach_port_t master_port, io_string_t path, mach_port_t* registry_entry)
++{
++	if (!registry_entry) return kIOReturnBadArgument;
++	*registry_entry = MACH_PORT_NULL;
++	if (!path || !memchr(path, 0, sizeof(io_string_t))) return kIOReturnBadArgument;
++	auto* entry = IORegistryEntry::fromPath(path);
++	if (!entry) return kIOReturnNoDevice;
++	*registry_entry = entry->port();
+ 	return kIOReturnSuccess;
+ }
+ 
+@@ -513,3 +548,189 @@ kern_return_t is_io_registry_entry_get_property_bin
      return kr;
  }
  
@@ -115,6 +332,109 @@ index 50c10fe..bd501cf 100644
 +
 +	CFRelease(data);
 +	return kr;
++}
++
++// OOL input ownership transfers to this server; release it on every exit path.
++kern_return_t is_io_registry_entry_from_path_ool(mach_port_t master_port, io_string_inband_t path,
++    io_buf_ptr_t path_ool, mach_msg_type_number_t path_oolCnt, kern_return_t* result, mach_port_t* registry_entry)
++{
++	struct Input {
++		io_buf_ptr_t bytes; mach_msg_type_number_t size;
++		~Input() { if (bytes && size) vm_deallocate(mach_task_self(), (vm_address_t)bytes, size); }
++	} input {path_ool, path_oolCnt};
++	if (!result || !registry_entry) return kIOReturnBadArgument;
++	*registry_entry = MACH_PORT_NULL;
++	*result = kIOReturnBadArgument;
++	std::string_view fullPath;
++	if (path_oolCnt || path_ool) {
++		if (!path_ool || !path_oolCnt || path_oolCnt > 65536 || !path || path[0] ||
++		    strnlen(path_ool, path_oolCnt) != path_oolCnt - 1) return kIOReturnSuccess;
++		fullPath = std::string_view(path_ool, path_oolCnt - 1);
++	} else {
++		if (!path || !memchr(path, 0, sizeof(io_string_inband_t))) return kIOReturnSuccess;
++		fullPath = path;
++	}
++	auto* entry = IORegistryEntry::fromPath(fullPath);
++	if (entry) { *registry_entry = entry->port(); *result = kIOReturnSuccess; }
++	else *result = kIOReturnNoDevice;
++	return kIOReturnSuccess;
++}
++
++kern_return_t is_io_registry_entry_get_path_ool(mach_port_t registry_entry, io_name_t plane,
++    io_string_inband_t path, io_buf_ptr_t* path_ool, mach_msg_type_number_t* path_oolCnt)
++{
++	if (!path || !path_ool || !path_oolCnt) return kIOReturnBadArgument;
++	path[0] = 0; *path_ool = nullptr; *path_oolCnt = 0;
++	auto* entry = dynamic_cast<IORegistryEntry*>(IOObject::lookup(registry_entry));
++	if (!entry || !plane || !memchr(plane, 0, sizeof(io_name_t)) || !entry->inPlane(plane)) return kIOReturnBadArgument;
++	auto value = entry->getPath(plane);
++	if (value == "?unsup_plane?") return kIOReturnBadArgument;
++	if (value.size() < sizeof(io_string_inband_t)) {
++		strlcpy(path, value.c_str(), sizeof(io_string_inband_t));
++	} else {
++		// MIG uses physicalcopy with deallocate=false. The main queue completes
++		// each reply before its next request, so one bounded reusable buffer
++		// keeps the sender's bytes alive without leaking one VM allocation/call.
++		static std::string reply;
++		reply.assign(value);
++		*path_ool = const_cast<char*>(reply.data());
++		*path_oolCnt = reply.size(); // IOKit creates a CFString from bytes, excluding NUL
++	}
++	return kIOReturnSuccess;
++}
++
++kern_return_t is_io_registry_entry_in_plane(mach_port_t registry_entry, io_name_t plane, boolean_t* inPlane)
++{
++	if (!inPlane) return kIOReturnBadArgument;
++	*inPlane = FALSE;
++	auto* entry = dynamic_cast<IORegistryEntry*>(IOObject::lookup(registry_entry));
++	if (!entry || !plane || !memchr(plane, 0, sizeof(io_name_t))) return kIOReturnBadArgument;
++	*inPlane = entry->inPlane(plane);
++	return kIOReturnSuccess;
++}
++
++kern_return_t is_io_registry_entry_get_property_bytes(mach_port_t registry_entry, io_name_t property_name,
++    io_struct_inband_t data, mach_msg_type_number_t* dataCnt)
++{
++	if (!dataCnt) return kIOReturnBadArgument;
++	size_t capacity = std::min<size_t>(*dataCnt, sizeof(io_struct_inband_t));
++	*dataCnt = 0;
++	auto* entry = dynamic_cast<IORegistryEntry*>(IOObject::lookup(registry_entry));
++	if (!entry || !property_name || !memchr(property_name, 0, sizeof(io_name_t))) return kIOReturnBadArgument;
++	NSString* key = [NSString stringWithUTF8String:property_name];
++	if (!key) return kIOReturnBadArgument;
++	id value = [entry->getProperties() objectForKey:key];
++	if (!value) return kIOReturnNoResources;
++	const void* bytes = nullptr;
++	size_t length = 0;
++	uint64_t number = 0;
++	if ([value isKindOfClass:[NSData class]]) {
++		bytes = [value bytes]; length = [value length];
++	} else if ([value isKindOfClass:[NSString class]]) {
++		bytes = [value UTF8String];
++		if (!bytes) return kIOReturnBadArgument;
++		length = strlen((const char*)bytes) + 1;
++	} else if ([value isKindOfClass:[NSNumber class]] && CFGetTypeID((CFTypeRef)value) == CFBooleanGetTypeID()) {
++		bytes = [value boolValue] ? "Yes" : "No";
++		length = [value boolValue] ? sizeof("Yes") : sizeof("No");
++	} else if ([value isKindOfClass:[NSNumber class]]) {
++		const char* type = [value objCType];
++		switch (type ? type[0] : 0) {
++			case 'c': case 'C': case 'B': length = 1; break;
++			case 's': case 'S': length = 2; break;
++			case 'i': case 'I': length = 4; break;
++			case 'l': case 'L': length = sizeof(long); break;
++			case 'q': case 'Q': length = 8; break;
++			default: return kIOReturnBadArgument;
++		}
++		number = [value unsignedLongLongValue]; bytes = &number;
++	} else return kIOReturnBadArgument;
++	if (length > std::numeric_limits<mach_msg_type_number_t>::max()) return kIOReturnNoSpace;
++	if (length > capacity) { *dataCnt = capacity; return kIOReturnIPCError; }
++	*dataCnt = length;
++	if (length && !data) { *dataCnt = 0; return kIOReturnBadArgument; }
++	if (length) memcpy(data, bytes, length);
++	return kIOReturnSuccess;
 +}
 diff --git a/src/IOSurfaceRoot.mm b/src/IOSurfaceRoot.mm
 index d7e6fab..d860582 100644
@@ -503,12 +823,24 @@ index a568ecc..c2d4063 100644
  /* Routine io_ps_copy_chargelog */
  
 diff --git a/src/stubs.c b/src/stubs.c
-index 91d11a1..37551e1 100644
+index 91d11a1..5a00091 100644
 --- a/src/stubs.c
 +++ b/src/stubs.c
-@@ -45,15 +45,6 @@ kern_return_t is_io_registry_entry_get_property_bytes
+@@ -33,26 +33,7 @@ kern_return_t is_io_registry_iterator_exit_entry
      return KERN_NOT_SUPPORTED;
  }
+ 
+-kern_return_t is_io_registry_entry_get_property_bytes
+-(
+-	mach_port_t registry_entry,
+-	io_name_t property_name,
+-	io_struct_inband_t data,
+-	mach_msg_type_number_t *dataCnt
+-)
+-{
+-    STUB();
+-    return KERN_NOT_SUPPORTED;
+-}
  
 -kern_return_t is_io_service_close
 -(
@@ -518,11 +850,28 @@ index 91d11a1..37551e1 100644
 -    STUB();
 -    return KERN_NOT_SUPPORTED;
 -}
--
+ 
  kern_return_t is_io_connect_get_service
  (
- 	mach_port_t connection,
-@@ -325,20 +316,6 @@ kern_return_t is_io_service_add_notification
+@@ -124,16 +105,7 @@ kern_return_t is_io_registry_entry_set_properties
+     return KERN_NOT_SUPPORTED;
+ }
+ 
+-kern_return_t is_io_registry_entry_in_plane
+-(
+-	mach_port_t registry_entry,
+-	io_name_t plane,
+-	boolean_t *inPlane
+-)
+-{
+-    STUB();
+-    return KERN_NOT_SUPPORTED;
+-}
++
+ 
+ kern_return_t is_io_service_get_busy_state
+ (
+@@ -325,20 +297,6 @@ kern_return_t is_io_service_add_notification
      return KERN_NOT_SUPPORTED;
  }
  
@@ -543,7 +892,7 @@ index 91d11a1..37551e1 100644
  kern_return_t is_io_service_acknowledge_notification
  (
  	mach_port_t service,
-@@ -439,22 +416,6 @@ kern_return_t is_io_object_get_bundle_identifier
+@@ -439,22 +397,6 @@ kern_return_t is_io_object_get_bundle_identifier
      return KERN_NOT_SUPPORTED;
  }
  
@@ -566,7 +915,7 @@ index 91d11a1..37551e1 100644
  kern_return_t is_io_connect_map_memory_into_task
  (
  	mach_port_t connection,
-@@ -533,20 +494,6 @@ kern_return_t is_io_service_add_notification_64
+@@ -533,20 +475,6 @@ kern_return_t is_io_service_add_notification_64
      return KERN_NOT_SUPPORTED;
  }
  
@@ -587,7 +936,7 @@ index 91d11a1..37551e1 100644
  kern_return_t is_io_service_add_notification_ool_64
  (
  	mach_port_t master_port,
-@@ -642,18 +589,6 @@ kern_return_t is_io_server_version
+@@ -642,18 +570,6 @@ kern_return_t is_io_server_version
  }
  
  
@@ -606,7 +955,7 @@ index 91d11a1..37551e1 100644
  kern_return_t is_io_service_match_property_table_bin
  (
  	mach_port_t service,
-@@ -682,22 +617,6 @@ kern_return_t is_io_service_add_notification_bin
+@@ -682,48 +598,9 @@ kern_return_t is_io_service_add_notification_bin
      return KERN_NOT_SUPPORTED;
  }
  
@@ -625,11 +974,38 @@ index 91d11a1..37551e1 100644
 -    STUB();
 -    return KERN_NOT_SUPPORTED;
 -}
--
- kern_return_t is_io_registry_entry_from_path_ool
+ 
+-kern_return_t is_io_registry_entry_from_path_ool
+-(
+-	mach_port_t master_port,
+-	io_string_inband_t path,
+-	io_buf_ptr_t path_ool,
+-	mach_msg_type_number_t path_oolCnt,
+-	kern_return_t *result,
+-	mach_port_t *registry_entry
+-)
+-{
+-    STUB();
+-    return KERN_NOT_SUPPORTED;
+-}
+ 
+-kern_return_t is_io_registry_entry_get_path_ool
+- (
+-    mach_port_t registry_entry,
+-    io_name_t plane,
+-    io_string_inband_t path,
+-    io_buf_ptr_t *path_ool,
+-    mach_msg_type_number_t *path_oolCnt
+-)
+-{
+-    STUB();
+-    return KERN_NOT_SUPPORTED;
+-}
++
+ 
+ kern_return_t is_io_device_tree_entry_exists_with_name
  (
- 	mach_port_t master_port,
-@@ -736,31 +655,3 @@ kern_return_t is_io_device_tree_entry_exists_with_name
+@@ -736,31 +613,3 @@ kern_return_t is_io_device_tree_entry_exists_with_name
  	return KERN_NOT_SUPPORTED;
  }
  
@@ -663,6 +1039,7 @@ index 91d11a1..37551e1 100644
 -}
 diff --git a/src/IOPlatformExpertDevice.h b/src/IOPlatformExpertDevice.h
 new file mode 100644
+index 0000000..38ad635
 --- /dev/null
 +++ b/src/IOPlatformExpertDevice.h
 @@ -0,0 +1,21 @@
@@ -673,8 +1050,8 @@ new file mode 100644
 +#include "ServiceRegistry.h"
 +
 +// The root platform device (what IOServiceMatching("IOPlatformExpertDevice") finds on macOS).
-+// Its properties describe the host machine as reported by the Linux kernel's DMI tables.
-+// Identifiers the host does not expose to us (serial number, UUID) are left out.
++// Its model strings name a fixed MacBookPro16,1. IOPlatformUUID and IOPlatformSerialNumber are
++// derived from the host machine-id, so they differ per host and stay stable across reinstalls.
 +class IOPlatformExpertDevice : public IOService
 +{
 +public:
@@ -689,14 +1066,20 @@ new file mode 100644
 +#endif
 diff --git a/src/IOPlatformExpertDevice.mm b/src/IOPlatformExpertDevice.mm
 new file mode 100644
+index 0000000..71b9f4d
 --- /dev/null
 +++ b/src/IOPlatformExpertDevice.mm
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,98 @@
 +#include "IOPlatformExpertDevice.h"
++#include "PlatformIdentity.h"
 +#import <Foundation/NSString.h>
 +#import <Foundation/NSData.h>
 +#import <Foundation/NSArray.h>
 +#import <Foundation/NSCharacterSet.h>
++#import <Foundation/NSDictionary.h>
++#include <CommonCrypto/CommonDigest.h>
++#include <uuid/uuid.h>
++#include <unistd.h>
 +#include <cstring>
 +
 +// Platform expert strings are NUL-terminated data
@@ -719,17 +1102,56 @@ new file mode 100644
 +	};
 +}
 +
++// Per-host identifiers, stable like a real Mac's: a SHA-256 of the host machine-id and a fixed
++// string, so the raw machine-id (which machine-id(5) says not to expose) never reaches apps.
++// The serial's "DARLING-" form is longer than any Apple serial and cannot match a real Mac.
++static bool hostIdentifiers(NSString** uuid, NSString** serial)
++{
++	static const char app[] = "darling-lol IOPlatformExpertDevice";
++	uuid_t machineID;
++	struct timespec wait = { 0, 0 };
++	if (gethostuuid(machineID, &wait) != 0)
++		return false;
++
++	unsigned char input[sizeof(machineID) + sizeof(app)];
++	std::memcpy(input, machineID, sizeof(machineID));
++	std::memcpy(input + sizeof(machineID), app, sizeof(app));
++	unsigned char hash[CC_SHA256_DIGEST_LENGTH];
++	CC_SHA256(input, sizeof(input), hash);
++
++	hash[6] = (hash[6] & 0x0f) | 0x40; // version 4
++	hash[8] = (hash[8] & 0x3f) | 0x80; // RFC 4122 variant
++	uuid_string_t text;
++	uuid_unparse_upper(hash, text);
++	// Owned (not autoreleased): the caller keeps them in statics for the daemon's lifetime
++	*uuid = [[NSString alloc] initWithUTF8String: text];
++	*serial = [[NSString alloc] initWithFormat: @"DARLING-%02X%02X%02X%02X", hash[16], hash[17], hash[18], hash[19]];
++	return true;
++}
++
 +NSDictionary* IOPlatformExpertDevice::getProperties()
 +{
-+	// Fixed MacBookPro16,1 identity; the Linux DMI values describe the host hardware, not the Mac we emulate
-+	return @{
++	// MacBookPro16,1 model strings; the Linux DMI values describe the host hardware, not the Mac we emulate
++	NSMutableDictionary* properties = [NSMutableDictionary dictionaryWithDictionary: @{
 +		@"manufacturer": dataForString(@"Apple Inc."),
 +		@"model": dataForString(@"MacBookPro16,1"),
 +		@"product-name": dataForString(@"MacBookPro16,1"),
 +		@"board-id": dataForString(@"Mac-E1008331FDC96864"),
-+		@"IOPlatformUUID": @"6F3B2A1E-8C4D-4E5F-9A7B-1D2C3E4F5A6B",
-+		@"IOPlatformSerialNumber": @"C02ZL0GVMD6N",
-+	};
++	}];
++
++	static NSString* uuid;
++	static NSString* serial;
++	static bool known = hostIdentifiers(&uuid, &serial);
++	if (known)
++	{
++		properties[@"IOPlatformUUID"] = uuid;
++		properties[@"IOPlatformSerialNumber"] = serial;
++	}
++	// Opt-in, immutable startup snapshot. No configuration preserves the existing
++	// per-host identifiers; daemon restart is the explicit activation boundary.
++	static NSDictionary* overrides = [DarlingPlatformIdentity::load("/private/etc/darling-platform.plist") copy];
++	if (overrides) [properties addEntriesFromDictionary:overrides];
++	return properties;
 +}
 +
 +bool IOPlatformExpertDevice::conformsTo(const char* className)
@@ -3074,3 +3496,114 @@ index 7a6fcfa..26a7d68 100644
 +		m_changedDPMS = false;
  	}
  }
+diff --git a/src/IORegistryEntry.h b/src/IORegistryEntry.h
+index 90155ed..e955bd4 100644
+--- a/src/IORegistryEntry.h
++++ b/src/IORegistryEntry.h
+@@ -19,6 +19,8 @@ public:
+ 
+ 	std::string_view getPathName(const char* plane);
+ 	std::string getPath(const char* plane);
++	bool inPlane(const char* plane) const;
++	static IORegistryEntry* fromPath(std::string_view path);
+ 	std::set<IORegistryEntry*> getParents(const char* plane);
+ 	std::set<IORegistryEntry*> getChildren(const char* plane);
+ 	std::string getName(const char* plane = nullptr);
+@@ -32,8 +34,8 @@ public:
+ 	void registerInPlane(const char* plane, const char* pathName, IORegistryEntry* parent);
+ protected:
+ 	// The key is the plane name, e.g. kIOServicePlane (as declared in IOKit/IOKitKeys.h)
+-	std::unordered_map<std::string_view, std::string> m_name;
+-	std::unordered_map<std::string_view, std::set<IORegistryEntry*>> m_parents, m_children;
++	std::unordered_map<std::string, std::string> m_name;
++	std::unordered_map<std::string, std::set<IORegistryEntry*>> m_parents, m_children;
+ 	uint64_t m_id;
+ 
+ 	static std::unordered_map<uint64_t, IORegistryEntry*> m_entriesById;
+diff --git a/src/PlatformIdentity.h b/src/PlatformIdentity.h
+new file mode 100644
+index 0000000..6c87959
+--- /dev/null
++++ b/src/PlatformIdentity.h
+@@ -0,0 +1,81 @@
++#ifndef DARLING_PLATFORM_IDENTITY_H
++#define DARLING_PLATFORM_IDENTITY_H
++#import <Foundation/Foundation.h>
++#include <uuid/uuid.h>
++#include <cstdio>
++#include <cstring>
++#include <array>
++
++namespace DarlingPlatformIdentity {
++inline bool printable(id value, size_t maximum) {
++    if (![value isKindOfClass:[NSString class]]) return false;
++    const char* text = [value UTF8String];
++    if (!text) return false;
++    size_t length = strlen(text);
++    if (!length || length > maximum || length != [value length]) return false;
++    for (size_t i = 0; i < length; ++i) if ((unsigned char)text[i] < 32 || (unsigned char)text[i] > 126) return false;
++    return true;
++}
++
++// Validate the entire schema before exposing any overrides. Strings on device
++// tree properties are NUL-terminated NSData; serial/UUID retain NSString types.
++inline NSDictionary* properties(id configuration) {
++    if (![configuration isKindOfClass:[NSDictionary class]] || [configuration count] != 2) return nil;
++    id schema = [configuration objectForKey:@"schema"];
++    if (![schema isKindOfClass:[NSNumber class]] || CFGetTypeID((CFTypeRef)schema) == CFBooleanGetTypeID() ||
++        strchr("fd", [schema objCType][0]) || [schema longLongValue] != 1) return nil;
++    id source = [configuration objectForKey:@"properties"];
++    if (![source isKindOfClass:[NSDictionary class]] || [source count] > 10) return nil;
++    NSMutableDictionary* result = [NSMutableDictionary dictionary];
++    for (id key in source) {
++        if (![key isKindOfClass:[NSString class]]) return nil;
++        id value = [source objectForKey:key];
++        if ([key isEqual:@"IOPlatformUUID"] || [key isEqual:@"provisioning_UDID"]) {
++            if (!printable(value, 36) || [value length] != 36) return nil;
++            uuid_t uuid;
++            if (uuid_parse([value UTF8String], uuid) || uuid_is_null(uuid)) return nil;
++            uuid_string_t text; uuid_unparse_upper(uuid, text);
++            result[key] = [NSString stringWithUTF8String:text];
++            if ([key isEqual:@"provisioning_UDID"]) continue;
++            unsigned char bytes[16]; memcpy(bytes, uuid, sizeof(bytes));
++            for (int i = 0; i < 4; ++i) bytes[i] = uuid[3-i];
++            bytes[4] = uuid[5]; bytes[5] = uuid[4]; bytes[6] = uuid[7]; bytes[7] = uuid[6];
++            NSData* systemID = [NSData dataWithBytes:bytes length:16];
++            if (source[@"system-id"] && ![source[@"system-id"] isEqual:systemID]) return nil;
++            result[@"system-id"] = systemID;
++        } else if ([key isEqual:@"ROM"] || [key isEqual:@"system-id"]) {
++            if (![value isKindOfClass:[NSData class]] || [value length] != ([key isEqual:@"ROM"] ? 6 : 16)) return nil;
++            result[key] = value;
++        } else if ([key isEqual:@"IOPlatformSerialNumber"]) {
++            if (!printable(value, 64)) return nil;
++            result[key] = value;
++        } else if ([key isEqual:@"manufacturer"] || [key isEqual:@"model"] || [key isEqual:@"product-name"] ||
++                   [key isEqual:@"board-id"] || [key isEqual:@"mlb-serial-number"]) {
++            if (!printable(value, [key isEqual:@"mlb-serial-number"] ? 64 : 128)) return nil;
++            const char* text = [value UTF8String];
++            result[key] = [NSData dataWithBytes:text length:strlen(text)+1];
++        } else return nil;
++    }
++    if (result[@"provisioning_UDID"] && result[@"IOPlatformUUID"] &&
++        ![result[@"provisioning_UDID"] isEqual:result[@"IOPlatformUUID"]]) return nil;
++    if (result[@"model"] && !result[@"product-name"]) result[@"product-name"] = result[@"model"];
++    return result;
++}
++
++inline NSDictionary* load(const char* path) {
++    FILE* file = fopen(path, "rb");
++    if (!file) return nil; // no overrides is the normal, unchanged default
++    std::array<unsigned char, 65537> buffer;
++    size_t size = fread(buffer.data(), 1, buffer.size(), file);
++    bool failed = ferror(file); fclose(file);
++    if (!failed && size <= 65536) {
++        NSData* data = [NSData dataWithBytes:buffer.data() length:size];
++        id config = [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:NULL];
++        NSDictionary* overrides = properties(config);
++        if (overrides) return overrides;
++    }
++    fprintf(stderr, "iokitd: invalid darling-platform.plist; retaining default platform properties\n");
++    return nil;
++}
++}
++#endif

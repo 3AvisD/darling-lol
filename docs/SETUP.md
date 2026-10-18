@@ -1,5 +1,36 @@
 # Setup and portability
 
+<a id="nixos-package"></a>
+
+## Nix package
+
+See [prerequisites](NIX.md#prerequisites) before starting, and the
+[Nix setup guide](NIX.md) for local checkout usage, updates, scripts, and runtime
+details.
+
+Run the experimental rootless package on x86_64 Linux:
+
+```sh
+nix --extra-experimental-features 'nix-command flakes' run github:lucannez64/darling-lol
+```
+
+To install permanently, adding the launcher to your user profile:
+
+```sh
+nix profile add github:lucannez64/darling-lol#default
+# Older Nix/Lix versions without `profile add`:
+# nix profile install github:lucannez64/darling-lol#default
+```
+
+Then run `darling-lol` or use the desktop application menu. See
+[permanent installation](NIX.md#install-permanently) for details.
+
+First launch builds Darling and guides you through Riot client installation.
+NixOS is not required; other Linux distributions with Nix installed are also
+supported.
+
+## Native setup notes
+
 The patch manifest pins Darling to `60ba801decee7a00782f74f6be4c8ffb013f79ff` and records every changed submodule's revision. `scripts/prepare.py` checks each revision before applying patches and never resets an existing checkout to make a patch apply. Re-running it accepts an already-applied patch.
 
 Git LFS must be available before fetching the upstream submodules. The pinned `darling-swift` submodule's `.lfsconfig` points at the retired `git-lfs.darlinghq.org`, which no longer accepts connections; `prepare.py` redirects that submodule's LFS requests to GitHub, which still serves the objects. Without that override a fresh `git submodule update` blocks with no output right after `src/external/sqlite` is checked out. The local development checkout had removed prebuilt Swift files from its working directory; that deletion is deliberately not exported. A fresh upstream checkout keeps its original Swift assets and licensing. Do not install Git LFS pointer text as a library.

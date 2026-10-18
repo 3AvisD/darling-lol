@@ -3,7 +3,15 @@
 set -eu
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo"
+if [ -n "${DARLING_WORKSPACE:-}" ]; then
+  python3 scripts/nix-idle.py
+  python3 scripts/nix-state.py check-base || { echo 'Base runtime readiness missing; run darling-lol --update.' >&2; exit 1; }
+  python3 scripts/nix-state.py invalidate
+  # Prefix initialization is a setup-only exception to the runner launch gate.
+  export DARLING_SETUP=1
+fi
 python3 scripts/configure.py
+. build/runtime/tools/runtime-paths.sh
 if [ -d build/venv/bin ]; then PATH="$repo/build/venv/bin:$PATH"; export PATH; fi
 # A server killed by the base install leaves a stale .init.pid that makes darling shell fail.
 python3 build/runtime/tools/ensure-darling-runtime.py
@@ -11,8 +19,12 @@ python3 build/runtime/tools/ensure-darling-runtime.py
 darling shell /usr/bin/true
 # The prefix has no /private/tmp of its own, so the guest falls through to the root-owned
 # installed layer and every write there (the Riot installer's temp files) fails with EACCES.
-mkdir -p "$HOME/.darling/private/tmp"
-chmod 1777 "$HOME/.darling/private/tmp"
+prefix=$prefix_dir
+mkdir -p "$prefix/private/tmp"
+chmod 1777 "$prefix/private/tmp"
+# Build the system root store now that the prefix exists; Darling is stopped next anyway.
+python3 build/runtime/tools/ensure-darling-root-certificates.py || \
+  echo 'Darling system root store not installed; the launcher retries it' >&2
 python3 build/runtime/tools/stop-darling-runtime.py
 sh build/runtime/tools/install-riot-presentation-runtime.sh
 sh build/runtime/tools/install-riot-gpu-runtime.sh
@@ -23,6 +35,10 @@ if [ -f build/runtime/tools/build-riot-libs-runtime.sh ]; then
 fi
 python3 build/runtime/tools/install-darling-system-profiler.py
 # Every guest process loads these overlays; refuse a set the compiler broke (check-darwin-tlv-calls.py).
-find "$HOME/.darling/Users/$(id -un)/RuntimeLibraries" "$HOME/.darling/Users/$(id -un)/RuntimeFrameworks" \
-  -type f ! -name '*.before-*' ! -name '*.rt-*' ! -name '*.llvm*' -size +4k -print0 |
-  xargs -0 python3 build/runtime/tools/check-darwin-tlv-calls.py
+python3 build/runtime/tools/validate-riot-runtime.py
+# Mark this canonical prefix and configured guest ready only after validation.
+if [ -n "${DARLING_WORKSPACE:-}" ]; then
+  # Overlay installation can also refresh darlingserver; record the final base.
+  python3 scripts/nix-state.py stamp-base
+  python3 scripts/nix-state.py stamp
+fi

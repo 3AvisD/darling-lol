@@ -8,9 +8,15 @@ if [ "${RCLOL_CORE_DUMPS:-0}" != 1 ]; then
  ulimit -c 0
 fi
 runner_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$runner_dir/runtime-paths.sh"
 python3 "$runner_dir/ensure-darling-runtime.py"
 python3 "$runner_dir/ensure-darling-service-accounts.py"
 python3 "$runner_dir/ensure-league-runtime-layout.py"
+# Security's system trust domain (SecTrustSettingsCopyCertificates) needs a root keychain and
+# trust record built from the host CA bundle. Only a changed bundle starts Darling; a failure
+# is reported but does not stop the launch.
+python3 "$runner_dir/ensure-darling-root-certificates.py" ||
+ echo 'Continuing without a Darling system root store; TLS clients may report untrusted roots' >&2
 # Discard argument-rewriting settings from the former injected shim.
 unset RCLOL_APP_ARGS RCLOL_APP_ARGS_SLOT RCLOL_APP_ARG2 RCLOL_APP_ARG2_SLOT
 unset RCLOL_APP_ARG3 RCLOL_APP_ARG3_SLOT RCLOL_UX_ARG1 RCLOL_UX_ARG1_SLOT
@@ -21,7 +27,12 @@ for option in RCLOL_GPU_DIRECT_PRESENT RCLOL_GPU_DIRECT_ASYNC RCLOL_GPU_DIRECT_V
  eval 'value=${'"$option"'-1}'
  case "$value" in 0|'') unset "$option";; *) export "$option=$value";; esac
 done
-prefix=${DPREFIX:-$HOME/.darling}
+prefix=$prefix_dir
+# RIOT_GUEST_HOME is host-side; DYLD paths must be relative to the guest root.
+case "$guest_home" in
+ "$prefix"/*) guest_path=/${guest_home#"$prefix"/} ;;
+ *) echo "RIOT_GUEST_HOME must be inside DPREFIX" >&2; exit 1 ;;
+esac
 # The first-time installer puts the client in /Users/Shared/Riot Games and then
 # hands off through LaunchServices, which does not start it under Darling. Link
 # the installed client where the normal launch expects it.
@@ -85,9 +96,9 @@ exec env -u ELECTRON_RUN_AS_NODE -u DYLD_INSERT_LIBRARIES EGL_PLATFORM=x11 \
   LANG="${RCLOL_GUEST_LOCALE:-en_US.UTF-8}" LC_ALL="${RCLOL_GUEST_LOCALE:-en_US.UTF-8}" \
   mesa_glthread="${RCLOL_MESA_GLTHREAD-${mesa_glthread-false}}" \
   XMODIFIERS="${RCLOL_XMODIFIERS:-@im=none}" DISPLAY="${DISPLAY:-:1}" \
-  DYLD_LIBRARY_PATH="${DYLD_LIBRARY_PATH:-@GUEST_HOME@/RuntimeLibraries}" \
-  DYLD_FRAMEWORK_PATH="${DYLD_FRAMEWORK_PATH:-@GUEST_HOME@/RuntimeFrameworks}" \
-  DARLING_XSHM_LIBRARY="${DARLING_XSHM_LIBRARY:-@GUEST_HOME@/libDarlingXShm.dylib}" \
+  DYLD_LIBRARY_PATH="${DYLD_LIBRARY_PATH:-$guest_path/RuntimeLibraries}" \
+  DYLD_FRAMEWORK_PATH="${DYLD_FRAMEWORK_PATH:-$guest_path/RuntimeFrameworks}" \
+  DARLING_XSHM_LIBRARY="${DARLING_XSHM_LIBRARY:-$guest_path/libDarlingXShm.dylib}" \
   darling "$A" --region="${RCLOL_REGION:-EUW}" --locale="${RCLOL_LOCALE:-en_GB}" \
     "$@" \
-    --log-dir="@GUEST_HOME@/Library/Logs/Riot Games/Riot Client"
+    --log-dir="$guest_path/Library/Logs/Riot Games/Riot Client"

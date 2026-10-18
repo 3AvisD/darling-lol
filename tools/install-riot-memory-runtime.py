@@ -10,7 +10,9 @@ import shutil
 import stat
 import tempfile
 
-ROOT = Path(__file__).resolve().parent.parent
+from runtime_paths import runtime_paths
+
+ROOT = Path(__file__).resolve().parents[1]
 # The optimized relink from tools/build-riot-kqueue-runtime.py is the library the
 # client runtime is supposed to run; the plain CMake build (no -O flag) is not.
 DEFAULT_ARTIFACT = ROOT / "build/riot-libsystem_kernel.dylib"
@@ -84,10 +86,11 @@ def prefix_destinations(config, binary, artifact):
     install the artifact itself leaves it untouched. That is what keeps the
     optimized relink from being silently replaced by the plain CMake build.
     """
+    prefix, guest_home = runtime_paths(config)
     destinations = [
-        Path(config["prefix"]) / config["guest_home"].lstrip("/") / "RuntimeLibraries/libsystem_kernel.dylib",
+        guest_home / "RuntimeLibraries/libsystem_kernel.dylib",
         # Keep the per-prefix bootstrap copy consistent; leave the system SDK alone.
-        Path(config["prefix"]) / "usr/lib/system/libsystem_kernel.dylib",
+        prefix / "usr/lib/system/libsystem_kernel.dylib",
     ]
     if not artifact.exists():
         return destinations, "the prepared artifact " + str(artifact) + " does not exist yet"

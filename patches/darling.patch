@@ -7597,19 +7597,22 @@ index 6fa2d088c..655554284 100644
  int sandbox_issue_fs_extension(const char *path, uint64_t flags, char **ext_token);
  int sandbox_issue_fs_rw_extension(const char *path, char **ext_token);
 diff --git a/src/shellspawn/shellspawn.c b/src/shellspawn/shellspawn.c
-index f5ba615bb..fea23d638 100644
+index f5ba615..53d04ad 100644
 --- a/src/shellspawn/shellspawn.c
 +++ b/src/shellspawn/shellspawn.c
-@@ -36,7 +36,7 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+@@ -34,9 +34,10 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+ #include <sys/ioctl.h>
+ #include <signal.h>
  #include "shellspawn.h"
++#include "shellspawn-fds.h"
  #include "duct_signals.h"
  
 -#define DBG 0
-+#define DBG 1
++#define DBG (getenv("DARLING_SHELLSPAWN_DEBUG") && strcmp(getenv("DARLING_SHELLSPAWN_DEBUG"), "1") == 0)
  
  int g_serverSocket = -1;
  struct sigaction sigchld_oldaction;
-@@ -50,6 +50,17 @@ void reapAll(void);
+@@ -50,6 +51,17 @@ void reapAll(void);
  
  int main(int argc, const char** argv)
  {
@@ -7627,6 +7630,123 @@ index f5ba615bb..fea23d638 100644
  	// shellspawn (daemon) --fork()--> shellspawn (child) --fork()--> exec /bin/bash
  	// in order to read the exit status of the shell process,
  	// we have to allow it to become a zombie, therefore we need to
+@@ -125,7 +137,7 @@ void spawnShell(int fd)
+ {
+ 	pid_t shell_pid = -1;
+ 	int shellfd[3] = { -1, -1, -1 };
+-	int pipefd[2];
++	int pipefd[2] = { -1, -1 };
+ 	int rv;
+ 	struct pollfd pfd[2];
+ 	char** argv = NULL;
+@@ -143,6 +155,14 @@ void spawnShell(int fd)
+ 
+ 	char* alloc_exec = NULL;
+ 
++	// Keep the control socket out of the stdio slots before receiving streams.
++	if (fd <= STDERR_FILENO) {
++		int moved = fcntl(fd, F_DUPFD_CLOEXEC, 3);
++		if (moved < 0) goto err;
++		close(fd);
++		fd = moved;
++	}
++
+ 	// Read commands from client
+ 	while (read_cmds)
+ 	{
+@@ -262,25 +282,20 @@ void spawnShell(int fd)
+ 	argv = (char**) realloc(argv, sizeof(char*) * (argc + 1));
+ 	argv[argc] = NULL;
+ 
+-	if (pipe(pipefd) == -1)
+-		goto err;
++	if (shellspawn_remap_stdio(shellfd) < 0) goto err;
++	if (pipe(pipefd) == -1) goto err;
+ 
+ 	setsid();
+ 	setpgrp();
+ 
+-	close(STDIN_FILENO);
+-	close(STDOUT_FILENO);
+-	close(STDERR_FILENO);
+-
+-	dup2(shellfd[0], STDIN_FILENO);
+-	dup2(shellfd[1], STDOUT_FILENO);
+-	dup2(shellfd[2], STDERR_FILENO);
+-
+ 	ioctl(STDIN_FILENO, TIOCSCTTY, STDIN_FILENO);
+ 
+ 	shell_pid = fork();
++	if (shell_pid < 0) goto err;
+ 	if (shell_pid == 0)
+ 	{
++		shellspawn_close_streams(shellfd);
++		close(pipefd[0]);
+ 		close(fd);
+ 
+ 		fcntl(pipefd[1], F_SETFD, FD_CLOEXEC);
+@@ -296,6 +311,7 @@ void spawnShell(int fd)
+ 		exit(EXIT_FAILURE);
+ 	}
+ 
++	shellspawn_close_streams(shellfd);
+ 	if (alloc_exec)
+ 	{
+ 		free(alloc_exec);
+@@ -304,12 +320,14 @@ void spawnShell(int fd)
+ 
+ 	// Check that exec succeeded
+ 	close(pipefd[1]); // close the write end
++	pipefd[1] = -1;
+ 	if (read(pipefd[0], &rv, sizeof(rv)) == sizeof(rv))
+ 	{
+ 		errno = rv;
+ 		goto err;
+ 	}
+ 	close(pipefd[0]);
++	pipefd[0] = -1;
+ 
+ 	// Now we start passing signals
+ 	// and check for child process exit
+@@ -372,7 +390,7 @@ void spawnShell(int fd)
+ 
+ 					if (darwin_signal != 0)
+ 					{
+-						int fg_pid = tcgetpgrp(shellfd[0]);
++						int fg_pid = tcgetpgrp(STDIN_FILENO);
+ 						if (fg_pid != -1)
+ 						{
+ 							if (DBG) printf("fg_pid = %d\n", fg_pid);
+@@ -394,11 +412,7 @@ void spawnShell(int fd)
+ 	kill(shell_pid, SIGKILL);
+ 
+ 	// Close shell fds
+-	for (int i = 0; i < 3; i++)
+-	{
+-		if (shellfd[i] != -1)
+-			close(shellfd[0]);
+-	}
++	shellspawn_close_streams(shellfd);
+ 
+ 	// Reap the child
+ 	int wstatus;
+@@ -415,13 +429,11 @@ void spawnShell(int fd)
+ 	reapAll();
+ 	return;
+ err:
++	if (pipefd[0] >= 0) close(pipefd[0]);
++	if (pipefd[1] >= 0) close(pipefd[1]);
+ 	if (DBG) fprintf(stderr, "Error spawning shell: %s\n", strerror(errno));
+ 
+-	for (int i = 0; i < 3; i++)
+-	{
+-		if (shellfd[i] != -1)
+-			close(shellfd[0]);
+-	}
++	shellspawn_close_streams(shellfd);
+ 
+ 	if (shell_pid != -1)
+ 		kill(shell_pid, SIGKILL);
 diff --git a/src/startup/mldr/commpage.c b/src/startup/mldr/commpage.c
 index d9a7aea96..cc76f7a85 100644
 --- a/src/startup/mldr/commpage.c
@@ -7796,7 +7916,7 @@ index fee1bde87..bee86604b 100644
  #endif
 -
 diff --git a/src/startup/mldr/mldr.c b/src/startup/mldr/mldr.c
-index 6617ef82b..1d12043c2 100644
+index 6617ef82b..a227abee8 100644
 --- a/src/startup/mldr/mldr.c
 +++ b/src/startup/mldr/mldr.c
 @@ -154,7 +154,7 @@ int main(int argc, char** argv, char** envp)
@@ -7825,7 +7945,19 @@ index 6617ef82b..1d12043c2 100644
  static int socket_bitmap_get(socket_bitmap_t* bitmap) {
  	int fd = -1;
  	bool updated = false;
-@@ -673,7 +683,13 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -648,6 +658,11 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+ 
+ 	pthread_mutex_lock(&bitmap->mutex);
+ 
++	// darling-lol: placed above the slots because its slot was taken (socket_bitmap_place).
++	if (socket > bitmap->highest) {
++		goto out;
++	}
++
+ 	index = bitmap->highest - socket;
+ 
+ 	bitmap->bits[index / 8] &= ~(1 << (index % 8));
+@@ -673,7 +688,13 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  				}
  			}
  
@@ -7840,7 +7972,7 @@ index 6617ef82b..1d12043c2 100644
  				// this bit is in-use, so we can't shrink any further
  				break;
  			}
-@@ -685,12 +701,20 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -685,12 +706,20 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  
  		if (old_byte_size != new_byte_size) {
  			// we can free one or more bytes from the bitmap
@@ -7866,6 +7998,68 @@ index 6617ef82b..1d12043c2 100644
  		}
  	}
  
+@@ -698,6 +727,22 @@ out:
+ 	pthread_mutex_unlock(&bitmap->mutex);
+ };
+ 
++/* darling-lol: move `fd` to the next slot. dup2() silently closed whatever the guest or a native library (NVIDIA's
++ * driver: one fd per allocation) already held on that number, and its owner later closed our socket. F_DUPFD never
++ * replaces a descriptor: if the slot is taken, it returns the lowest free number above it, which is ours alone. */
++static int socket_bitmap_place(int fd) {
++	int slot = socket_bitmap_get(&socket_bitmap);
++	if (slot < 0) {
++		return -1;
++	}
++
++	int placed = fcntl(fd, F_DUPFD, slot);
++	if (placed != slot) {
++		socket_bitmap_put(&socket_bitmap, slot);
++	}
++	return placed;
++}
++
+ int __mldr_create_rpc_socket(void) {
+ 	int pre_fd = -1;
+ 	int fd = -1;
+@@ -707,18 +752,11 @@ int __mldr_create_rpc_socket(void) {
+ 		goto err_out;
+ 	}
+ 
+-	fd = socket_bitmap_get(&socket_bitmap);
++	fd = socket_bitmap_place(pre_fd);
+ 	if (fd < 0) {
+ 		goto err_out;
+ 	}
+ 
+-	if (dup2(pre_fd, fd) < 0) {
+-		// we have to put it away ourselves here because `fd` is not yet valid, so we can't close() it in the error handler
+-		socket_bitmap_put(&socket_bitmap, fd);
+-		fd = -1;
+-		goto err_out;
+-	}
+-
+ 	close(pre_fd);
+ 	pre_fd = -1;
+ 
+@@ -772,17 +810,11 @@ int __mldr_create_process_lifetime_pipe(int* fds) {
+ 	}
+ 
+ 	for (int i = 0; i < 2; ++i) {
+-		fds[i] = socket_bitmap_get(&socket_bitmap);
++		fds[i] = socket_bitmap_place(pre_fds[i]);
+ 		if (fds[i] < 0) {
+ 			goto err_out;
+ 		}
+ 
+-		if (dup2(pre_fds[i], fds[i]) < 0) {
+-			socket_bitmap_put(&socket_bitmap, fds[i]);
+-			fds[i] = -1;
+-			goto err_out;
+-		}
+-
+ 		close(pre_fds[i]);
+ 		pre_fds[i] = -1;
+ 	}
 diff --git a/src/tools/open.m b/src/tools/open.m
 index 126bd394c..f62c2e0e8 100644
 --- a/src/tools/open.m
@@ -10394,13 +10588,19 @@ diff --git a/tools/shutdown-user.sh b/tools/shutdown-user.sh
 index 072a6e2..c804100 100755
 --- a/tools/shutdown-user.sh
 +++ b/tools/shutdown-user.sh
-@@ -1,26 +1,34 @@
+@@ -1,26 +1,40 @@
  #!/bin/sh
  
 -if [ "$(whoami)" != "root" ]
 -then
 -	echo "$0 must be run as root, invoking sudo"
 -	exec sudo su -c "$0" "$@"
++# Rootless installs own only this workspace/prefix, never all launchd users.
++if [ -n "${DARLING_WORKSPACE:-}" ]; then
++    : "${DPREFIX:?rootless install requires an explicit prefix}"
++    exec python3 "$DARLING_WORKSPACE/scripts/nix-idle.py"
++fi
++
 +if [ "$(whoami)" != "root" ]; then
 +    echo "$0 must be run as root, invoking sudo"
 +    exec sudo sh "$0" "$@"
@@ -10463,3 +10663,62 @@ index 8077b7e..0556080 100644
  endif(NOT DEBIAN_PACKAGING)
  
  add_custom_target(uninstall
+diff --git a/src/shellspawn/shellspawn-fds.h b/src/shellspawn/shellspawn-fds.h
+new file mode 100644
+index 0000000..1f3c473
+--- /dev/null
++++ b/src/shellspawn/shellspawn-fds.h
+@@ -0,0 +1,37 @@
++#ifndef SHELLSPAWN_FDS_H
++#define SHELLSPAWN_FDS_H
++#include <errno.h>
++#include <fcntl.h>
++#include <unistd.h>
++
++// Preserve every source before replacing any standard descriptor: sources can
++// themselves be 0, 1 or 2 when the daemon was launched with closed stdio.
++static int shellspawn_remap_stdio(const int streams[3])
++{
++    int saved[3] = { -1, -1, -1 };
++    for (int i = 0; i < 3; ++i) {
++        saved[i] = fcntl(streams[i], F_DUPFD_CLOEXEC, 3);
++        if (saved[i] < 0) goto failure;
++    }
++    for (int i = 0; i < 3; ++i)
++        if (dup2(saved[i], i) < 0) goto failure;
++    for (int i = 0; i < 3; ++i) close(saved[i]);
++    return 0;
++failure: {
++    int error = errno;
++    for (int i = 0; i < 3; ++i) if (saved[i] >= 0) close(saved[i]);
++    errno = error;
++    return -1;
++}}
++
++static void shellspawn_close_streams(int streams[3])
++{
++    for (int i = 0; i < 3; ++i) {
++        int fd = streams[i];
++        streams[i] = -1;
++        for (int j = i + 1; j < 3; ++j)
++            if (streams[j] == fd) streams[j] = -1;
++        if (fd > STDERR_FILENO) close(fd);
++    }
++}
++#endif
+diff --git a/src/startup/mldr/elfcalls/threads.c b/src/startup/mldr/elfcalls/threads.c
+index e789986..0d56b4e 100644
+--- a/src/startup/mldr/elfcalls/threads.c
++++ b/src/startup/mldr/elfcalls/threads.c
+@@ -387,8 +387,9 @@ int __darling_thread_rpc_socket(void) {
+ 			// this is the main thread
+ 			t_server_socket = __dserver_main_thread_socket_fd;
+ 		} else {
+-			// threads should already have a per-thread socket assigned when they're created
+-			abort();
++			// Native host-library threads do not have a Darling RPC connection.
++			// Let the caller report EPIPE, including the resize-signal bridge.
++			return -1;
+ 		}
+ 	}
+ 	return t_server_socket;

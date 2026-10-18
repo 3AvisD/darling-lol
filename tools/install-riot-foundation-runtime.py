@@ -17,7 +17,9 @@ import shutil
 import stat
 import tempfile
 
-ROOT = Path(__file__).resolve().parent.parent
+from runtime_paths import runtime_paths
+
+ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ARTIFACT = ROOT / "build/riot-Foundation"
 
 
@@ -110,9 +112,8 @@ def main():
         parser.exit(1, "The library to install does not exist: " + str(args.binary) + "; build it first: "
                        "python3 build/runtime/tools/build-riot-foundation-runtime.py\n")
     config = json.loads((ROOT / "build/config.json").read_text())
-    prefix = Path(config["prefix"])
-    guest_home = config["guest_home"].lstrip("/")
-    framework = prefix / guest_home / "RuntimeFrameworks/Foundation.framework"
+    _, guest_home = runtime_paths(config)
+    framework = guest_home / "RuntimeFrameworks/Foundation.framework"
     sdk_framework = Path(config["sdk"]) / "System/Library/Frameworks/Foundation.framework"
     if not sdk_framework.exists():
         parser.exit(1, "The SDK framework does not exist: " + str(sdk_framework) + "\n")

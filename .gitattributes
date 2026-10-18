@@ -1,0 +1,3 @@
+# Unified-diff context uses a single space for an empty source line.
+# Do not report that patch syntax as trailing source whitespace.
+patches/*.patch whitespace=-blank-at-eol

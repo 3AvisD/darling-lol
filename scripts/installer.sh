@@ -2,8 +2,12 @@
 set -eu
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo"
+if [ -n "${DARLING_WORKSPACE:-}" ] && ! python3 scripts/nix-state.py check; then
+  echo 'Rootless runtime readiness is missing or incompatible; run darling-lol --installer in a terminal.' >&2
+  exit 1
+fi
+export PATH="${DARLING_RUNNER_DIR:+$DARLING_RUNNER_DIR:}$repo/usr-local/bin:/usr/local/bin:$PATH"
 region=${1:-euw}
-# Riot publishes LAN, LAS and OCE installers under their platform codes.
 case "$region" in lan) region=la1;; las) region=la2;; oce) region=oc1;; esac
 case "$region" in euw|eune|na|br|kr|jp|la1|la2|oc1|ru|tr) ;; *) echo 'Use a Riot installer region code' >&2; exit 1;; esac
 python3 scripts/configure.py >/dev/null
