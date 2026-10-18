@@ -57,6 +57,34 @@ The old kernel library returned success for Darwin allocator free/reuse hints wi
 
 Build/install the kernel library using [the incremental update steps](SETUP.md#updating-an-existing-runtime), then perform the manual restart when finished playing. Linux 5.14+ is required. Do not kill client helpers as an attempted memory optimization during play.
 
+## Shaders are recompiled on every start
+
+Mesa resolves its shader disk cache below `$HOME`. Inside the guest, `$HOME` is
+`/Users/<user>`, which does not exist on the host filesystem, so Mesa cannot create the
+cache and disables it, once per process:
+
+```
+Failed to create /Users/<user> for shader cache (Permission denied)---disabling
+```
+
+One launcher log without the fix contained 212 of these lines, and no shader compiled by
+one process was reused by another process or by the next start: the client and the game
+recompiled every shader, on every launch. Mesa is host code loaded into the guest and
+reads `MESA_SHADER_CACHE_DIR` verbatim, so the launcher now passes a host directory:
+
+```sh
+MESA_SHADER_CACHE_DIR=${XDG_CACHE_HOME:-${HOME:-$prefix_dir}/.cache}/darling-lol   # launcher default
+```
+
+Mesa creates `mesa_shader_cache/` (client and game shaders) and `radv_builtin_shaders/`
+below it. With the change, one client start logged no shader-cache failure and wrote 434
+files / 5.6 MB, still growing while the client ran (Radeon RX 550, radv). Set
+`MESA_SHADER_CACHE_DIR` yourself to move the cache, for example to another disk: the
+launcher preserves a non-empty value, and a directory that cannot be created leaves the
+previous behaviour. Reusing the cache removes the repeated compilation; the startup-time
+gain has not been measured separately. Cache entries are keyed by driver and GPU, so a
+driver update recompiles once and caches again.
+
 ## Installer exits, cannot write temporary files, or Install appears idle
 
 Use `sh scripts/installer.sh euw` (or your supported region). The first-time launcher must omit the installed client's `--app-root` and pass `--skip-to-install`; the normal wrapper now does this. It also selects `league_of_legends` so the product installation UI appears after login.
