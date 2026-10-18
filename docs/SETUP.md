@@ -124,7 +124,7 @@ sh build/runtime/tools/install-riot-metal-pair.sh
 
 The installer copies `build/riot-Metal` and `build/riot-libindium.dylib` into the guest `RuntimeFrameworks/Metal.framework` and `RuntimeLibraries`. It backs up the pair it replaces in `build/metal-pair-backups`; a repeated install keeps the older backup. `sh build/runtime/tools/install-riot-metal-pair.sh --rollback` restores that backup. `tools/install-riot-gpu-runtime.sh` still builds and installs the whole GPU set, including these two. Activation needs the namespace restart below.
 
-Indium also contains experimental hand-off changes. They are **off by default**: without the files below, libindium behaves like the build measured before them, and two matches with them on had lower FPS. Each one is a guest file, read once per game process when the game starts.
+The hand-off experiments (`metal-present-dispatch-wait`, `metal-deferred-blit` and `metal-worker-lease`) are **off by default**; two matches with them enabled had lower FPS. The table also lists diagnostics and tuning controls with their own defaults. Lazy event-loop wake-ups are **on by default** and `metal-no-lazy-wakeup` disables them. Files are read once per game process at startup unless an entry specifies a different refresh interval.
 
 | Guest file | Effect when present |
 |---|---|

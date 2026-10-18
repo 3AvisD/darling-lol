@@ -781,7 +781,7 @@ index 8546daa..7e4993c 100644
  		void updateBindings();
  
 diff --git a/private-include/indium/device.private.hpp b/private-include/indium/device.private.hpp
-index 58f1794..3e7ee47 100644
+index 58f1794..75266fd 100644
 --- a/private-include/indium/device.private.hpp
 +++ b/private-include/indium/device.private.hpp
 @@ -13,6 +13,8 @@
@@ -793,7 +793,7 @@ index 58f1794..3e7ee47 100644
  
  namespace Indium {
  	class PrivateDevice;
-@@ -25,8 +27,14 @@ namespace Indium {
+@@ -25,8 +27,11 @@ namespace Indium {
  	class PrivateDevice: public Device, public std::enable_shared_from_this<PrivateDevice> {
  	private:
  
@@ -802,13 +802,10 @@ index 58f1794..3e7ee47 100644
  		std::mutex _eventLoopMutex;
  		std::mutex _pollingMutex;
 +		uint64_t _completionSpinNanoseconds = 0;
-+		// Sequentially consistent handshake: either re-snapshot or signal.
-+		std::atomic<uint64_t> _eventLoopRegistrations {0};
-+		std::atomic<unsigned> _eventLoopBlockedPollers {0};
  
  		// these are stored separately (rather than in a single structure)
  		// so that we can easily copy them individually in the event loop polling function.
-@@ -59,6 +67,8 @@ namespace Indium {
+@@ -59,6 +64,8 @@ namespace Indium {
  		}
  
  		virtual std::string name() const override;
@@ -817,7 +814,7 @@ index 58f1794..3e7ee47 100644
  		virtual std::shared_ptr<CommandQueue> newCommandQueue() override;
  		virtual std::shared_ptr<RenderPipelineState> newRenderPipelineState(const RenderPipelineDescriptor& descriptor) override;
  		virtual std::shared_ptr<ComputePipelineState> newComputePipelineState(const ComputePipelineDescriptor& descriptor, PipelineOption options, std::shared_ptr<ComputePipelineReflection> reflection) override;
-@@ -73,6 +83,12 @@ namespace Indium {
+@@ -73,6 +80,12 @@ namespace Indium {
  		virtual void pollEvents(uint64_t timeoutNanoseconds) override;
  		virtual void wakeupEventLoop() override;
  
@@ -830,7 +827,7 @@ index 58f1794..3e7ee47 100644
  		void waitForSemaphore(VkSemaphore semaphore, uint64_t targetValue, std::function<void()> callback);
  
  		/**
-@@ -86,6 +102,11 @@ namespace Indium {
+@@ -86,6 +99,11 @@ namespace Indium {
  		 * Similar to getTimelineSemaphore(), but wraps it in a shared pointer
  		 * that automatically releases the semaphore when all references to it die out.
  		 */
@@ -842,7 +839,7 @@ index 58f1794..3e7ee47 100644
  		std::shared_ptr<TimelineSemaphore> getWrappedTimelineSemaphore();
  
  		BinarySemaphore getBinarySemaphore(bool exportable = false);
-@@ -111,5 +132,34 @@ namespace Indium {
+@@ -111,5 +129,37 @@ namespace Indium {
  
  		INDIUM_PROPERTY(VkPhysicalDeviceMemoryProperties, m, M,emoryProperties);
  		INDIUM_PROPERTY_READONLY(Feature, f, F,eatures);
@@ -875,6 +872,9 @@ index 58f1794..3e7ee47 100644
 +        std::vector<std::pair<VkSemaphore, uint64_t>> _availableTimelineSemaphores;
 +        std::mutex _renderPassMutex;
 +        std::unordered_map<RenderPassKey, VkRenderPass, RenderPassKey::Hash> _renderPasses;
++		// Sequentially consistent handshake: either re-snapshot or signal.
++		std::atomic<uint64_t> _eventLoopRegistrations {0};
++		std::atomic<unsigned> _eventLoopBlockedPollers {0};
  	};
  };
 diff --git a/private-include/indium/dynamic-vk.hpp b/private-include/indium/dynamic-vk.hpp
