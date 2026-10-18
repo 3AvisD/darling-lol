@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -88,3 +88,22 @@ exit "${CLIENT_RC:-0}"
         self.assertIn('23', result.stderr)
         self.assertEqual(self.log.read_text().splitlines().count('shutdown:shutdown'), 2)
         self.assertIn('shutdown:shutdown', self.log.read_text())
+
+    def test_shutdown_retries_when_terminal_diagnostics_fail(self):
+        spec = importlib.util.spec_from_file_location('lifecycle_fixture', self.root / 'scripts/nix-lifecycle.py')
+        lifecycle = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(lifecycle)
+        child = MagicMock()
+        child.wait.return_value = 17
+        stderr = MagicMock()
+        stderr.write.side_effect = OSError('terminal disconnected')
+        with patch.dict(os.environ, self.env), \
+             patch.object(lifecycle.signal, 'signal'), \
+             patch.object(lifecycle.subprocess, 'Popen', return_value=child), \
+             patch.object(lifecycle.subprocess, 'run', side_effect=[
+                 subprocess.CompletedProcess([], 23), subprocess.CompletedProcess([], 0)]) as shutdown, \
+             patch.object(lifecycle.time, 'sleep'), \
+             patch.object(lifecycle.sys, 'stderr', stderr):
+            self.assertEqual(lifecycle.main(), 17)
+        self.assertEqual(shutdown.call_count, 2)
+        stderr.write.assert_called()
