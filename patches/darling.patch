@@ -6257,7 +6257,7 @@ index deca16b87..d75d5e22d 100644
  
  set_property(TARGET OpenGL APPEND_STRING PROPERTY LINK_FLAGS
 diff --git a/src/frameworks/OpenGL/OpenGL.c b/src/frameworks/OpenGL/OpenGL.c
-index ffd7fe054..5b5712ea2 100644
+index ffd7fe054..f25fd9aa5 100644
 --- a/src/frameworks/OpenGL/OpenGL.c
 +++ b/src/frameworks/OpenGL/OpenGL.c
 @@ -2,11 +2,22 @@
@@ -6527,9 +6527,41 @@ index ffd7fe054..5b5712ea2 100644
  
      if (surface == EGL_NO_SURFACE) {
          return NULL;
-@@ -171,14 +309,21 @@ CGLWindowRef CGLGetWindow(void *native_window) {
+@@ -170,15 +308,53 @@ CGLWindowRef CGLGetWindow(void *native_window) {
+     return (CGLWindowRef) surface;
  }
  
++/* The default config has no alpha, and NVIDIA rejects it on 32-bit windows (EGL_BAD_CONFIG).
++ * Translucent windows need an alpha config whose native visual is the window's. */
++CGLWindowRef CGLGetWindowWithAlpha(void *native_window, unsigned long visual_id) {
++    static EGLint const alpha_attribute_list[] = {
++        EGL_RED_SIZE, 1,
++        EGL_GREEN_SIZE, 1,
++        EGL_BLUE_SIZE, 1,
++        EGL_ALPHA_SIZE, 1,
++        EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
++        EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
++        EGL_NONE
++    };
++    EGLint count = 0;
++    if (!display || !p_eglGetConfigAttrib ||
++        !p_eglChooseConfig(display, alpha_attribute_list, NULL, 0, &count) || count <= 0)
++        return NULL;
++    EGLConfig *configs = malloc(count * sizeof(EGLConfig));
++    EGLSurface surface = EGL_NO_SURFACE;
++    if (configs && p_eglChooseConfig(display, alpha_attribute_list, configs, count, &count)) {
++        for (EGLint i = 0; i < count && surface == EGL_NO_SURFACE; i++) {
++            EGLint visual = 0;
++            if (p_eglGetConfigAttrib(display, configs[i], EGL_NATIVE_VISUAL_ID, &visual) &&
++                (unsigned long) visual == visual_id)
++                surface = p_eglCreateWindowSurface(display, configs[i],
++                                                   (EGLNativeWindowType) native_window, NULL);
++        }
++    }
++    free(configs);
++    return surface == EGL_NO_SURFACE ? NULL : (CGLWindowRef) surface;
++}
++
  CGL_EXPORT void CGLDestroyWindow(CGLWindowRef window) {
 -    eglDestroySurface(display, (EGLSurface) window);
 +    /* CGLGetWindow returns NULL when eglCreateWindowSurface fails. */
@@ -6551,7 +6583,7 @@ index ffd7fe054..5b5712ea2 100644
  }
  
  static pthread_key_t current_context_key;
-@@ -198,18 +343,42 @@ CGLContextObj CGLGetCurrentContext(void) {
+@@ -198,18 +374,42 @@ CGLContextObj CGLGetCurrentContext(void) {
      return pthread_getspecific(key);
  }
  
@@ -6599,7 +6631,7 @@ index ffd7fe054..5b5712ea2 100644
  }
  
  CGLError CGLSetFullScreen(CGLContextObj ctx) {
-@@ -223,11 +392,13 @@ CGLError CGLChoosePixelFormat(
+@@ -223,11 +423,13 @@ CGLError CGLChoosePixelFormat(
      CGLPixelFormatObj *result,
      GLint *number_of_screens
  ) {
@@ -6614,7 +6646,7 @@ index ffd7fe054..5b5712ea2 100644
      for (int i = 0; i < count; i++) {
          format->attributes[i] = attrs[i];
      }
-@@ -251,6 +422,10 @@ CGLError CGLDescribePixelFormat(
+@@ -251,6 +453,10 @@ CGLError CGLDescribePixelFormat(
      CGLPixelFormatAttribute attr,
      GLint *value
  ) {
@@ -6625,11 +6657,13 @@ index ffd7fe054..5b5712ea2 100644
      for (int i = 0; format->attributes[i] != 0; i++) {
          int has_arg = attribute_has_argument(format->attributes[i]);
  
-@@ -304,24 +479,67 @@ GLuint CGLGetPixelFormatRetainCount(CGLPixelFormatObj pixelFormat) {
+@@ -303,37 +509,98 @@ GLuint CGLGetPixelFormatRetainCount(CGLPixelFormatObj pixelFormat) {
+     return pixelFormat->retain_count;
  }
  
- CGLError CGLCreateContext(CGLPixelFormatObj pixelFormat, CGLContextObj share, CGLContextObj *resultp) {
-+    /* Cocotron window compositing requests the default format with NULL. */
+-CGLError CGLCreateContext(CGLPixelFormatObj pixelFormat, CGLContextObj share, CGLContextObj *resultp) {
++static CGLError createContext(CGLPixelFormatObj pixelFormat, CGLContextObj share,
++                              EGLConfig windowConfig, CGLContextObj *resultp) {
 +    if (!resultp)
 +        return kCGLBadAddress;
 +    *resultp = NULL;
@@ -6640,7 +6674,7 @@ index ffd7fe054..5b5712ea2 100644
  
      EGLContext egl_share = EGL_NO_CONTEXT;
 +    EGLDisplay contextDisplay = share ? share->egl_display : display;
-+    EGLConfig contextConfig = share ? share->egl_config : config;
++    EGLConfig contextConfig = share ? share->egl_config : windowConfig ? windowConfig : config;
      if (share != NULL) {
          egl_share = share->egl_context;
      }
@@ -6694,7 +6728,29 @@ index ffd7fe054..5b5712ea2 100644
  
      *resultp = context;
  
-@@ -333,7 +551,7 @@ CGLContextObj CGLRetainContext(CGLContextObj context) {
+     return kCGLNoError;
+ }
+ 
++CGLError CGLCreateContext(CGLPixelFormatObj pixelFormat, CGLContextObj share, CGLContextObj *resultp) {
++    /* Cocotron window compositing requests the default format with NULL. */
++    return createContext(pixelFormat, share, NULL, resultp);
++}
++
++CGLError CGLCreateContextForWindow(CGLWindowRef window, CGLContextObj *resultp) {
++    EGLint id = 0, count = 0;
++    EGLConfig windowConfig = NULL;
++    ensureDefaultDisplay();
++    if (window && display && p_eglQuerySurface &&
++        p_eglQuerySurface(display, (EGLSurface) window, EGL_CONFIG_ID, &id)) {
++        EGLint const attributes[] = {EGL_CONFIG_ID, id, EGL_NONE};
++        if (!p_eglChooseConfig(display, attributes, &windowConfig, 1, &count))
++            count = 0;
++    }
++    return createContext(NULL, NULL, count == 1 ? windowConfig : NULL, resultp);
++}
++
+ CGLContextObj CGLRetainContext(CGLContextObj context) {
+     if (context == NULL) {
          return NULL;
      }
  
@@ -6703,7 +6759,7 @@ index ffd7fe054..5b5712ea2 100644
      return context;
  }
  
-@@ -342,11 +560,17 @@ void CGLReleaseContext(CGLContextObj context) {
+@@ -342,11 +609,17 @@ void CGLReleaseContext(CGLContextObj context) {
          return;
      }
  
@@ -6724,7 +6780,7 @@ index ffd7fe054..5b5712ea2 100644
  
      if (CGLGetCurrentContext() == context) {
          CGLSetCurrentContext(NULL);
-@@ -354,7 +578,11 @@ void CGLReleaseContext(CGLContextObj context) {
+@@ -354,7 +627,11 @@ void CGLReleaseContext(CGLContextObj context) {
  
      pthread_mutex_destroy(&(context->lock));
  
@@ -6737,7 +6793,7 @@ index ffd7fe054..5b5712ea2 100644
  
      free(context);
  }
-@@ -383,9 +611,330 @@ CGLError CGLUnlockContext(CGLContextObj context) {
+@@ -383,9 +660,330 @@ CGLError CGLUnlockContext(CGLContextObj context) {
      return kCGLNoError;
  }
  
@@ -7070,7 +7126,7 @@ index ffd7fe054..5b5712ea2 100644
  }
  
  CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, const GLint *value) {
-@@ -394,8 +943,9 @@ CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, c
+@@ -394,8 +992,9 @@ CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, c
  
      if (parameter == kCGLCPSwapInterval)
      {
@@ -7081,7 +7137,7 @@ index ffd7fe054..5b5712ea2 100644
          if (success)
              context->swap_interval = v;
          return success ? kCGLNoError : kCGLBadValue;
-@@ -417,14 +967,19 @@ CGLError CGLGetParameter(CGLContextObj context, CGLContextParameter parameter, G
+@@ -417,14 +1016,19 @@ CGLError CGLGetParameter(CGLContextObj context, CGLContextParameter parameter, G
      return kCGLNoError;
  }
  
@@ -7107,6 +7163,23 @@ index ffd7fe054..5b5712ea2 100644
 -}
 \ No newline at end of file
 +}
+diff --git a/src/frameworks/OpenGL/include/OpenGL/CGLInternal.h b/src/frameworks/OpenGL/include/OpenGL/CGLInternal.h
+index 1d0b10e65..5cdd9a89c 100644
+--- a/src/frameworks/OpenGL/include/OpenGL/CGLInternal.h
++++ b/src/frameworks/OpenGL/include/OpenGL/CGLInternal.h
+@@ -14,8 +14,12 @@ typedef void *CGLWindowRef;
+ CGL_EXPORT CGLError CGLRegisterNativeDisplay(void *native_display);
+ 
+ CGL_EXPORT CGLWindowRef CGLGetWindow(void *native_window);
++// A surface with an alpha channel, for a window created with the given 32-bit visual.
++CGL_EXPORT CGLWindowRef CGLGetWindowWithAlpha(void *native_window, unsigned long visual_id);
+ CGL_EXPORT void CGLDestroyWindow(CGLWindowRef window);
+ 
++// A context that can be made current on the window: one created from its surface's config.
++CGL_EXPORT CGLError CGLCreateContextForWindow(CGLWindowRef window, CGLContextObj *result);
+ CGL_EXPORT CGLError CGLContextMakeCurrentAndAttachToWindow(CGLContextObj context, CGLWindowRef window);
+ CGLError CGLSetSurface(CGLContextObj gl, CGSConnectionID cid, CGSWindowID wid, CGSSurfaceID sid);
+ CGLContextObj CGWindowContextCreate(CGSConnectionID cid, CGSWindowID wid, CFDictionaryRef options);
 diff --git a/src/frameworks/OpenGL/include/OpenGL/CGLTypes.h b/src/frameworks/OpenGL/include/OpenGL/CGLTypes.h
 index 7d5eda01a..803ac02d3 100644
 --- a/src/frameworks/OpenGL/include/OpenGL/CGLTypes.h
