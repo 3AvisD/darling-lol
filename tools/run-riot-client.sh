@@ -12,6 +12,13 @@ runner_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 if [ "${RCLOL_RECOVER_HIDDEN_CLIENT:-0}" = 1 ]; then
  python3 "$runner_dir/recover-hidden-riot-client.py"
 fi
+# Opt-in: close the League client UI while a match runs. It keeps the CPU for the game
+# and leaves the client the backend starts when the match ends as the only CEF instance;
+# a second instance on the same profile never paints its window, which is the black
+# window seen with Riot's own "Close client during game" option. Off by default.
+if [ "${RCLOL_CLOSE_CLIENT_IN_GAME:-0}" = 1 ]; then
+ python3 "$runner_dir/close-league-client-in-game.py" --detach &
+fi
 # The bundled downloader rejects IPv6 CONNECT_TO addresses. Only Riot CDN
 # AAAA lookups are suppressed; set this to 0 to retain the upstream resolver.
 export RCLOL_CDN_IPV4_ONLY="${RCLOL_CDN_IPV4_ONLY:-1}"
@@ -92,6 +99,16 @@ fi
 if [ -n "${RCLOL_REFRESH_HZ-}" ]; then export RCLOL_REFRESH_HZ; fi
 # Vulkan WSI & Mesa optimizations
 export MESA_NO_ERROR="${MESA_NO_ERROR:-1}"
+# Mesa resolves its shader disk cache below $HOME, which inside the guest is
+# /Users/<user>: that path does not exist on the host filesystem, so every process logs
+# "Failed to create /Users for shader cache (Permission denied)---disabling" and
+# recompiles every shader on start (212 such lines in one launcher log). The host Mesa
+# loaded into the guest reads MESA_SHADER_CACHE_DIR verbatim, so point it at a host
+# directory; Mesa creates mesa_shader_cache/ and radv_builtin_shaders/ below it.
+cache_root=${XDG_CACHE_HOME:-${HOME:-$prefix_dir}/.cache}/darling-lol
+MESA_SHADER_CACHE_DIR="${MESA_SHADER_CACHE_DIR:=$cache_root}"
+export MESA_SHADER_CACHE_DIR
+mkdir -p "$MESA_SHADER_CACHE_DIR" 2>/dev/null || true
 # NVIDIA proprietary driver: limit pre-rendered frames.
 export __GL_MaxFramesAllowed="${__GL_MaxFramesAllowed:-1}"
 # Threaded optimizations stay off: with them, NVIDIA 580 (the last branch for

@@ -119,6 +119,25 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(session.wait(timeout=5), 0)
         self.assertFalse(self.log.exists())
 
+    def test_saved_prefix_is_used_unless_dprefix_is_set(self):
+        (self.bin / 'unshare').write_text('#!/bin/sh\nprintf "%s\\n" "$DPREFIX" "$@" > "$TEST_LOG"\n')
+        (self.workspace / 'build').mkdir(parents=True)
+        (self.workspace / 'build/config.json').write_text('{"prefix": "/mnt/games/League Of Legends"}')
+        self.env.pop('DPREFIX', None)
+        self.assertEqual(self.launch('true').returncode, 0)
+        self.assertEqual(self.log.read_text().splitlines()[0], '/mnt/games/League Of Legends')
+        self.env['DPREFIX'] = '/explicit'
+        self.assertEqual(self.launch('true').returncode, 0)
+        self.assertEqual(self.log.read_text().splitlines()[0], '/explicit')
+
+    def test_set_prefix_resolves_the_path_from_the_callers_directory(self):
+        result = subprocess.run(['bash', str(self.launcher), '--set-prefix', 'Games/League'],
+                                env=self.env, cwd=self.folder, text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.log.read_text().splitlines()[-3:],
+                         ['python3', './scripts/nix-prefix.py', str(self.folder.resolve() / 'Games/League')])
+        self.assertEqual(self.launch('--set-prefix').returncode, 2)
+
     def test_setup_never_makes_a_user_writable_runtime_setuid(self):
         result = self.launch('--installer')
         self.assertEqual(result.returncode, 0, result.stderr)

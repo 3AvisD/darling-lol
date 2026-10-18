@@ -57,6 +57,34 @@ The old kernel library returned success for Darwin allocator free/reuse hints wi
 
 Build/install the kernel library using [the incremental update steps](SETUP.md#updating-an-existing-runtime), then perform the manual restart when finished playing. Linux 5.14+ is required. Do not kill client helpers as an attempted memory optimization during play.
 
+## Shaders are recompiled on every start
+
+Mesa resolves its shader disk cache below `$HOME`. Inside the guest, `$HOME` is
+`/Users/<user>`, which does not exist on the host filesystem, so Mesa cannot create the
+cache and disables it, once per process:
+
+```
+Failed to create /Users/<user> for shader cache (Permission denied)---disabling
+```
+
+One launcher log without the fix contained 212 of these lines, and no shader compiled by
+one process was reused by another process or by the next start: the client and the game
+recompiled every shader, on every launch. Mesa is host code loaded into the guest and
+reads `MESA_SHADER_CACHE_DIR` verbatim, so the launcher now passes a host directory:
+
+```sh
+MESA_SHADER_CACHE_DIR=${XDG_CACHE_HOME:-${HOME:-$prefix_dir}/.cache}/darling-lol   # launcher default
+```
+
+Mesa creates `mesa_shader_cache/` (client and game shaders) and `radv_builtin_shaders/`
+below it. With the change, one client start logged no shader-cache failure and wrote 434
+files / 5.6 MB, still growing while the client ran (Radeon RX 550, radv). Set
+`MESA_SHADER_CACHE_DIR` yourself to move the cache, for example to another disk: the
+launcher preserves a non-empty value, and a directory that cannot be created leaves the
+previous behaviour. Reusing the cache removes the repeated compilation; the startup-time
+gain has not been measured separately. Cache entries are keyed by driver and GPU, so a
+driver update recompiles once and caches again.
+
 ## Installer exits, cannot write temporary files, or Install appears idle
 
 Use `sh scripts/installer.sh euw` (or your supported region). The first-time launcher must omit the installed client's `--app-root` and pass `--skip-to-install`; the normal wrapper now does this. It also selects `league_of_legends` so the product installation UI appears after login.
@@ -120,6 +148,49 @@ window, foreign-owned processes and custom prefixes, and takes no action when
 ownership or window information cannot be read. A hidden background client or
 download is restarted when recovery is enabled. Other desktop environments are
 not supported by this helper; recovery is off by default.
+
+### Client window stays black after a match
+
+The League client keeps its Chromium/CEF UI (`LeagueClientUx` and its helpers)
+alive during a match. Riot's own "Close client during game" option closes that UI
+on Windows, but under Darling the pre-match instance keeps running: the client the
+backend starts when the match ends is a second CEF instance on the same
+`--user-data-dir`, and its window never paints. Its DOM and audio work and the
+window stays black. Closing the client by hand during the match leaves the same
+state for the same reason.
+
+An opt-in helper closes that UI itself, from the host, and only while a match
+runs, so the client that appears afterwards is the only instance:
+
+```sh
+RCLOL_CLOSE_CLIENT_IN_GAME=1 ./scripts/run.sh
+```
+
+This is not a memory measure: the UI is closed because it competes with the game
+for CPU during the match. Measured on a four-core host with a Radeon RX 550, a
+practice match reported roughly 120 FPS with the client UI running and roughly
+180 FPS with it closed. On that host a local supervisor using the same detection
+closed 13 client processes (2027 MiB resident) when a practice match started, and
+the client came back as one instance with a painted window when it ended; the
+helper described here has not been through a live match yet. Riot's own option is
+the equivalent on Windows, so leave either one disabled if the in-client chat is
+wanted during a match.
+
+The helper is off by default and fails closed: it attributes both the game and the
+client to the launcher's prefix through the loader's `__mldr_sockpath` (guest
+processes do not carry `DPREFIX`), never closes a client younger than 60 seconds
+(the one the backend starts after a match), leaves the Riot client, the League
+backend and the game untouched, and takes no action when ownership, the
+environment or the stat fields cannot be read. The client UI is recognised by the
+name of its executable, not by the command line: `LeagueCrashHandler` processes
+carry the client UI name in their arguments only, so they are left alone. It
+leaves by itself ten minutes after the last client or match is gone (the clock does
+not run before the first client appears, so a long patch or login is fine). Diagnose it in one
+observation, without waiting for a match:
+
+```sh
+python3 tools/close-league-client-in-game.py --once --dry-run
+```
 
 ### Downloads repeatedly fail with an IPv6 CONNECT_TO error
 
