@@ -51,7 +51,10 @@ reserved = socket.socket()
 reserved.bind(('127.0.0.1', 0))  # Reserved but not listening: deterministic connection refusal.
 Thread(target=server.serve_forever, daemon=True).start()
 (root / 'build').mkdir(exist_ok=True)
-prefix = Path(tempfile.mkdtemp(prefix='urlsession-prefix-', dir=root / 'build'))
+# Darling initializes account/configuration files only for an absent prefix.
+# Reserve its private parent, not DPREFIX itself.
+private_root = Path(tempfile.mkdtemp(prefix='urlsession-', dir=root / 'build'))
+prefix = private_root / 'prefix'
 env = {key: os.environ[key] for key in ('PATH', 'HOME', 'USER', 'LOGNAME', 'DISPLAY',
        'XAUTHORITY', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS', 'LANG') if key in os.environ}
 env.update(DPREFIX=str(prefix), EGL_PLATFORM='x11', LC_ALL='en_US.UTF-8')
@@ -84,8 +87,8 @@ finally:
     try:
         stopped = subprocess.run(['darling', 'shutdown'], env=env, capture_output=True, timeout=25)
         if stopped.returncode == 0:
-            shutil.rmtree(prefix)
+            shutil.rmtree(private_root)
         else:
-            print('Private test prefix retained for inspection:', prefix)
+            print('Private test artifacts retained for inspection:', private_root)
     except (OSError, subprocess.SubprocessError):
-        print('Private test prefix retained for inspection:', prefix)
+        print('Private test artifacts retained for inspection:', private_root)

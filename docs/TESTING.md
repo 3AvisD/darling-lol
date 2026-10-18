@@ -41,7 +41,9 @@ python3 tools/riot-urlsession-check.py
 ```
 
 The runner starts a loopback-only HTTP fixture, reserves a second non-listening
-port for the transport-error case, and creates a fresh private DPREFIX. It runs
+port for the transport-error case, and reserves a private parent directory with
+an initially absent DPREFIX. Darling must create DPREFIX itself to initialize
+guest accounts and configuration; an existing empty directory skips that setup. It runs
 only the independent probe, then shuts down that private prefix. It never
 starts Riot/League, queries their APIs, sends game input or shuts down the
 normal prefix. The fixture delays its response so session invalidation is
@@ -61,6 +63,12 @@ suspended custom delegate queue.
 Expected output includes `URLSESSION_PASS`, `LIFECYCLE_PASS`,
 `SHARED_SESSION_PASS` and `QUEUE_PASS`. The original
 runtime aborts on missing data-task initialization or session invalidation.
+Native validation on 2026-10-18 passed all four markers using a staged, patched
+CFNetwork framework and the installed Darling base runtime. No installed SDK
+libraries were replaced. Darling shutdown may leave a root-owned overlay work
+directory; the runner reports retained private artifacts if cleanup cannot
+remove it.
+
 These checks do not establish full NSURLSession conformance or transport-level
 interruption of an already-running request.
 

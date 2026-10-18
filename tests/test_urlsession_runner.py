@@ -23,6 +23,10 @@ with open(TRACE, 'a') as stream:
     stream.write(json.dumps({'args':sys.argv[1:], 'prefix':os.environ['DPREFIX']}) + '\\n')
 if sys.argv[1] == 'shutdown':
     raise SystemExit(0)
+from pathlib import Path
+prefix = Path(os.environ['DPREFIX'])
+assert not prefix.exists(), 'Darling must receive an absent prefix for first-time initialization'
+prefix.mkdir()
 assert sys.argv[1:3] == ['shell', 'env']
 assert 'DYLD_FRAMEWORK_PATH' not in os.environ and 'DYLD_LIBRARY_PATH' not in os.environ
 urls = [arg for arg in sys.argv[1:] if arg.startswith('http://')]
@@ -53,7 +57,7 @@ print('QUEUE_PASS: fixture')
             self.assertEqual(calls[1]['args'], ['shutdown'])
             self.assertEqual(calls[0]['prefix'], calls[1]['prefix'])
             self.assertNotEqual(Path(calls[0]['prefix']), Path.home() / '.darling')
-            self.assertFalse(Path(calls[0]['prefix']).exists())
+            self.assertFalse(Path(calls[0]['prefix']).parent.exists())
             self.assertEqual(stat.S_IMODE(log.stat().st_mode), 0o600)
 
 
