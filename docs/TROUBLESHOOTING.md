@@ -252,6 +252,30 @@ A non-zero error or `FAILED` means the frames cannot reach the window. Before 20
 
 An additional NVIDIA report on `68f816d` showed successful optimal-tiling import but repeated `Metal Device timed out giving us a Drawable to present` messages. Its [presentation trace](https://github.com/lucannez64/darling-lol/issues/3#issuecomment-6214732591) shows all three drawables queued and all three main-thread presentation callbacks running, followed by timeouts with three frames still queued. The compositor only prepared a Metal layer when it was the root layer, skipping nested Metal layers. It now prepares Metal layers throughout the tree. A standalone nested-layer reproduction exhausts the pool before this correction and passes ten presentations with pixel readback after it; the root-layer probe also passes. Confirmation on the reporter's NVIDIA system is still needed.
 
+### NVIDIA resize signals, CPU readback and completion latency
+
+The EGL-compatible window visual, compositor back buffer and collision-safe RPC
+socket allocation fixes are already part of the runtime. The remaining NVIDIA
+work covers these independent paths:
+
+- A terminal resize can deliver `SIGWINCH` to a native driver thread without a
+  Darling RPC socket. The runtime forwards that resize notification to the guest
+  main thread; it keeps the existing handling for other signals and faults.
+- With `RCLOL_GPU_DIRECT_PRESENT=0`, Chromium frames arrive through CPU readback.
+  The local compositor skips non-Metal trees to avoid covering the live client
+  with stale cached textures. Mixed trees still prepare and present Metal layers.
+- NVIDIA timeline waits can wake late after GPU completion. Each device now polls
+  briefly while completions are pending before blocking: 2000 microseconds by
+  default on NVIDIA and zero on other vendors. An idle device blocks immediately.
+  The guest file `/tmp/metal-wait-spin-us` overrides the budget when the device is
+  created; `0` disables polling. Values are capped at 10000 microseconds and
+  malformed values use the vendor default. Restart Darling to change the budget.
+
+The contributor reported custom matches on a single-GPU RTX 3060, driver 615.71,
+with sway/Xwayland using CPU readback. The initial polling change improved their
+reported rate from about 20 to 27 FPS. Those observations predate the narrowed
+integration; they do not establish hybrid-GPU or general NVIDIA support.
+
 ### Host-side checks
 
 These are host settings, not game settings. Run on AC power, and use a performance power profile (`powerprofilesctl set performance`, or `asusctl profile -P Performance` on ASUS laptops). On the tested desktop the game is limited mostly by its own main thread on the CPU, not by the GPU (see [status](STATUS.md#game-fps-2026-10-1314)), so laptop CPU power limits matter as much as the GPU choice.
