@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import <CoreText/CTFont.h>
 #import <CoreText/CTFontDescriptor.h>
 #import <CoreText/CTFontManager.h>
 #include <stdio.h>
@@ -34,6 +35,13 @@ int main(void) {
             /* The single-match result must outlive its temporary array. */
             CFTypeRef name = CTFontDescriptorCopyAttribute(first, kCTFontNameAttribute);
             verifyFontList(name != NULL, "retained single descriptor and normalized PostScript name");
+            /* Chromium pre-fills the language output with a sentinel and reads it when non-NULL. */
+            CTFontRef font = CTFontCreateWithFontDescriptor(first, 12, NULL);
+            CFStringRef sentinel = CFSTR("sentinel"), language = sentinel;
+            CFStringRef familyName = CTFontCopyLocalizedName(font, kCTFontFamilyNameKey, &language);
+            verifyFontList(language != sentinel, "localized font name initializes language output");
+            verifyFontList(familyName && CFEqual(familyName, (CFStringRef)family), "localized font name is the family");
+            CFRelease(familyName); CFRelease(font);
             CFRelease(name); CFRelease(first);
         }
         NSDictionary *missing = [NSDictionary dictionaryWithObject:@"DarlingMissingFont-7259AEB1" forKey:(id)key];
