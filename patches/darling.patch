@@ -2572,7 +2572,7 @@ index ff83d1e15..1e86f9e99 100644
  	bool m_suspended = true;
  };
 diff --git a/src/CoreAudio/CoreAudioComponent/AUHAL.cpp b/src/CoreAudio/CoreAudioComponent/AUHAL.cpp
-index fe4d1eaa1..05088f87f 100644
+index fe4d1eaa1..ac8d76c0b 100644
 --- a/src/CoreAudio/CoreAudioComponent/AUHAL.cpp
 +++ b/src/CoreAudio/CoreAudioComponent/AUHAL.cpp
 @@ -1,3 +1,4 @@
@@ -2647,16 +2647,41 @@ index fe4d1eaa1..05088f87f 100644
  bool AUHAL::CanScheduleParameters() const
  {
  	return true;
-@@ -49,7 +93,7 @@ bool AUHAL::CanScheduleParameters() const
+@@ -49,7 +93,32 @@ bool AUHAL::CanScheduleParameters() const
  
  bool AUHAL::StreamFormatWritable(AudioUnitScope scope, AudioUnitElement element)
  {
 -	return !m_running && IsInitialized();
 +	return !m_running;
++}
++
++// AUBase only accepts the canonical layout (Float32, non-interleaved). A real AUHAL
++// converts any linear PCM, and voice engines (Vivox) ask for interleaved Float32 on the
++// recording side, so element 1 accepts whatever PulseAudio records and RenderBus() copies:
++// native-endian float32 or 8/16/32-bit integers, either layout (24-bit is left out:
++// PulseAudio may read it as 4-byte samples while RenderBus() copies 3).
++// Element 0 (playback) keeps the canonical rule.
++bool AUHAL::ValidFormat(AudioUnitScope scope, AudioUnitElement element, const CAStreamBasicDescription& format)
++{
++	if (element != kInputBus || scope == kAudioUnitScope_Global)
++		return AUBase::ValidFormat(scope, element, format);
++
++	const UInt32 flags = format.mFormatFlags;
++	const UInt32 bits = format.mBitsPerChannel;
++	const bool isFloat = flags & kAudioFormatFlagIsFloat;
++	if (format.mFormatID != kAudioFormatLinearPCM || format.mFramesPerPacket != 1
++		|| format.mSampleRate <= 0 || format.mChannelsPerFrame < 1 || format.mChannelsPerFrame > 32
++		|| (flags & kAudioFormatFlagIsBigEndian) != (kAudioFormatFlagsNativeEndian & kAudioFormatFlagIsBigEndian))
++		return false;
++	if (isFloat ? bits != 32 : (bits != 8 && bits != 16 && bits != 32))
++		return false;
++
++	const UInt32 frameBytes = (flags & kAudioFormatFlagIsNonInterleaved) ? bits / 8 : format.mChannelsPerFrame * bits / 8;
++	return format.mBytesPerFrame == frameBytes && format.mBytesPerPacket == frameBytes;
  }
  
  OSStatus AUHAL::Version()
-@@ -57,45 +101,112 @@ OSStatus AUHAL::Version()
+@@ -57,45 +126,112 @@ OSStatus AUHAL::Version()
  	return 1;
  }
  
@@ -2784,7 +2809,7 @@ index fe4d1eaa1..05088f87f 100644
  	}
  
  	m_running = m_enableOutput || m_enableInput;
-@@ -111,20 +222,49 @@ OSStatus AUHAL::Stop()
+@@ -111,20 +247,49 @@ OSStatus AUHAL::Stop()
  	{
  		AudioDeviceStop(m_outputDevice, m_outputProcID);
  		AudioDeviceDestroyIOProcID(m_outputDevice, m_outputProcID);
@@ -2835,7 +2860,7 @@ index fe4d1eaa1..05088f87f 100644
  		case kAudioOutputUnitProperty_SetInputCallback:
  		{
  			ca_require(inDataSize == sizeof(AURenderCallbackStruct), InvalidPropertyValue);
-@@ -161,7 +301,14 @@ OSStatus AUHAL::SetProperty(AudioUnitPropertyID inID, AudioUnitScope inScope, Au
+@@ -161,7 +326,14 @@ OSStatus AUHAL::SetProperty(AudioUnitPropertyID inID, AudioUnitScope inScope, Au
  			ca_require(inDataSize == sizeof(AudioDeviceID), InvalidPropertyValue);
  			const AudioDeviceID* dev = static_cast<const AudioDeviceID*>(inData);
  
@@ -2851,7 +2876,7 @@ index fe4d1eaa1..05088f87f 100644
  			{
  				m_outputDevice = *dev;
  				PropertyChanged(inID, inScope, inElement);
-@@ -176,20 +323,28 @@ OSStatus AUHAL::SetProperty(AudioUnitPropertyID inID, AudioUnitScope inScope, Au
+@@ -176,20 +348,28 @@ OSStatus AUHAL::SetProperty(AudioUnitPropertyID inID, AudioUnitScope inScope, Au
  			return noErr;
  		}
  	}
@@ -2882,7 +2907,7 @@ index fe4d1eaa1..05088f87f 100644
  		}
  		case kAudioOutputUnitProperty_EnableIO:
  		{
-@@ -210,13 +365,23 @@ OSStatus AUHAL::GetPropertyInfo(AudioUnitPropertyID inID, AudioUnitScope inScope
+@@ -210,13 +390,23 @@ OSStatus AUHAL::GetPropertyInfo(AudioUnitPropertyID inID, AudioUnitScope inScope
  			return noErr;
  		}
  	}
@@ -2907,7 +2932,7 @@ index fe4d1eaa1..05088f87f 100644
  		case kAudioOutputUnitProperty_SetInputCallback:
  		{
  			memcpy(outData, &m_outputAvailableCb, sizeof(m_outputAvailableCb));
-@@ -228,12 +393,12 @@ OSStatus AUHAL::GetProperty(AudioUnitPropertyID inID, AudioUnitScope inScope, Au
+@@ -228,12 +418,12 @@ OSStatus AUHAL::GetProperty(AudioUnitPropertyID inID, AudioUnitScope inScope, Au
  			if (inElement == kOutputBus)
  			{
  				UInt32 value = m_enableOutput;
@@ -2922,7 +2947,7 @@ index fe4d1eaa1..05088f87f 100644
  			}
  			else
  				return kAudioUnitErr_InvalidElement;
-@@ -241,7 +406,11 @@ OSStatus AUHAL::GetProperty(AudioUnitPropertyID inID, AudioUnitScope inScope, Au
+@@ -241,7 +431,11 @@ OSStatus AUHAL::GetProperty(AudioUnitPropertyID inID, AudioUnitScope inScope, Au
  		}
  		case kAudioOutputUnitProperty_CurrentDevice:
  		{
@@ -2935,7 +2960,7 @@ index fe4d1eaa1..05088f87f 100644
  			{
  				memcpy(outData, &m_outputDevice, sizeof(m_outputDevice));
  			}
-@@ -277,9 +446,89 @@ OSStatus AUHAL::recordCallback(AudioObjectID inObjectID,
+@@ -277,9 +471,89 @@ OSStatus AUHAL::recordCallback(AudioObjectID inObjectID,
  	return This->doRecord(inNow, inInputData, inInputTime);
  }
  
@@ -3025,7 +3050,7 @@ index fe4d1eaa1..05088f87f 100644
  	if (!HasInput(0))
  	{
  		// std::cerr << "No connection\n";
-@@ -290,9 +539,75 @@ OSStatus AUHAL::doPlayback(const AudioTimeStamp* inNow, AudioBufferList* outOutp
+@@ -290,9 +564,75 @@ OSStatus AUHAL::doPlayback(const AudioTimeStamp* inNow, AudioBufferList* outOutp
  	AudioUnitRenderActionFlags flags = kAudioUnitRenderAction_PreRender;
  	const CAStreamBasicDescription& desc = GetStreamFormat(kAudioUnitScope_Input, kOutputBus);
  
@@ -3104,7 +3129,7 @@ index fe4d1eaa1..05088f87f 100644
  	// std::cout << "Pull result: " << result << std::endl;
  	// std::cout << "Bytes: " << outOutputData->mBuffers[0].mDataByteSize << std::endl;
  	// m_auhalData.write((char*) outOutputData->mBuffers[0].mData, outOutputData->mBuffers[0].mDataByteSize);
-@@ -303,30 +618,46 @@ OSStatus AUHAL::doPlayback(const AudioTimeStamp* inNow, AudioBufferList* outOutp
+@@ -303,30 +643,46 @@ OSStatus AUHAL::doPlayback(const AudioTimeStamp* inNow, AudioBufferList* outOutp
  
  OSStatus AUHAL::doRecord(const AudioTimeStamp* inNow, const AudioBufferList* inInputData, const AudioTimeStamp* inInputTime)
  {
@@ -3172,7 +3197,7 @@ index fe4d1eaa1..05088f87f 100644
  
  	return noErr;
 diff --git a/src/CoreAudio/CoreAudioComponent/AUHAL.h b/src/CoreAudio/CoreAudioComponent/AUHAL.h
-index bc21bcbbb..3d6ae48f8 100644
+index bc21bcbbb..fad727962 100644
 --- a/src/CoreAudio/CoreAudioComponent/AUHAL.h
 +++ b/src/CoreAudio/CoreAudioComponent/AUHAL.h
 @@ -25,6 +25,7 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
@@ -3183,7 +3208,7 @@ index bc21bcbbb..3d6ae48f8 100644
  
  class AUHAL : public AUBase
  {
-@@ -32,6 +33,9 @@ public:
+@@ -32,8 +33,12 @@ public:
  	AUHAL(AudioComponentInstance inInstance, bool supportRecording = true);
  	~AUHAL();
  
@@ -3192,8 +3217,11 @@ index bc21bcbbb..3d6ae48f8 100644
 +    OSStatus SetAudioChannelLayout(AudioUnitScope scope,AudioUnitElement element,const AudioChannelLayout* layout) override;
  	bool CanScheduleParameters() const override;
  	bool StreamFormatWritable(AudioUnitScope scope, AudioUnitElement element) override;
++	bool ValidFormat(AudioUnitScope scope, AudioUnitElement element, const CAStreamBasicDescription& format) override;
  	OSStatus Version() override;
-@@ -43,7 +47,7 @@ public:
+ 
+ 	OSStatus Start() override;
+@@ -43,7 +48,7 @@ public:
  	OSStatus GetPropertyInfo(AudioUnitPropertyID inID, AudioUnitScope inScope, AudioUnitElement inElement, UInt32& outDataSize, Boolean& outWritable) override;
  	OSStatus GetProperty(AudioUnitPropertyID inID, AudioUnitScope inScope, AudioUnitElement inElement, void* outData) override;
  
@@ -3202,7 +3230,7 @@ index bc21bcbbb..3d6ae48f8 100644
  
  	static OSStatus ComponentEntryDispatch(ComponentParameters *params, AUHAL *This);
  private:
-@@ -59,6 +63,7 @@ private:
+@@ -59,6 +64,7 @@ private:
  		void* inClientData);
  
  	OSStatus doPlayback(const AudioTimeStamp* inNow, AudioBufferList* outOutputData, const AudioTimeStamp* inOutputTime);
@@ -3210,7 +3238,7 @@ index bc21bcbbb..3d6ae48f8 100644
  	OSStatus doRecord(const AudioTimeStamp* inNow, const AudioBufferList* inInputData, const AudioTimeStamp* inInputTime);
  	
  protected:
-@@ -69,13 +74,29 @@ protected:
+@@ -69,13 +75,29 @@ protected:
  	AudioDeviceID m_outputDevice, m_inputDevice;
  	AudioDeviceIOProcID m_outputProcID = 0, m_inputProcID = 0;
  
