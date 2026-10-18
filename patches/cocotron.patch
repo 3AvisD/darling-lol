@@ -6813,7 +6813,7 @@ index 94ddabf9..fa018d3d 100644
      printf("STUB %s\n", __PRETTY_FUNCTION__);
      return nil;
  }
-@@ -128,157 +206,275 @@ CTFontRef CTFontCreateForString(CTFontRef currentFont, CFStringRef string, CFRan
+@@ -128,157 +206,276 @@ CTFontRef CTFontCreateForString(CTFontRef currentFont, CFStringRef string, CFRan
  CTFontRef CTFontCreateForStringWithLanguage(CTFontRef currentFont, CFStringRef string,
                                              CFRange range, CFStringRef language)
  {
@@ -7004,9 +7004,12 @@ index 94ddabf9..fa018d3d 100644
  CFStringRef CTFontCopyLocalizedName(CTFontRef font, CFStringRef nameKey,
                                      CFStringRef  _Nullable *actualLanguage)
  {
-+    font = normalizedFont(font);
-     printf("STUB %s\n", __PRETTY_FUNCTION__);
-     return nil;
+-    printf("STUB %s\n", __PRETTY_FUNCTION__);
+-    return nil;
++    /* Fall back to the canonical name. Chromium pre-fills the language output with a
++     * sentinel and reads it whenever it is non-NULL, so it must always be written. */
++    if (actualLanguage) *actualLanguage = NULL;
++    return CTFontCopyName(font, nameKey);
  }
  
  CFCharacterSetRef CTFontCopyCharacterSet(CTFontRef font)
@@ -7106,7 +7109,7 @@ index 94ddabf9..fa018d3d 100644
      printf("STUB %s\n", __PRETTY_FUNCTION__);
      return CGNullGlyph;
  }
-@@ -287,20 +483,44 @@ CGRect CTFontGetBoundingRectsForGlyphs(CTFontRef font, CTFontOrientation orienta
+@@ -287,20 +484,44 @@ CGRect CTFontGetBoundingRectsForGlyphs(CTFontRef font, CTFontOrientation orienta
                                         const CGGlyph *glyphs, CGRect *boundingRects,
                                         CFIndex count)
  {
@@ -7159,7 +7162,7 @@ index 94ddabf9..fa018d3d 100644
      }
  
      return sum;
-@@ -310,6 +530,7 @@ CGRect CTFontGetOpticalBoundsForGlyphs(CTFontRef font, const CGGlyph *glyphs,
+@@ -310,6 +531,7 @@ CGRect CTFontGetOpticalBoundsForGlyphs(CTFontRef font, const CGGlyph *glyphs,
                                         CGRect *boundingRects, CFIndex count,
                                         CFOptionFlags options)
  {
@@ -7167,7 +7170,7 @@ index 94ddabf9..fa018d3d 100644
      printf("STUB %s\n", __PRETTY_FUNCTION__);
      return CGRectMake(0, 0, 0, 0);
  }
-@@ -317,29 +538,34 @@ CGRect CTFontGetOpticalBoundsForGlyphs(CTFontRef font, const CGGlyph *glyphs,
+@@ -317,29 +539,34 @@ CGRect CTFontGetOpticalBoundsForGlyphs(CTFontRef font, const CGGlyph *glyphs,
  void CTFontGetVerticalTranslationsForGlyphs(CTFontRef font, const CGGlyph *glyphs,
                                              CGSize *translations, CFIndex count)
  {
@@ -7202,7 +7205,7 @@ index 94ddabf9..fa018d3d 100644
      printf("STUB %s\n", __PRETTY_FUNCTION__);
      return nil;
  }
-@@ -347,6 +573,7 @@ CFArrayRef CTFontCopyFeatureSettings(CTFontRef font)
+@@ -347,6 +574,7 @@ CFArrayRef CTFontCopyFeatureSettings(CTFontRef font)
  bool CTFontGetGlyphsForCharacters(CTFontRef font, const UniChar *characters,
                                    CGGlyph *glyphs, CFIndex count)
  {
@@ -7210,7 +7213,7 @@ index 94ddabf9..fa018d3d 100644
      [font getGlyphs: glyphs forCharacters: characters length: count];
      // FIXME: change getGlyphs: to return a BOOL
      return YES;
-@@ -355,20 +582,36 @@ bool CTFontGetGlyphsForCharacters(CTFontRef font, const UniChar *characters,
+@@ -355,20 +583,36 @@ bool CTFontGetGlyphsForCharacters(CTFontRef font, const UniChar *characters,
  void CTFontDrawGlyphs(CTFontRef font, const CGGlyph *glyphs, const CGPoint *positions,
                        size_t count, CGContextRef context)
  {
@@ -7250,7 +7253,7 @@ index 94ddabf9..fa018d3d 100644
  }
  
  CTFontRef
-@@ -381,6 +624,7 @@ CTFontCreateWithGraphicsFont(CGFontRef cgFont, CGFloat size,
+@@ -381,6 +625,7 @@ CTFontCreateWithGraphicsFont(CGFontRef cgFont, CGFloat size,
  
  ATSFontRef CTFontGetPlatformFont(CTFontRef font, CTFontDescriptorRef  _Nullable *attributes)
  {
@@ -7258,7 +7261,7 @@ index 94ddabf9..fa018d3d 100644
      printf("STUB %s\n", __PRETTY_FUNCTION__);
      return 0;
  }
-@@ -402,14 +646,27 @@ CTFontRef CTFontCreateWithQuickdrawInstance(ConstStr255Param name, int16_t ident
+@@ -402,14 +647,27 @@ CTFontRef CTFontCreateWithQuickdrawInstance(ConstStr255Param name, int16_t ident
  
  CFArrayRef CTFontCopyAvailableTables(CTFontRef font, CTFontTableOptions options)
  {
