@@ -5,7 +5,7 @@
 # `darling shutdown` and `sh scripts/run.sh` to activate.
 set -eu
 project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-guest_home=${RIOT_GUEST_HOME:-$HOME/.darling@GUEST_HOME@}
+. "$project_dir/tools/runtime-paths.sh"
 metal="$guest_home/RuntimeFrameworks/Metal.framework/Versions/A/Metal"
 indium="$guest_home/RuntimeLibraries/libindium.dylib"
 backups="$project_dir/build/metal-pair-backups"

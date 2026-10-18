@@ -38,6 +38,7 @@ int main() {
  // No NSApplication, window, graphics context, GPU work, or published IOSurface.
  // Objects intentionally live until process exit; the sentinel is never passed to CGL.
  [NSAutoreleasePool new];
+ unsetenv("RCLOL_GPU_DIRECT_PRESENT");
  int dimensions[]={16,16,4,64};
  const void* keys[]={kIOSurfaceWidth,kIOSurfaceHeight,kIOSurfaceBytesPerElement,kIOSurfaceBytesPerRow};
  const void* values[4];
@@ -77,6 +78,24 @@ int main() {
  [surfaceOnly render];
  printf("surface_only_shortcut_enabled: renderCalls=%u expected=0\n",renderCalls);
  if(renderCalls!=0) return 6;
+ // Partial IOSurfaces bypass local rendering only in CPU-readback mode.
+ int partialDimensions[]={8,8,4,32};
+ for(unsigned i=0;i<4;++i) values[i]=CFNumberCreate(NULL,kCFNumberIntType,&partialDimensions[i]);
+ CFDictionaryRef partialProperties=CFDictionaryCreate(NULL,keys,values,4,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
+ IOSurfaceRef partial=IOSurfaceCreate(partialProperties);
+ if(!partial) return 8;
+ RenderPolicySurfaceLayer* partialLayer=[[RenderPolicySurfaceLayer alloc] initWithSurface:partial];
+ RenderPolicyContext* partialContext=[[RenderPolicyContext alloc] initWithRoot:partialLayer];
+ renderCalls=0;
+ [partialContext render];
+ if(renderCalls!=0) return 9;
+ setenv("RCLOL_GPU_DIRECT_PRESENT","1",1);
+ [partialContext render];
+ if(renderCalls!=1) return 10;
+ unsetenv("DARLING_CA_SKIP_LOCAL_IOSURFACE_RENDER");
+ unsetenv("RCLOL_GPU_DIRECT_PRESENT");
+ [partialContext render];
+ if(renderCalls!=2) return 11;
  printf("PASS: mixed-tree Metal preparation survives IOSurface shortcut\n");
  return 0;
 }

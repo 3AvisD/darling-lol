@@ -8,7 +8,7 @@
       "revision": "60ba801decee7a00782f74f6be4c8ffb013f79ff",
       "repository": "https://github.com/darlinghq/darling.git",
       "patch": "patches/darling.patch",
-      "modified_files": 88,
+      "modified_files": 89,
       "new_files": [
         "src/CoreAudio/CoreAudio/AudioConverterShim.c",
         "src/CoreAudio/AudioTrace.h",
@@ -24,7 +24,8 @@
         "src/frameworks/OpenDirectory/src/ODLocalDirectory.m",
         "src/frameworks/OpenGL/CGLAsyncPresent.inc",
         "src/frameworks/OpenGL/include/OpenGL/DarlingNativePresent.h",
-        "src/startup/mldr/commpage-cpu-caps.h"
+        "src/startup/mldr/commpage-cpu-caps.h",
+        "src/shellspawn/shellspawn-fds.h"
       ]
     },
     {
@@ -125,7 +126,7 @@
       "revision": "5549ac4cd2db923c256f016a1381b3bfb716730a",
       "repository": "https://github.com/darlinghq/darling-iokitd.git",
       "patch": "patches/iokitd.patch",
-      "modified_files": 16,
+      "modified_files": 17,
       "new_files": [
         "src/IOInterestNotification.h",
         "src/IOInterestNotification.mm",
@@ -137,7 +138,8 @@
         "src/LogindSleep.h",
         "src/PowerSources.mm",
         "src/HostPowerInhibit.c",
-        "src/HostPowerInhibit.h"
+        "src/HostPowerInhibit.h",
+        "src/PlatformIdentity.h"
       ]
     },
     {
@@ -243,6 +245,7 @@
         "include/Metal/MTLTrace.h",
         "private-include/Metal/MTLArgumentInternal.h",
         "private-include/Metal/MTLBlitCommandEncoderInternal.h",
+        "private-include/Metal/MTLDeviceInfo.h",
         "private-include/Metal/MTLDepthStencilInternal.h",
         "private-include/Metal/MTLSamplerStateInternal.h",
         "private-include/Metal/MTLVertexDescriptorInternal.h",
@@ -281,7 +284,8 @@
         "darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/mac_syscall.h",
         "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/guarded/change_fdguard_np.c",
         "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/mac_syscall.c",
-        "libsyscall/wrappers/__sysctlbyname.S"
+        "libsyscall/wrappers/__sysctlbyname.S",
+        "darling/src/libsystem_kernel/emulation/include/common/cpu_frequency.h"
       ]
     },
     {
@@ -303,7 +307,8 @@
         "private-include/indium/submission-batch.private.hpp",
         "private-include/indium/submit-batch.private.hpp",
         "private-include/indium/submit-thread.private.hpp",
-        "private-include/indium/waits.private.hpp"
+        "private-include/indium/waits.private.hpp",
+        "private-include/indium/completion-spin.private.hpp"
       ]
     },
     {
@@ -313,6 +318,11 @@
       "patch": "patches/cfnetwork.patch",
       "modified_files": 1,
       "new_files": []
+    },
+    {
+      "path": "src/external/cctools-port",
+      "revision": "d9456c221e1f462e17c0b3297748bc089d5a861e",
+      "patch": "patches/cctools-port.patch"
     }
   ],
   "omitted": [

@@ -3,8 +3,7 @@
 # Exit the game and both clients, then run darling shutdown before this script.
 set -eu
 project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-prefix_dir=${DPREFIX:-@DPREFIX@}
-guest_home=${RIOT_GUEST_HOME:-$prefix_dir@GUEST_HOME@}
+. "$project_dir/tools/runtime-paths.sh"
 artifact=${RIOT_CARBONCORE_ARTIFACT:-$project_dir/build/riot-CarbonCore}
 backup_dir=${RIOT_CARBONCORE_BACKUP_DIR:-$project_dir/build/carboncore-runtime-backups}
 sdk_framework="@DARLING_SDK@/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/CarbonCore.framework"
@@ -12,6 +11,7 @@ framework="$guest_home/RuntimeFrameworks/CarbonCore.framework"
 prefix_binary="$prefix_dir/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/CarbonCore.framework/Versions/A/CarbonCore"
 [ -f "$artifact" ] || { echo "Build CarbonCore first: $artifact" >&2; exit 1; }
 [ -f "$sdk_framework/Versions/A/CarbonCore" ] || { echo "Missing SDK CarbonCore framework" >&2; exit 1; }
+python3 "$project_dir/tools/stop-darling-runtime.py"
 mkdir -p "$guest_home/RuntimeFrameworks" "$backup_dir"
 if [ ! -d "$framework" ]; then
   cp -a "$sdk_framework" "$framework"

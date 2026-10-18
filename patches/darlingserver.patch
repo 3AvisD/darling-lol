@@ -445,7 +445,7 @@ index 458e659..2e33f20 100644
  			// wait until it's read
  			if (!dtape_semaphore_down_simple(kqchan->waiter_read_semaphore)) {
 diff --git a/duct-tape/src/memory.c b/duct-tape/src/memory.c
-index 3114947..fcff461 100644
+index 3114947..e2a8d5e 100644
 --- a/duct-tape/src/memory.c
 +++ b/duct-tape/src/memory.c
 @@ -11,6 +11,7 @@
@@ -807,7 +807,43 @@ index 3114947..fcff461 100644
  };
  
  kern_return_t mach_vm_msync(vm_map_t map, mach_vm_offset_t address, mach_vm_size_t size, vm_sync_t sync_flags) {
-@@ -856,7 +1163,7 @@ static kern_return_t mach_vm_remap_external_shared(vm_map_t target_map, mach_vm_
+@@ -620,15 +927,22 @@ kern_return_t mach_vm_msync(vm_map_t map, mach_vm_offset_t address, mach_vm_size
+ };
+ 
+ kern_return_t mach_vm_page_info(vm_map_t map, mach_vm_address_t address, vm_page_info_flavor_t flavor, vm_page_info_t info, mach_msg_type_number_t* count) {
+-	dtape_stub_unsafe();
++	// Page accounting is not implemented; let the caller handle unsupported queries.
++	if (count) *count = 0;
++	return KERN_NOT_SUPPORTED;
+ };
+ 
+ kern_return_t mach_vm_page_query(vm_map_t map, mach_vm_offset_t offset, int* disposition, int* ref_count) {
+-	dtape_stub_unsafe();
++	// Page accounting is not implemented; let the caller handle unsupported queries.
++	if (disposition) *disposition = 0;
++	if (ref_count) *ref_count = 0;
++	return KERN_NOT_SUPPORTED;
+ };
+ 
+ kern_return_t mach_vm_page_range_query(vm_map_t map, mach_vm_offset_t address, mach_vm_size_t size, mach_vm_address_t dispositions_addr, mach_vm_size_t* dispositions_count) {
+-	dtape_stub_unsafe();
++	// Page accounting is not implemented; let the caller handle unsupported queries.
++	if (dispositions_count) *dispositions_count = 0;
++	return KERN_NOT_SUPPORTED;
+ };
+ 
+ kern_return_t mach_vm_protect(vm_map_t map, mach_vm_offset_t start, mach_vm_size_t size, boolean_t set_maximum, vm_prot_t new_protection) {
+@@ -756,7 +1070,8 @@ region_info_out:
+ 			return kr;
+ 		};
+ 		default:
+-			dtape_stub_unsafe("Unimplemented flavor");
++			if (object_name) *object_name = IP_NULL;
++			return KERN_INVALID_ARGUMENT;
+ 	}
+ };
+ 
+@@ -856,7 +1171,7 @@ static kern_return_t mach_vm_remap_external_shared(vm_map_t target_map, mach_vm_
  
  	src_existing_entry_count = dtape_map_find_shared_entries_locked(src_map, start_memaddr, map_size, src_existing_entries, sizeof(src_existing_entries) / sizeof(*src_existing_entries));
  
@@ -816,7 +852,7 @@ index 3114947..fcff461 100644
  		// special case for what LLDB does with dyld info
  		dtape_map_shared_descriptor_retain(src_existing_entries[0]->descriptor);
  		descriptor = src_existing_entries[0]->descriptor;
-@@ -1441,6 +1748,10 @@ mach_destroy_memory_entry(
+@@ -1441,6 +1756,10 @@ mach_destroy_memory_entry(
  	named_entry->ref_count -= 1;
  
  	if (named_entry->ref_count == 0) {
@@ -827,7 +863,7 @@ index 3114947..fcff461 100644
  		if (named_entry->is_sub_map) {
  			vm_map_deallocate(named_entry->backing.map);
  		} else if (named_entry->is_copy) {
-@@ -1456,6 +1767,9 @@ mach_destroy_memory_entry(
+@@ -1456,6 +1775,9 @@ mach_destroy_memory_entry(
  
  		named_entry_unlock(named_entry);
  		named_entry_lock_destroy(named_entry);
@@ -882,7 +918,7 @@ index afe60fc..02968b2 100644
  
  void Assert(const char* file, int line, const char* expression) {
 diff --git a/duct-tape/src/stubs.c b/duct-tape/src/stubs.c
-index dc1cfa5..242c6da 100644
+index dc1cfa5..39a8c8d 100644
 --- a/duct-tape/src/stubs.c
 +++ b/duct-tape/src/stubs.c
 @@ -37,9 +37,18 @@ extern char* getenv(const char* name);
@@ -913,7 +949,7 @@ index dc1cfa5..242c6da 100644
  		kind_info = " (unsafe)";
  	} else {
  		if (!log_safe_stubs) {
-@@ -210,7 +219,9 @@ kern_return_t kmod_get_info(host_t host, kmod_info_array_t* kmod_list, mach_msg_
+@@ -210,11 +219,15 @@ kern_return_t kmod_get_info(host_t host, kmod_info_array_t* kmod_list, mach_msg_
  };
  
  kern_return_t kext_request(host_priv_t hostPriv, uint32_t clientLogSpec, vm_offset_t requestIn, mach_msg_type_number_t requestLengthIn, vm_offset_t* responseOut, mach_msg_type_number_t* responseLengthOut, vm_offset_t* logDataOut, mach_msg_type_number_t* logDataLengthOut, kern_return_t* op_result) {
@@ -924,8 +960,15 @@ index dc1cfa5..242c6da 100644
  };
  
  uint32_t PE_i_can_has_debugger(uint32_t* something) {
+-	dtape_stub_unsafe();
++	// No kernel debugger capability is provided by this runtime.
++	if (something) *something = 0;
++	return 0;
+ };
+ 
+ bool work_interval_port_type_render_server(mach_port_name_t port_name) {
 diff --git a/duct-tape/src/task.c b/duct-tape/src/task.c
-index a9eb4bc..b77187d 100644
+index a9eb4bc..7ef2800 100644
 --- a/duct-tape/src/task.c
 +++ b/duct-tape/src/task.c
 @@ -521,7 +521,9 @@ kern_return_t task_info(task_t xtask, task_flavor_t flavor, task_info_t task_inf
@@ -939,8 +982,27 @@ index a9eb4bc..b77187d 100644
  	}
  };
  
+@@ -585,7 +587,7 @@ kern_return_t task_restartable_ranges_synchronize(task_t task) {
+ };
+ 
+ kern_return_t task_set_exc_guard_behavior(task_t task, task_exc_guard_behavior_t behavior) {
+-	dtape_stub_unsafe();
++	return KERN_NOT_SUPPORTED;
+ };
+ 
+ kern_return_t task_set_info(task_t task, task_flavor_t flavor, task_info_t task_info_in, mach_msg_type_number_t task_info_count) {
+@@ -593,7 +595,8 @@ kern_return_t task_set_info(task_t task, task_flavor_t flavor, task_info_t task_
+ };
+ 
+ kern_return_t task_set_phys_footprint_limit(task_t task, int new_limit_mb, int* old_limit_mb) {
+-	dtape_stub_unsafe();
++	if (old_limit_mb) *old_limit_mb = 0;
++	return KERN_NOT_SUPPORTED;
+ };
+ 
+ kern_return_t task_set_state(task_t task, int flavor, thread_state_t state, mach_msg_type_number_t state_count) {
 diff --git a/duct-tape/src/thread.c b/duct-tape/src/thread.c
-index f4ce909..e14fe79 100644
+index f4ce909..a6cdb2c 100644
 --- a/duct-tape/src/thread.c
 +++ b/duct-tape/src/thread.c
 @@ -53,6 +53,7 @@ dtape_thread_t* dtape_thread_create(dtape_task_t* task, uint64_t nsid, void* con
@@ -988,6 +1050,24 @@ index f4ce909..e14fe79 100644
  	dtape_hooks->thread_resume(thread->context);
 +	libsimple_lock_unlock(&thread->block_suspend_gate);
  	return TRUE;
+ };
+ 
+@@ -782,7 +800,7 @@ thread_set_state(
+ 				s64.dr6 = s->dr6;
+ 				s64.dr7 = s->dr7;
+ 
+-				return thread_set_state(thread, x86_DEBUG_STATE64, (thread_state_t) &s,
++				return thread_set_state(thread, x86_DEBUG_STATE64, (thread_state_t) &s64,
+ 						x86_DEBUG_STATE64_COUNT);
+ 			}
+ 			case x86_DEBUG_STATE64:
+@@ -1293,7 +1311,7 @@ kern_return_t thread_info(thread_t xthread, thread_flavor_t flavor, thread_info_
+ 		};
+ 
+ 		default:
+-			dtape_stub_unsafe("Unimplemented flavor");
++			return KERN_INVALID_ARGUMENT;
+ 	}
  };
  
 @@ -1324,11 +1342,11 @@ kern_return_t thread_wire(host_priv_t host_priv, thread_t thread, boolean_t wire

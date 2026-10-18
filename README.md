@@ -12,11 +12,16 @@
 > - don't play ranked;
 > - don't use your main account.
 >
+> 3-Day Suspension ("UNSUPPORTED_THIRD_PARTY_TOOLS") DON'T USE IT RN
+>
 > Even with all of that, you will probably still get permabanned.
 >
 > **3. Takedown.** Riot may well shut this project down. If that happens, I will publish a fork of Darling containing only the changes made here (none of them breach anything), and release the small script as a gist or similar.
 >
 > **4. To Riot.** If you are reading this, it means a lot of people want to play your game on Linux and are disappointed that they currently can't. As with macOS for your other games (TFT, Valorant), it feels like Riot doesn't care about a part of its players who have been waiting the longest. If you want to fix this, make LoL Next compatible with Linux, either natively or through a layer like Proton. Yes, that includes your kernel anticheat: Epic Games did it with Easy Anti-Cheat. Follow the trend. This is the year of Linux, and people shouldn't be locked out of a platform or forced to dual boot for a single game.
+> Since Riot have heard of the repo if you want to contact me you can at darling-lolriot@proton.me (especially if you want to do an official or supported version of league of legends on linux)
+
+If someone else wants to contact me know that i'm open to jobs, part-time remote only as a employee and full time remote as a freelancer for a mission
 
 https://github.com/user-attachments/assets/140df3e0-3790-46b6-bab5-578139b84a7c
 
@@ -42,7 +47,34 @@ Game files, Riot installers, account databases, tokens, local prefixes, captures
 
 Use the dependency list in the [pinned Darling source](https://github.com/darlinghq/darling/tree/60ba801decee7a00782f74f6be4c8ffb013f79ff) for your distribution. `tools/env-check.sh` provides a starting check; its legacy package names may need adapting to your distro.
 
-## Build on the other PC
+## Experimental Nix/rootless package
+
+```sh
+nix run github:lucannez64/darling-lol#installer
+nix run github:lucannez64/darling-lol#default -- --update
+nix run github:lucannez64/darling-lol#default
+nix run github:lucannez64/darling-lol#shell
+```
+
+Or from a local checkout:
+
+```sh
+nix run .#installer
+nix run .#default
+```
+
+Nix supplies the launcher/dependencies, not a prebuilt Darling or game. First
+setup is interactive and builds into the writable per-user workspace. The
+desktop entry requests a terminal; EOF stdin produces an actionable error.
+Run updates only after manually closing the clients and shutting Darling down
+in the original namespace. A live prefix marker blocks a second launch rather
+than killing or attempting to reconnect. One workspace/foreground namespace is
+supported at a time. Readiness is per canonical prefix, configured guest and
+compatible package/runtime/source identity. Store closure roots are retained
+for mutable binaries; do not delete `build/nix-gcroots/` while using them.
+See [Nix setup and operational limits](docs/SETUP.md#nixos-package).
+
+## Build on the other PC (non-Nix)
 
 ```sh
 git clone https://github.com/lucannez64/darling-lol.git

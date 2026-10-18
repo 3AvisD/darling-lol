@@ -1,5 +1,23 @@
 # Troubleshooting
 
+## NixOS launcher fails before Riot opens
+
+A message saying Darling must be setuid root is not fixed by running `sudo`
+inside `buildFHSEnv`: bubblewrap enables `no_new_privs`, so setuid elevation is
+ignored there. Use the package's rootless launcher with subordinate UID/GID
+mapping enabled. Never make a mutable workspace executable host-setuid-root.
+
+If a newly installed client aborts with `Cannot load libavformat.so.62 (ELF)`,
+check the FHS runtime dependencies. The generated Darling wrappers use FFmpeg 8
+SONAMEs, so an unversioned nixpkgs `ffmpeg` dependency can break them when its
+major changes. The package pins `ffmpeg_8`; do not create fake ABI symlinks.
+
+Older packages used `cp -n` and never refreshed already-copied tools. The current
+launcher replaces packaged source files while retaining compiled/runtime data.
+An incomplete prefix can be backed up by renaming it with Darling stopped;
+never delete a populated Riot/game prefix just to repair the launcher.
+
+
 Use the [setup instructions](SETUP.md) from the repository root as your ordinary user. Exit the game and both clients manually before a full installation or Darling restart. Incremental server/memory installers can replace files without interrupting processes, but their changes need a later full restart to activate.
 
 ## Memory installer: permission denied
@@ -233,6 +251,30 @@ The first import of a drawable into the presenting OpenGL context, and the first
 A non-zero error or `FAILED` means the frames cannot reach the window. Before 2026-10-16 the import did not mark the memory as dedicated, which the extension requires; Mesa ignores it, and it is the suspected cause of the NVIDIA black screen (not yet confirmed). An NVIDIA log of 2026-10-16 showed `glTiling=optimal` with `setup_error=0x501 storage_error=0x501 FAILED`: NVIDIA's GL rejects `GL_LINEAR_TILING_EXT`, so the linear Vulkan image could not be imported. Since then the internal image and the GL texture use optimal tiling when `GL_VENDOR` contains NVIDIA (`vkTiling=optimal glTiling=optimal ok` is the expected line); everything else keeps linear. If the game shows a black screen on NVIDIA, report it with this file.
 
 An additional NVIDIA report on `68f816d` showed successful optimal-tiling import but repeated `Metal Device timed out giving us a Drawable to present` messages. Its [presentation trace](https://github.com/lucannez64/darling-lol/issues/3#issuecomment-6214732591) shows all three drawables queued and all three main-thread presentation callbacks running, followed by timeouts with three frames still queued. The compositor only prepared a Metal layer when it was the root layer, skipping nested Metal layers. It now prepares Metal layers throughout the tree. A standalone nested-layer reproduction exhausts the pool before this correction and passes ten presentations with pixel readback after it; the root-layer probe also passes. Confirmation on the reporter's NVIDIA system is still needed.
+
+### NVIDIA resize signals, CPU readback and completion latency
+
+The EGL-compatible window visual, compositor back buffer and collision-safe RPC
+socket allocation fixes are already part of the runtime. The remaining NVIDIA
+work covers these independent paths:
+
+- A terminal resize can deliver `SIGWINCH` to a native driver thread without a
+  Darling RPC socket. The runtime forwards that resize notification to the guest
+  main thread; it keeps the existing handling for other signals and faults.
+- With `RCLOL_GPU_DIRECT_PRESENT=0`, Chromium frames arrive through CPU readback.
+  The local compositor skips non-Metal trees to avoid covering the live client
+  with stale cached textures. Mixed trees still prepare and present Metal layers.
+- NVIDIA timeline waits can wake late after GPU completion. Each device now polls
+  briefly while completions are pending before blocking: 2000 microseconds by
+  default on NVIDIA and zero on other vendors. An idle device blocks immediately.
+  The guest file `/tmp/metal-wait-spin-us` overrides the budget when the device is
+  created; `0` disables polling. Values are capped at 10000 microseconds and
+  malformed values use the vendor default. Restart Darling to change the budget.
+
+The contributor reported custom matches on a single-GPU RTX 3060, driver 615.71,
+with sway/Xwayland using CPU readback. The initial polling change improved their
+reported rate from about 20 to 27 FPS. Those observations predate the narrowed
+integration; they do not establish hybrid-GPU or general NVIDIA support.
 
 ### Host-side checks
 
