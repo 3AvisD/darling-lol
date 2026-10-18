@@ -1134,7 +1134,7 @@ index 2a57796..0cbedf2 100644
 -
  @end
 diff --git a/src/Metal/MTLDevice.mm b/src/Metal/MTLDevice.mm
-index f58184a..ed918ed 100644
+index f58184a..2c45608 100644
 --- a/src/Metal/MTLDevice.mm
 +++ b/src/Metal/MTLDevice.mm
 @@ -2,14 +2,32 @@
@@ -1218,7 +1218,7 @@ index f58184a..ed918ed 100644
  }
  
  @synthesize device = _device;
-@@ -116,6 +168,44 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -116,6 +168,50 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  	[_threadExitCondition unlock];
  }
  
@@ -1228,21 +1228,27 @@ index f58184a..ed918ed 100644
 +	// Overrides are read once per process.
 +	static const char* const nameOverride = getenv("DARLING_METAL_GPU_NAME");
 +	static const uint64_t vramOverride = MTLDeviceInfo::parseMegabytes(getenv("DARLING_METAL_VRAM_MB"));
++	static const bool macName = [] {
++		const char* value = getenv("DARLING_METAL_MAC_GPU_NAME");
++		return value && value[0] == '1' && value[1] == '\0';
++	}();
 +
++	auto priv = dynamic_cast<Indium::PrivateDevice*>(_device.get());
 +	std::string vulkanName;
 +	try {
 +		vulkanName = _device ? _device->name() : "";
 +	} catch (...) {
 +		vulkanName = "";
 +	}
-+	_name = [[NSString alloc] initWithUTF8String: MTLDeviceInfo::resolveName(nameOverride, vulkanName.c_str()).c_str()];
++	const char* mac = macName && priv ? MTLDeviceInfo::macGpuName(priv->properties().vendorID) : nullptr;
++	_name = [[NSString alloc] initWithUTF8String: MTLDeviceInfo::resolveName(nameOverride, vulkanName.c_str(), mac).c_str()];
 +	if (_name == nil) {
 +		_name = [[NSString alloc] initWithUTF8String: MTLDeviceInfo::kFallbackName];
 +	}
 +
 +	uint64_t workingSet = 0;
 +	_sharesSystemMemory = NO;
-+	if (auto priv = dynamic_cast<Indium::PrivateDevice*>(_device.get())) {
++	if (priv) {
 +		const VkPhysicalDeviceType type = priv->properties().deviceType;
 +		_sharesSystemMemory = type == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU || type == VK_PHYSICAL_DEVICE_TYPE_CPU;
 +		const VkPhysicalDeviceMemoryProperties memory = priv->memoryProperties();
@@ -1263,7 +1269,7 @@ index f58184a..ed918ed 100644
  - (instancetype)initWithDevice: (std::shared_ptr<Indium::Device>)device
  {
  	self = [super init];
-@@ -123,6 +213,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -123,6 +219,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		_device = device;
  		_threadExitCondition = [NSCondition new];
  		_threadIsRunning = NO;
@@ -1271,7 +1277,7 @@ index f58184a..ed918ed 100644
  		_pollingThread = [[NSThread alloc] initWithTarget: self selector: @selector(pollingLoop) object: nil];
  		[_pollingThread start];
  	}
-@@ -133,6 +224,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -133,6 +230,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  {
  	[_pollingThread release];
  	[_threadExitCondition release];
@@ -1279,7 +1285,7 @@ index f58184a..ed918ed 100644
  
  	[super dealloc];
  }
-@@ -153,12 +245,60 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -153,12 +251,60 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  	[_threadExitCondition unlock];
  }
  
@@ -1341,7 +1347,7 @@ index f58184a..ed918ed 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -166,6 +306,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -166,6 +312,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1349,7 +1355,7 @@ index f58184a..ed918ed 100644
  	return [[MTLComputePipelineStateInternal alloc] initWithState: pso device: self label: descriptor.label];
  }
  
-@@ -183,7 +324,13 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -183,7 +330,13 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
                                                          reflection: (MTLAutoreleasedComputePipelineReflection*)reflection 
                                                               error: (NSError**)error
  {
@@ -1364,7 +1370,7 @@ index f58184a..ed918ed 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -191,13 +338,44 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -191,13 +344,44 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1410,7 +1416,7 @@ index f58184a..ed918ed 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -205,7 +383,118 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -205,7 +389,118 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1530,7 +1536,7 @@ index f58184a..ed918ed 100644
  }
  
  - (id<MTLCommandQueue>)newCommandQueue
-@@ -275,8 +564,21 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -275,8 +570,21 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  - (id<MTLLibrary>)newLibraryWithData: (dispatch_data_t)data
                                 error: (NSError**)error
  {
@@ -3482,7 +3488,7 @@ diff --git a/private-include/Metal/MTLDeviceInfo.h b/private-include/Metal/MTLDe
 new file mode 100644
 --- /dev/null
 +++ b/private-include/Metal/MTLDeviceInfo.h
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,166 @@
 +// SPDX-FileCopyrightText: 2026 Darling Developers
 +// SPDX-License-Identifier: MPL-2.0
 +
@@ -3582,9 +3588,25 @@ new file mode 100644
 +}
 +
 +// DARLING_METAL_GPU_NAME (used verbatim when non-empty) wins over the Vulkan name.
-+static inline std::string resolveName(const char* overrideName, const char* vulkanName) {
++// With DARLING_METAL_MAC_GPU_NAME=1: the GPU from the host's vendor that the MacBookPro16,1
++// iokitd reports shipped with, by Vulkan vendor ID. nullptr for other vendors (NVIDIA), which
++// keep their own name so apps never take another vendor's driver paths.
++static inline const char* macGpuName(uint32_t vendorID) {
++	switch (vendorID) {
++	case 0x1002: return "AMD Radeon Pro 5500M";
++	case 0x8086: return "Intel UHD Graphics 630";
++	default: return nullptr;
++	}
++}
++
++// DARLING_METAL_GPU_NAME wins, then the Mac GPU name (when enabled and known), then the
++// cleaned Vulkan name.
++static inline std::string resolveName(const char* overrideName, const char* vulkanName, const char* macName = nullptr) {
 +	if (overrideName && overrideName[0] != '\0') {
 +		return overrideName;
++	}
++	if (macName && macName[0] != '\0') {
++		return macName;
 +	}
 +	return metalNameFromVulkanName(vulkanName);
 +}
