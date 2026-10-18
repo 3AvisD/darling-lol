@@ -32,6 +32,8 @@ else:
     raise AssertionError('reserved error endpoint unexpectedly accepted a connection')
 print('LIFECYCLE_PASS: fixture')
 print('URLSESSION_PASS: fixture')
+print('SHARED_SESSION_PASS: fixture')
+print('QUEUE_PASS: fixture')
 ''')
             executable.chmod(0o755)
             probe = root / 'probe'
