@@ -35,6 +35,7 @@ int main() {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
         verifyPresentation(device != nil, "device");
         CAMetalLayer* layer = [CAMetalLayer layer];
+        verifyPresentation(layer.displaySyncEnabled == YES, "VSync enabled by default");
         layer.device = device;
         layer.drawableSize = CGSizeMake(160,96);
         layer.frame = CGRectMake(0,0,160,96);
@@ -66,6 +67,8 @@ int main() {
                 verifyPresentation(flag != nullptr, "request second bounded capture");
                 fclose(flag);
             }
+            // Toggle the public property while the same layer/window stays live.
+            layer.displaySyncEnabled = (frame % 3) != 1;
             @autoreleasepool {
                 id<CAMetalDrawable> drawable = [layer nextDrawable];
                 verifyPresentation(drawable != nil, "drawable after late window/context attachment");
@@ -82,6 +85,9 @@ int main() {
                 [commands commit];
                 [commands waitUntilCompleted];
                 pump(app);
+                GLint interval = -1;
+                CGLGetParameter([(CALayerContext*)[layer _context] glContext], kCGLCPSwapInterval, &interval);
+                verifyPresentation(interval == (layer.displaySyncEnabled ? 1 : 0), "Metal VSync reaches window swap interval");
             }
         }
         CGLContextObj previous = CGLGetCurrentContext();
