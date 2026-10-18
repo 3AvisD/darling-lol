@@ -157,3 +157,43 @@ class ProvisioningChecks(unittest.TestCase):
         self.assertEqual(platform.provision(supplied)['IOPlatformUUID'], value['IOPlatformUUID'])
         with self.assertRaises(ValueError):
             platform.validate({'IOPlatformUUID': value['IOPlatformUUID'], 'provisioning_UDID': str(uuid.uuid4())})
+
+    def test_replace_known_defaults_only_touches_shared_identities(self):
+        replace = [sys.executable, str(SCRIPT), '--prefix', str(self.prefix), '--runtime-root',
+                   str(self.runtime), '--replace-known-defaults', '--write']
+        # A prefix without identity files is not created or provisioned.
+        result = subprocess.run(replace, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.prefix.exists())
+        # A custom identity stays byte-for-byte unchanged.
+        custom = {'IOPlatformSerialNumber': 'MY-SERIAL', 'model': 'CustomModel'}
+        platform.save(self.prefix, custom)
+        canonical = platform.destination(self.prefix)
+        before = canonical.read_bytes()
+        result = subprocess.run(replace, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(canonical.read_bytes(), before)
+        self.assertFalse((self.prefix / 'private/etc/darling-smbios.conf').exists())
+        # The shared values are replaced; custom fields survive and a rerun is stable.
+        platform.save(self.prefix, {**custom, 'IOPlatformSerialNumber': platform.KNOWN_SERIAL,
+                                    'IOPlatformUUID': platform.KNOWN_UUID})
+        result = subprocess.run(replace, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        value = platform.load(canonical)
+        self.assertNotEqual(value['IOPlatformSerialNumber'], platform.KNOWN_SERIAL)
+        self.assertNotEqual(value['IOPlatformUUID'], platform.KNOWN_UUID)
+        self.assertFalse(platform.has_known_defaults(value))
+        self.assertEqual(value['model'], 'CustomModel')
+        self.assertNotIn('board-id', value)
+        self.assertNotIn('manufacturer', value)
+        self.assertEqual(platform.load(self.prefix / 'private/etc/darling-smbios.conf'), value)
+        after = canonical.read_bytes()
+        subprocess.run(replace, capture_output=True, text=True, check=True)
+        self.assertEqual(canonical.read_bytes(), after)
+
+    def test_standalone_fields_derived_from_known_uuid_are_replaced(self):
+        known_id = uuid.UUID(platform.KNOWN_UUID).bytes_le
+        for supplied in [{'system-id': known_id}, {'provisioning_UDID': platform.KNOWN_UUID}]:
+            value = platform.provision(supplied)
+            self.assertNotEqual(value['IOPlatformUUID'], platform.KNOWN_UUID)
+            self.assertNotEqual(value['system-id'], known_id)
