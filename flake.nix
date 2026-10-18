@@ -160,6 +160,18 @@
           export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/share/pkgconfig:/usr/lib/pkgconfig:/usr/lib64/pkgconfig:/usr/share/pkgconfig:''${PKG_CONFIG_PATH:-}"
           export CMAKE_PREFIX_PATH="/usr/local:/usr:/usr/lib/cmake/llvm:''${CMAKE_PREFIX_PATH:-}"
           unset NIX_LDFLAGS NIX_CFLAGS_COMPILE NIX_HARDENING_ENABLE CPATH LIBRARY_PATH
+          # NixOS keeps the GPU driver's EGL vendor and external-platform files under
+          # /run/opengl-driver, which glvnd and NVIDIA's driver in this FHS environment
+          # do not search. Without them glvnd only finds Mesa, and NVIDIA cannot open
+          # X11 displays (its X11 support is the egl-x11 external platform): the
+          # client renders with Mesa's software rasterizer, which garbles text and
+          # cannot present the game's NVIDIA Vulkan frames. FHS paths stay as fallback.
+          if [ -d /run/opengl-driver/share/glvnd/egl_vendor.d ]; then
+            export __EGL_VENDOR_LIBRARY_DIRS="/run/opengl-driver/share/glvnd/egl_vendor.d:/etc/glvnd/egl_vendor.d:/usr/share/glvnd/egl_vendor.d''${__EGL_VENDOR_LIBRARY_DIRS:+:$__EGL_VENDOR_LIBRARY_DIRS}"
+          fi
+          if [ -d /run/opengl-driver/share/egl/egl_external_platform.d ]; then
+            export __EGL_EXTERNAL_PLATFORM_CONFIG_DIRS="/run/opengl-driver/share/egl/egl_external_platform.d:/etc/egl/egl_external_platform.d:/usr/share/egl/egl_external_platform.d''${__EGL_EXTERNAL_PLATFORM_CONFIG_DIRS:+:$__EGL_EXTERNAL_PLATFORM_CONFIG_DIRS}"
+          fi
         '';
 
         runScript = pkgs.writeShellScript "darling-lol-run" ''
