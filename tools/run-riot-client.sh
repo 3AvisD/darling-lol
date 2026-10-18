@@ -12,6 +12,13 @@ runner_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 if [ "${RCLOL_RECOVER_HIDDEN_CLIENT:-0}" = 1 ]; then
  python3 "$runner_dir/recover-hidden-riot-client.py"
 fi
+# Opt-in: close the League client UI while a match runs. It keeps the CPU for the game
+# and leaves the client the backend starts when the match ends as the only CEF instance;
+# a second instance on the same profile never paints its window, which is the black
+# window seen with Riot's own "Close client during game" option. Off by default.
+if [ "${RCLOL_CLOSE_CLIENT_IN_GAME:-0}" = 1 ]; then
+ python3 "$runner_dir/close-league-client-in-game.py" --detach &
+fi
 # The bundled downloader rejects IPv6 CONNECT_TO addresses. Only Riot CDN
 # AAAA lookups are suppressed; set this to 0 to retain the upstream resolver.
 export RCLOL_CDN_IPV4_ONLY="${RCLOL_CDN_IPV4_ONLY:-1}"
