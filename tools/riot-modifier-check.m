@@ -63,14 +63,19 @@ int main(void) {
     key(display,KeyRelease,50,LockMask|ShiftMask|Mod4Mask);
     assert([events count]==before+1);
     expectModifier(0x38,NSAlphaShiftKeyMask|NSCommandKeyMask);
-    // Right Alt reports Mod1 on layouts without AltGr; that still counts as held.
+    // Right Alt is Mod1 (Option) on US layouts and Mod5 (AltGr) elsewhere; the
+    // backend reads the server map, so take whichever it reported and check it
+    // is still held, and reported once, when Command goes up.
     key(display,KeyPress,108,LockMask|Mod4Mask);
+    NSUInteger rightAlt=[[events lastObject] modifierFlags]&~(NSUInteger)(NSAlphaShiftKeyMask|NSCommandKeyMask);
+    assert(rightAlt==NSAlternateKeyMask || rightAlt==NSFunctionKeyMask);
+    unsigned int rightAltMask=rightAlt==NSAlternateKeyMask ? Mod1Mask : Mod5Mask;
     before=[events count];
-    key(display,KeyRelease,133,LockMask|Mod4Mask|Mod1Mask);
+    key(display,KeyRelease,133,LockMask|Mod4Mask|rightAltMask);
     assert([events count]==before+1);
-    expectModifier(0x37,NSAlphaShiftKeyMask|NSAlternateKeyMask|NSFunctionKeyMask);
+    expectModifier(0x37,NSAlphaShiftKeyMask|rightAlt);
     method_setImplementation(method,original);
-    puts("PASS Super=Command, Alt=Option, both Command keys, post-transition flags, focus-loss release, missed-release reconciliation, Caps Lock, swallowed Super release");
+    puts("PASS Super=Command, Alt=Option, both Command keys, post-transition flags, focus-loss release, missed-release reconciliation, Caps Lock, swallowed Super release, layout-mapped Right Alt");
     [events release];
  }
  return 0;
