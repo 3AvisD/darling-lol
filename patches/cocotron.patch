@@ -4506,7 +4506,7 @@ index 0000000..31fa646
 +
 +#endif
 diff --git a/AppKit/X11.backend/X11Window.h b/AppKit/X11.backend/X11Window.h
-index bfe3839a..e8c8828f 100644
+index bfe3839a..48cfac4c 100644
 --- a/AppKit/X11.backend/X11Window.h
 +++ b/AppKit/X11.backend/X11Window.h
 @@ -26,7 +26,7 @@
@@ -4518,13 +4518,15 @@ index bfe3839a..e8c8828f 100644
  
  @interface X11Window : CGWindow {
      int _level; // TODO: care about this value
-@@ -47,8 +47,30 @@
+@@ -47,8 +47,32 @@
      BOOL _mapped;
      CGPoint _lastMotionPos;
      BOOL _isModal;
 +    BOOL _overrideRedirect;
 +    BOOL _fullscreenRequested;
      BOOL _isOpaque;
++    BOOL _hasAlpha; // created with the 32-bit ARGB visual
++    BOOL _wasMapped; // the visual is settled at the first map
      BOOL _hasShadow;
 +    NSTimer *_remoteFrameTimer;
 +    Window _remoteFrameWindow;
@@ -4549,7 +4551,7 @@ index bfe3839a..e8c8828f 100644
  
  @public
      XIC _xic;
-@@ -60,9 +82,9 @@
+@@ -60,9 +84,9 @@
  - (Visual *) visual;
  - (Drawable) drawable;
  - (NSPoint) transformPoint: (NSPoint) pos;
@@ -4561,10 +4563,17 @@ index bfe3839a..e8c8828f 100644
  - (void) frameChanged;
  - (void) setLastKnownCursorPosition: (CGPoint) point;
 diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
-index f4925b66..0296203b 100644
+index f4925b66..730d4692 100644
 --- a/AppKit/X11.backend/X11Window.m
 +++ b/AppKit/X11.backend/X11Window.m
-@@ -23,6 +23,7 @@
+@@ -18,11 +18,14 @@
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE. */
+ 
++#import <AppKit/NSColor.h>
++#import <AppKit/NSGraphics.h>
+ #import <AppKit/NSMenuWindow.h>
+ #import <AppKit/NSPanel.h>
  #import <AppKit/NSPopUpWindow.h>
  #import <AppKit/NSRaise.h>
  #import <AppKit/NSWindow.h>
@@ -4572,7 +4581,7 @@ index f4925b66..0296203b 100644
  #import <Foundation/NSBundle.h>
  #import <Foundation/NSException.h>
  #import <Foundation/NSMutableData.h>
-@@ -38,6 +39,34 @@
+@@ -38,6 +41,110 @@
  #import "X11Window.h"
  #import <X11/Xatom.h>
  #import <X11/Xutil.h>
@@ -4604,10 +4613,86 @@ index f4925b66..0296203b 100644
 +    uint32_t pixelFormat;
 +    uint64_t dataSize;
 +} DarlingCARemoteFrame;
++
++static XVisualInfo *X11OpaqueVisualInfo(Display *display) {
++    static XVisualInfo *visualInfo;
++    if (visualInfo != NULL)
++        return visualInfo;
++
++    // TODO: get rid of these glX calls
++    GLint att[] = {GLX_RGBA,
++                   GLX_DOUBLEBUFFER,
++                   GLX_RED_SIZE,
++                   4,
++                   GLX_GREEN_SIZE,
++                   4,
++                   GLX_BLUE_SIZE,
++                   4,
++                   GLX_DEPTH_SIZE,
++                   4,
++                   None};
++
++    int screen = DefaultScreen(display);
++
++    // Rendering goes through EGL. NVIDIA's glXChooseVisual can return a GLX-only visual that every
++    // eglCreateWindowSurface rejects (EGL_BAD_CONFIG), so prefer the default visual when usable.
++    XVisualInfo visualTemplate;
++    int visualCount = 0;
++    visualTemplate.visualid = XVisualIDFromVisual(DefaultVisual(display, screen));
++    visualTemplate.screen = screen;
++    visualInfo = XGetVisualInfo(display, VisualIDMask | VisualScreenMask, &visualTemplate, &visualCount);
++    if (visualInfo != NULL && (visualInfo->class != TrueColor || visualInfo->depth < 24)) {
++        XFree(visualInfo);
++        visualInfo = NULL;
++    }
++    if (visualInfo == NULL && (visualInfo = glXChooseVisual(display, screen, att)) == NULL) {
++        NSLog(@"glXChooseVisual failed at %s %d", __FILE__, __LINE__);
++    }
++    return visualInfo;
++}
++
++// 32-bit ARGB, for windows that let what is behind them show through.
++static XVisualInfo *X11AlphaVisualInfo(Display *display) {
++    static XVisualInfo visualInfo;
++    static BOOL checked;
++    if (!checked) {
++        checked = YES;
++        XVisualInfo visualTemplate = {.screen = DefaultScreen(display), .depth = 32, .class = TrueColor};
++        int count = 0;
++        XVisualInfo *visuals = XGetVisualInfo(display, VisualScreenMask | VisualDepthMask | VisualClassMask,
++                                              &visualTemplate, &count);
++        for (int i = 0; i < count && visualInfo.visual == NULL; i++) {
++            if (visuals[i].red_mask == 0xff0000 && visuals[i].green_mask == 0x00ff00 &&
++                visuals[i].blue_mask == 0x0000ff)
++                visualInfo = visuals[i];
++        }
++        if (visuals)
++            XFree(visuals);
++    }
++    return visualInfo.visual ? &visualInfo : NULL;
++}
++
++// Set when the driver has no alpha config for the ARGB visual: later windows stay opaque.
++static BOOL alphaSurfaceFailed;
++
++static BOOL windowPropertyHasAtom(Display *display, Window window, Atom property, Atom atom) {
++    Atom type;
++    int format;
++    unsigned long count, bytesAfter;
++    unsigned char *data = NULL;
++    BOOL found = NO;
++    if (XGetWindowProperty(display, window, property, 0, 64, False, XA_ATOM, &type, &format,
++                           &count, &bytesAfter, &data) == Success && data != NULL) {
++        for (unsigned long i = 0; i < count && !found; i++)
++            found = ((Atom *) data)[i] == atom;
++        XFree(data);
++    }
++    return found;
++}
  
  @implementation X11Window
  
-@@ -158,7 +187,7 @@ static NSData *makeWindowIcon() {
+@@ -158,53 +265,75 @@ static NSData *makeWindowIcon() {
      X11Display* x11disp = (X11Display *) [NSDisplay currentDisplay];
      _display = [x11disp display];
  
@@ -4616,32 +4701,63 @@ index f4925b66..0296203b 100644
      BOOL isPanel = [delegate isKindOfClass: [NSPanel class]];
      if (isPanel && _styleMask & NSDocModalWindowMask)
          _styleMask = NSBorderlessWindowMask;
-@@ -177,7 +206,18 @@ static NSData *makeWindowIcon() {
+-    // TODO: get rid of these glX calls
+-    GLint att[] = {GLX_RGBA,
+-                   GLX_DOUBLEBUFFER,
+-                   GLX_RED_SIZE,
+-                   4,
+-                   GLX_GREEN_SIZE,
+-                   4,
+-                   GLX_BLUE_SIZE,
+-                   4,
+-                   GLX_DEPTH_SIZE,
+-                   4,
+-                   None};
  
-     int screen = DefaultScreen(_display);
+-    int screen = DefaultScreen(_display);
++    _hasAlpha = [self wantsAlphaVisual];
++    [self createXWindow];
  
 -    if ((_visualInfo = glXChooseVisual(_display, screen, att)) == NULL) {
-+    // Rendering goes through EGL. NVIDIA's glXChooseVisual can return a GLX-only visual that every
-+    // eglCreateWindowSurface rejects (EGL_BAD_CONFIG), so prefer the default visual when usable.
-+    XVisualInfo visualTemplate;
-+    int visualCount = 0;
-+    visualTemplate.visualid = XVisualIDFromVisual(DefaultVisual(_display, screen));
-+    visualTemplate.screen = screen;
-+    _visualInfo = XGetVisualInfo(_display, VisualIDMask | VisualScreenMask, &visualTemplate, &visualCount);
-+    if (_visualInfo != NULL && (_visualInfo->class != TrueColor || _visualInfo->depth < 24)) {
-+        XFree(_visualInfo);
-+        _visualInfo = NULL;
-+    }
-+    if (_visualInfo == NULL && (_visualInfo = glXChooseVisual(_display, screen, att)) == NULL) {
-         NSLog(@"glXChooseVisual failed at %s %d", __FILE__, __LINE__);
-     }
+-        NSLog(@"glXChooseVisual failed at %s %d", __FILE__, __LINE__);
+-    }
++    /* Chromium windows consume cross-process CA frames. League's native Metal window owns its
++     * drawable; a same-size client surface must never be raised above that drawable. */
++    if (!X11IsLeagueGameWindow(_display, None, delegate))
++        _remoteFrameTimer = [[NSTimer scheduledTimerWithTimeInterval: 1.0 / 60.0
++            target: self selector: @selector(presentRemoteCAFrame:)
++            userInfo: nil repeats: YES] retain];
  
-@@ -193,8 +233,16 @@ static NSData *makeWindowIcon() {
+-    Colormap cmap =
+-            XCreateColormap(_display, RootWindow(_display, _visualInfo->screen),
+-                            _visualInfo->visual, AllocNone);
++    return self;
++}
+ 
+-    if (cmap < 0) {
+-        NSLog(@"XCreateColormap failed");
+-        [self release];
+-        return nil;
+-    }
++- (void) createXWindow {
++    NSWindow *delegate = _delegate;
++    X11Display* x11disp = (X11Display *) [NSDisplay currentDisplay];
++    BOOL isPanel = [delegate isKindOfClass: [NSPanel class]];
  
      XSetWindowAttributes xattr;
      unsigned long xattr_mask;
 -    xattr.override_redirect =
 -            _styleMask == NSBorderlessWindowMask ? True : False;
+-    xattr_mask = CWOverrideRedirect | CWColormap;
+-    xattr.colormap = cmap;
+-
+-    _window = XCreateWindow(
+-            _display, DefaultRootWindow(_display), _frame.origin.x,
+-            _frame.origin.y, _frame.size.width, _frame.size.height, 0,
+-            (_visualInfo == NULL) ? CopyFromParent : _visualInfo->depth,
+-            InputOutput,
+-            (_visualInfo == NULL) ? CopyFromParent : _visualInfo->visual,
+-            xattr_mask, &xattr);
 +    BOOL isGame = X11IsLeagueGameWindow(_display, None, delegate);
 +
 +    // A borderless game is still a focusable application window. Leaving it
@@ -4652,26 +4768,48 @@ index f4925b66..0296203b 100644
 +             [delegate isKindOfClass:[NSPopUpWindow class]] ||
 +             ![delegate canBecomeKeyWindow]) ? True : False;
 +    _overrideRedirect = xattr.override_redirect;
-     xattr_mask = CWOverrideRedirect | CWColormap;
-     xattr.colormap = cmap;
- 
-@@ -206,6 +254,12 @@ static NSData *makeWindowIcon() {
-             (_visualInfo == NULL) ? CopyFromParent : _visualInfo->visual,
-             xattr_mask, &xattr);
- 
++    xattr.border_pixel = 0;
++
++    for (;;) {
++        _visualInfo = _hasAlpha ? X11AlphaVisualInfo(_display) : X11OpaqueVisualInfo(_display);
++        xattr.colormap =
++                XCreateColormap(_display, RootWindow(_display, _visualInfo->screen),
++                                _visualInfo->visual, AllocNone);
++        // A depth other than the root's needs its own border pixel, or BadMatch.
++        xattr_mask = CWOverrideRedirect | CWColormap | (_hasAlpha ? CWBorderPixel : 0);
++
++        _window = XCreateWindow(
++                _display, DefaultRootWindow(_display), _frame.origin.x,
++                _frame.origin.y, _frame.size.width, _frame.size.height, 0,
++                (_visualInfo == NULL) ? CopyFromParent : _visualInfo->depth,
++                InputOutput,
++                (_visualInfo == NULL) ? CopyFromParent : _visualInfo->visual,
++                xattr_mask, &xattr);
++        if (!_hasAlpha)
++            break;
++        // Without an alpha EGL config for this visual, draw opaque rather than not at all.
++        _cglWindow = CGLGetWindowWithAlpha((void *) _window, _visualInfo->visualid);
++        if (_cglWindow != NULL)
++            break;
++        XDestroyWindow(_display, _window);
++        XFreeColormap(_display, xattr.colormap);
++        _hasAlpha = NO;
++        alphaSurfaceFailed = YES;
++    }
++
 +    /* Keep Cocoa's process identifier available to cross-process activation. */
 +    unsigned long windowPID = (unsigned long)getpid();
 +    XChangeProperty(_display, _window, XInternAtom(_display, "_NET_WM_PID", False),
 +                    XA_CARDINAL, 32, PropModeReplace,
 +                    (unsigned char *)&windowPID, 1);
-+
+ 
      [self syncDelegateProperties];
  
-     Atom atm = XInternAtom(_display, "WM_DELETE_WINDOW", False);
-@@ -217,6 +271,15 @@ static NSData *makeWindowIcon() {
+@@ -217,7 +346,20 @@ static NSData *makeWindowIcon() {
                              .res_class = (char *) name};
      XSetClassHint(_display, _window, &classHint);
  
+-    XSetWindowBackgroundPixmap(_display, _window, None);
 +    if (isGame && !(_styleMask & NSTitledWindowMask)) {
 +        /* darling-lol: never let the compositor scan out this parent window
 +         * directly (bypass=2): Metal/OpenGL draw into a child window, so direct
@@ -4681,24 +4819,115 @@ index f4925b66..0296203b 100644
 +                        XA_CARDINAL, 32, PropModeReplace, (unsigned char *)&bypass, 1);
 +    }
 +
-     XSetWindowBackgroundPixmap(_display, _window, None);
++    // A translucent window shows its background until the first frame: make it clear, not black.
++    if (_hasAlpha)
++        XSetWindowBackground(_display, _window, 0);
++    else
++        XSetWindowBackgroundPixmap(_display, _window, None);
  
      _isModal = [delegate isSheet] || [NSApp modalWindow] == delegate;
-@@ -266,6 +329,13 @@ static NSData *makeWindowIcon() {
+     // FIXME: There should be no need for this.
+@@ -254,7 +396,8 @@ static NSData *makeWindowIcon() {
+         XNFocusWindow, _window,
+         NULL);
+ 
+-    _cglWindow = CGLGetWindow((void *) _window);
++    if (!_hasAlpha)
++        _cglWindow = CGLGetWindow((void *) _window);
+ 
+     [(X11Display *) [NSDisplay currentDisplay] setWindow: self forID: _window];
+ 
+@@ -265,8 +408,88 @@ static NSData *makeWindowIcon() {
+     [self setStyleMaskInternal: _styleMask force: YES];
  
      [self setWindowIcon];
++}
  
-+    /* Chromium windows consume cross-process CA frames. League's native Metal window owns its
-+     * drawable; a same-size client surface must never be raised above that drawable. */
-+    if (!isGame)
-+        _remoteFrameTimer = [[NSTimer scheduledTimerWithTimeInterval: 1.0 / 60.0
-+            target: self selector: @selector(presentRemoteCAFrame:)
-+            userInfo: nil repeats: YES] retain];
+-    return self;
++// Only when the background can show through (a pattern image may): League's game window is
++// non-opaque on an opaque background, and a 32-bit parent costs Xwayland a copy of its GL child.
++- (BOOL) isTranslucent {
++    if ([_delegate isOpaque] ||
++        X11IsLeagueGameWindow(_display, None, _delegate))
++        return NO;
++    NSColor *background = [_delegate backgroundColor];
++    return background == nil || [background alphaComponent] < 1.0 ||
++           [[background colorSpaceName] isEqualToString: NSPatternColorSpace];
++}
 +
-     return self;
++- (BOOL) wantsAlphaVisual {
++    return !alphaSurfaceFailed && X11AlphaVisualInfo(_display) != NULL && [self isTranslucent];
++}
++
++// The visual is fixed at creation, which often comes before the app sets its opacity and
++// background: swap the window while it is unmapped, keeping its children.
++- (void) recreateXWindowWithAlpha: (BOOL) alpha {
++    Window oldWindow = _window;
++
++    [_caContext release];
++    _caContext = nil;
++    if (_cglContext != NULL) {
++        CGLReleaseContext(_cglContext);
++        _cglContext = NULL;
++    }
++    if (_cglWindow != NULL) {
++        CGLDestroyWindow(_cglWindow);
++        _cglWindow = NULL;
++    }
++    XDestroyIC(_xic);
++    [(X11Display *) [NSDisplay currentDisplay] setWindow: nil forID: oldWindow];
++
++    _hasAlpha = alpha;
++    [self createXWindow];
++
++    Window root, parent, *children = NULL;
++    unsigned int count = 0;
++    if (XQueryTree(_display, oldWindow, &root, &parent, &children, &count)) {
++        for (unsigned int i = 0; i < count; i++) {
++            XWindowAttributes attributes;
++            if (XGetWindowAttributes(_display, children[i], &attributes))
++                XReparentWindow(_display, children[i], _window, attributes.x, attributes.y);
++        }
++        if (children)
++            XFree(children);
++    }
++    XDestroyWindow(_display, oldWindow);
++
++    NSString *title = [_delegate title];
++    if (title != nil)
++        [self setTitle: title];
++}
++
++// Opacity and background are set by the time the window gets content or is first shown.
++- (void) settleVisual {
++    if (_wasMapped || _window == 0 || _delegate == nil)
++        return;
++    BOOL alpha = [self wantsAlphaVisual];
++    if (alpha != _hasAlpha && _remoteFrameWindow == 0)
++        [self recreateXWindowWithAlpha: alpha];
++}
++
++// Translucent windows above the normal level (splashes, overlays) float over the others on macOS,
++// without a frame. Window managers float splash windows and leave them undecorated.
++- (void) markFloatingBeforeMap {
++    Atom typeProperty = XInternAtom(_display, "_NET_WM_WINDOW_TYPE", False);
++    if (windowPropertyHasAtom(_display, _window, typeProperty,
++                              XInternAtom(_display, "_NET_WM_WINDOW_TYPE_NORMAL", False))) {
++        long splash = (long) XInternAtom(_display, "_NET_WM_WINDOW_TYPE_SPLASH", False);
++        XChangeProperty(_display, _window, typeProperty, XA_ATOM, 32, PropModeReplace,
++                        (const unsigned char *) &splash, 1);
++    }
++    Atom stateProperty = XInternAtom(_display, "_NET_WM_STATE", False);
++    Atom above = XInternAtom(_display, "_NET_WM_STATE_ABOVE", False);
++    if (!windowPropertyHasAtom(_display, _window, stateProperty, above)) {
++        long state = (long) above;
++        XChangeProperty(_display, _window, stateProperty, XA_ATOM, 32, PropModeAppend,
++                        (const unsigned char *) &state, 1);
++    }
  }
  
-@@ -279,24 +349,30 @@ static NSData *makeWindowIcon() {
+ - (void) dealloc {
+@@ -279,24 +502,30 @@ static NSData *makeWindowIcon() {
      return _styleMask;
  }
  
@@ -4745,7 +4974,7 @@ index f4925b66..0296203b 100644
      if (!_mapped) {
          long states[2];
          int states_cnt = 0;
-@@ -304,7 +380,7 @@ static NSData *makeWindowIcon() {
+@@ -304,7 +533,7 @@ static NSData *makeWindowIcon() {
              states[states_cnt++] =
                      (long) XInternAtom(_display, "_NET_WM_STATE_MODAL", False);
          }
@@ -4754,7 +4983,7 @@ index f4925b66..0296203b 100644
              states[states_cnt++] = (long) XInternAtom(
                      _display, "_NET_WM_STATE_FULLSCREEN", False);
          }
-@@ -312,14 +388,13 @@ static NSData *makeWindowIcon() {
+@@ -312,14 +541,13 @@ static NSData *makeWindowIcon() {
                          XInternAtom(_display, "_NET_WM_STATE", False), XA_ATOM,
                          32, PropModeReplace, (const unsigned char *) states,
                          states_cnt);
@@ -4771,7 +5000,7 @@ index f4925b66..0296203b 100644
          event.data.l[1] =
                  (long) XInternAtom(_display, "_NET_WM_STATE_FULLSCREEN", False);
          event.data.l[3] = 1;
-@@ -327,6 +402,35 @@ static NSData *makeWindowIcon() {
+@@ -327,6 +555,35 @@ static NSData *makeWindowIcon() {
                     SubstructureNotifyMask | SubstructureRedirectMask,
                     (XEvent *) &event);
      }
@@ -4807,7 +5036,7 @@ index f4925b66..0296203b 100644
  }
  
  - (void) setStyleMask: (NSUInteger) mask {
-@@ -338,7 +442,6 @@ static NSData *makeWindowIcon() {
+@@ -338,7 +595,6 @@ static NSData *makeWindowIcon() {
  }
  
  + (void) removeDecorationForWindow: (Window) w onDisplay: (Display *) dpy {
@@ -4815,15 +5044,22 @@ index f4925b66..0296203b 100644
      struct {
          unsigned long flags;
          unsigned long functions;
-@@ -358,6 +461,7 @@ static NSData *makeWindowIcon() {
+@@ -356,8 +612,14 @@ static NSData *makeWindowIcon() {
+ 
+ - (void) ensureMapped {
      if (!_mapped) {
++        [self settleVisual];
++        if (!_wasMapped && _delegate != nil && [_delegate level] > NSNormalWindowLevel &&
++            [self isTranslucent])
++            [self markFloatingBeforeMap];
          XMapWindow(_display, _window);
++        _wasMapped = YES;
          _mapped = YES;
 +        _remoteFrameTargetRefresh = 0;
      }
  }
  
-@@ -377,15 +481,27 @@ static NSData *makeWindowIcon() {
+@@ -377,15 +639,27 @@ static NSData *makeWindowIcon() {
  - (void) syncDelegateProperties {
      long mask = KeyPressMask | KeyReleaseMask | ExposureMask |
                  StructureNotifyMask | EnterWindowMask | LeaveWindowMask |
@@ -4856,7 +5092,7 @@ index f4925b66..0296203b 100644
      // TODO: background color
  }
  
-@@ -393,6 +509,28 @@ static NSData *makeWindowIcon() {
+@@ -393,6 +667,28 @@ static NSData *makeWindowIcon() {
      // This is essentially dealloc; we release our contexts
      // and windows, but unlike dealloc, this method can be called
      // several times, so set everything to nil/NULL/0.
@@ -4885,7 +5121,7 @@ index f4925b66..0296203b 100644
      [_context release];
      _context = nil;
  
-@@ -421,6 +559,392 @@ static NSData *makeWindowIcon() {
+@@ -421,6 +717,392 @@ static NSData *makeWindowIcon() {
      }
  }
  
@@ -5278,7 +5514,7 @@ index f4925b66..0296203b 100644
  - (Window) windowHandle {
      return _window;
  }
-@@ -470,14 +994,32 @@ static NSData *makeWindowIcon() {
+@@ -470,14 +1152,32 @@ static NSData *makeWindowIcon() {
      const char *text = [title cString];
      XStringListToTextProperty((char **) &text, 1, &prop);
      XSetWMName(_display, _window, &prop);
@@ -5312,7 +5548,7 @@ index f4925b66..0296203b 100644
  }
  
  - (void) setHasShadow: (BOOL) value {
-@@ -488,6 +1030,25 @@ static NSData *makeWindowIcon() {
+@@ -488,6 +1188,25 @@ static NSData *makeWindowIcon() {
      _level = value;
  }
  
@@ -5338,7 +5574,7 @@ index f4925b66..0296203b 100644
  - (void) setOpaque: (BOOL) value {
      _isOpaque = value;
  }
-@@ -543,6 +1104,21 @@ static NSData *makeWindowIcon() {
+@@ -543,6 +1262,21 @@ static NSData *makeWindowIcon() {
  - (void) makeKey {
      [self ensureMapped];
      XRaiseWindow(_display, _window);
@@ -5360,7 +5596,7 @@ index f4925b66..0296203b 100644
  }
  
  - (void) makeMain {
-@@ -559,7 +1135,29 @@ static NSData *makeWindowIcon() {
+@@ -559,7 +1293,29 @@ static NSData *makeWindowIcon() {
      XRaiseWindow(_display, _window);
  }
  
@@ -5390,7 +5626,20 @@ index f4925b66..0296203b 100644
      Atom wmState = XInternAtom(_display, "_NET_WM_STATE", FALSE);
      Atom hiddenState = XInternAtom(_display, "_NET_WM_STATE_HIDDEN", FALSE);
  
-@@ -615,6 +1213,12 @@ static NSData *makeWindowIcon() {
+@@ -593,8 +1349,10 @@ static NSData *makeWindowIcon() {
+     if (_cglContext == NULL) {
+         CGLError error;
+ 
+-        if ((error = CGLCreateContext(NULL, NULL, &_cglContext)) !=
+-            kCGLNoError) {
++        // An alpha surface needs a context from its own config.
++        error = _hasAlpha ? CGLCreateContextForWindow(_cglWindow, &_cglContext)
++                          : CGLCreateContext(NULL, NULL, &_cglContext);
++        if (error != kCGLNoError) {
+             NSLog(@"CGLCreateContext failed at %s %d with error %d", __FILE__,
+                   __LINE__, error);
+ 
+@@ -615,6 +1373,12 @@ static NSData *makeWindowIcon() {
  }
  
  - (void) openGLFlushBuffer {
@@ -5403,7 +5652,7 @@ index f4925b66..0296203b 100644
      CGLError error;
  
      CGLContextObj prevContext = CGLGetCurrentContext();
-@@ -652,7 +1256,7 @@ static NSData *makeWindowIcon() {
+@@ -652,7 +1416,7 @@ static NSData *makeWindowIcon() {
  }
  
  - (O2Rect) frame {
@@ -5412,7 +5661,7 @@ index f4925b66..0296203b 100644
  }
  
  static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
-@@ -666,6 +1270,7 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
+@@ -666,6 +1430,7 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
  }
  
  - (void) frameChanged {
@@ -5420,7 +5669,7 @@ index f4925b66..0296203b 100644
      XErrorHandler previousHandler = XSetErrorHandler(ignoreBadWindow);
      @try {
          Window root, parent;
-@@ -710,14 +1315,6 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
+@@ -710,19 +1475,13 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
      [_deviceDictionary addEntriesFromDictionary: entries];
  }
  
@@ -5434,6 +5683,13 @@ index f4925b66..0296203b 100644
 -
  - (NSPoint) transformPoint: (NSPoint) pos; {
      return NSMakePoint(pos.x, _frame.size.height - pos.y);
+ }
+ 
+ - (X11SubWindow *) createSubWindowWithFrame: (CGRect) frame {
++    // Subwindows take the parent's visual: settle it before they exist.
++    [self settleVisual];
+     return [[[X11SubWindow alloc] initWithParentWindow: self
+                                                  frame: frame] autorelease];
  }
 diff --git a/AppKit/include/AppKit/NSAccessibilityConstants.h b/AppKit/include/AppKit/NSAccessibilityConstants.h
 index 282312de..03c75b2b 100644
@@ -6439,6 +6695,45 @@ index e1da261d..f050b6e8 100644
  CFArrayRef __nullable CGWindowListCreate(CGWindowListOption option, CGWindowID relativeToWindow)
  {
      printf("STUB %s\n", __PRETTY_FUNCTION__);
+diff --git a/CoreGraphics/CGWindowLevel.m b/CoreGraphics/CGWindowLevel.m
+index e03fbf80..a0206b07 100644
+--- a/CoreGraphics/CGWindowLevel.m
++++ b/CoreGraphics/CGWindowLevel.m
+@@ -1,6 +1,33 @@
+ #import <CoreGraphics/CGWindowLevel.h>
+ 
++// The levels macOS returns: SDK headers turn NSFloatingWindowLevel and friends into calls to this
++// function, so returning the normal level for every key hid alwaysOnTop and panel levels.
+ CGWindowLevel CGWindowLevelForKey(CGWindowLevelKey key)
+ {
+-    return kCGNormalWindowLevel;
++    static const int32_t levels[kCGNumberOfWindowLevelKeys] = {
++        [kCGBaseWindowLevelKey] = INT32_MIN,
++        [kCGMinimumWindowLevelKey] = INT32_MIN + 1,
++        [kCGDesktopWindowLevelKey] = INT32_MIN + 1 + 20,
++        [kCGBackstopMenuLevelKey] = -20,
++        [kCGNormalWindowLevelKey] = 0,
++        [kCGFloatingWindowLevelKey] = 3,
++        [kCGTornOffMenuWindowLevelKey] = 3,
++        [kCGDockWindowLevelKey] = 20,
++        [kCGMainMenuWindowLevelKey] = 24,
++        [kCGStatusWindowLevelKey] = 25,
++        [kCGModalPanelWindowLevelKey] = 8,
++        [kCGPopUpMenuWindowLevelKey] = 101,
++        [kCGDraggingWindowLevelKey] = 500,
++        [kCGScreenSaverWindowLevelKey] = 1000,
++        [kCGMaximumWindowLevelKey] = INT32_MAX - 16,
++        [kCGOverlayWindowLevelKey] = 102,
++        [kCGHelpWindowLevelKey] = 200,
++        [kCGUtilityWindowLevelKey] = 19,
++        [kCGDesktopIconWindowLevelKey] = INT32_MIN + 1 + 20 + 20,
++        [kCGCursorWindowLevelKey] = INT32_MAX - 17,
++        [kCGAssistiveTechHighWindowLevelKey] = 1500,
++    };
++    if ((int) key < 0 || key >= kCGNumberOfWindowLevelKeys)
++        return 0;
++    return levels[key];
+ }
 diff --git a/CoreGraphics/X11.backend/CGSConnectionX11.h b/CoreGraphics/X11.backend/CGSConnectionX11.h
 index 5437acb5..07f7eb4f 100644
 --- a/CoreGraphics/X11.backend/CGSConnectionX11.h
