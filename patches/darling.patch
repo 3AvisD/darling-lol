@@ -6257,7 +6257,7 @@ index deca16b87..d75d5e22d 100644
  
  set_property(TARGET OpenGL APPEND_STRING PROPERTY LINK_FLAGS
 diff --git a/src/frameworks/OpenGL/OpenGL.c b/src/frameworks/OpenGL/OpenGL.c
-index ffd7fe054..1ff212d34 100644
+index ffd7fe054..5b5712ea2 100644
 --- a/src/frameworks/OpenGL/OpenGL.c
 +++ b/src/frameworks/OpenGL/OpenGL.c
 @@ -2,11 +2,22 @@
@@ -6527,11 +6527,14 @@ index ffd7fe054..1ff212d34 100644
  
      if (surface == EGL_NO_SURFACE) {
          return NULL;
-@@ -171,14 +309,18 @@ CGLWindowRef CGLGetWindow(void *native_window) {
+@@ -171,14 +309,21 @@ CGLWindowRef CGLGetWindow(void *native_window) {
  }
  
  CGL_EXPORT void CGLDestroyWindow(CGLWindowRef window) {
 -    eglDestroySurface(display, (EGLSurface) window);
++    /* CGLGetWindow returns NULL when eglCreateWindowSurface fails. */
++    if (window == NULL)
++        return;
 +    p_eglDestroySurface(display, (EGLSurface) window);
  }
  
@@ -6548,7 +6551,7 @@ index ffd7fe054..1ff212d34 100644
  }
  
  static pthread_key_t current_context_key;
-@@ -198,18 +340,42 @@ CGLContextObj CGLGetCurrentContext(void) {
+@@ -198,18 +343,42 @@ CGLContextObj CGLGetCurrentContext(void) {
      return pthread_getspecific(key);
  }
  
@@ -6596,7 +6599,7 @@ index ffd7fe054..1ff212d34 100644
  }
  
  CGLError CGLSetFullScreen(CGLContextObj ctx) {
-@@ -223,11 +389,13 @@ CGLError CGLChoosePixelFormat(
+@@ -223,11 +392,13 @@ CGLError CGLChoosePixelFormat(
      CGLPixelFormatObj *result,
      GLint *number_of_screens
  ) {
@@ -6611,7 +6614,7 @@ index ffd7fe054..1ff212d34 100644
      for (int i = 0; i < count; i++) {
          format->attributes[i] = attrs[i];
      }
-@@ -251,6 +419,10 @@ CGLError CGLDescribePixelFormat(
+@@ -251,6 +422,10 @@ CGLError CGLDescribePixelFormat(
      CGLPixelFormatAttribute attr,
      GLint *value
  ) {
@@ -6622,7 +6625,7 @@ index ffd7fe054..1ff212d34 100644
      for (int i = 0; format->attributes[i] != 0; i++) {
          int has_arg = attribute_has_argument(format->attributes[i]);
  
-@@ -304,24 +476,67 @@ GLuint CGLGetPixelFormatRetainCount(CGLPixelFormatObj pixelFormat) {
+@@ -304,24 +479,67 @@ GLuint CGLGetPixelFormatRetainCount(CGLPixelFormatObj pixelFormat) {
  }
  
  CGLError CGLCreateContext(CGLPixelFormatObj pixelFormat, CGLContextObj share, CGLContextObj *resultp) {
@@ -6691,7 +6694,7 @@ index ffd7fe054..1ff212d34 100644
  
      *resultp = context;
  
-@@ -333,7 +548,7 @@ CGLContextObj CGLRetainContext(CGLContextObj context) {
+@@ -333,7 +551,7 @@ CGLContextObj CGLRetainContext(CGLContextObj context) {
          return NULL;
      }
  
@@ -6700,7 +6703,7 @@ index ffd7fe054..1ff212d34 100644
      return context;
  }
  
-@@ -342,11 +557,17 @@ void CGLReleaseContext(CGLContextObj context) {
+@@ -342,11 +560,17 @@ void CGLReleaseContext(CGLContextObj context) {
          return;
      }
  
@@ -6721,7 +6724,7 @@ index ffd7fe054..1ff212d34 100644
  
      if (CGLGetCurrentContext() == context) {
          CGLSetCurrentContext(NULL);
-@@ -354,7 +575,11 @@ void CGLReleaseContext(CGLContextObj context) {
+@@ -354,7 +578,11 @@ void CGLReleaseContext(CGLContextObj context) {
  
      pthread_mutex_destroy(&(context->lock));
  
@@ -6734,7 +6737,7 @@ index ffd7fe054..1ff212d34 100644
  
      free(context);
  }
-@@ -383,9 +608,330 @@ CGLError CGLUnlockContext(CGLContextObj context) {
+@@ -383,9 +611,330 @@ CGLError CGLUnlockContext(CGLContextObj context) {
      return kCGLNoError;
  }
  
@@ -7067,7 +7070,7 @@ index ffd7fe054..1ff212d34 100644
  }
  
  CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, const GLint *value) {
-@@ -394,8 +940,9 @@ CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, c
+@@ -394,8 +943,9 @@ CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, c
  
      if (parameter == kCGLCPSwapInterval)
      {
@@ -7078,7 +7081,7 @@ index ffd7fe054..1ff212d34 100644
          if (success)
              context->swap_interval = v;
          return success ? kCGLNoError : kCGLBadValue;
-@@ -417,14 +964,19 @@ CGLError CGLGetParameter(CGLContextObj context, CGLContextParameter parameter, G
+@@ -417,14 +967,19 @@ CGLError CGLGetParameter(CGLContextObj context, CGLContextParameter parameter, G
      return kCGLNoError;
  }
  
