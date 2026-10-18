@@ -18,4 +18,5 @@ jobs:
       - run: python -m unittest discover -s tests -p 'test_hidden_riot_recovery.py'
       - run: python -m unittest discover -s tests -p 'test_desktop_run.py'
       - run: python -m unittest discover -s tests -p 'test_urlsession_runner.py'
+      - run: python -m unittest discover -s tests -p 'test_metal_device_info.py'
       - run: python -m unittest discover -s tests -p 'test_exec_guest.py'
