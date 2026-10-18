@@ -1134,7 +1134,7 @@ index 2a57796..0cbedf2 100644
 -
  @end
 diff --git a/src/Metal/MTLDevice.mm b/src/Metal/MTLDevice.mm
-index f58184a..a80a625 100644
+index f58184a..ed918ed 100644
 --- a/src/Metal/MTLDevice.mm
 +++ b/src/Metal/MTLDevice.mm
 @@ -2,14 +2,32 @@
@@ -1218,7 +1218,7 @@ index f58184a..a80a625 100644
  }
  
  @synthesize device = _device;
-@@ -116,6 +168,39 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -116,6 +168,44 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  	[_threadExitCondition unlock];
  }
  
@@ -1229,7 +1229,12 @@ index f58184a..a80a625 100644
 +	static const char* const nameOverride = getenv("DARLING_METAL_GPU_NAME");
 +	static const uint64_t vramOverride = MTLDeviceInfo::parseMegabytes(getenv("DARLING_METAL_VRAM_MB"));
 +
-+	std::string vulkanName = _device->name();
++	std::string vulkanName;
++	try {
++		vulkanName = _device ? _device->name() : "";
++	} catch (...) {
++		vulkanName = "";
++	}
 +	_name = [[NSString alloc] initWithUTF8String: MTLDeviceInfo::resolveName(nameOverride, vulkanName.c_str()).c_str()];
 +	if (_name == nil) {
 +		_name = [[NSString alloc] initWithUTF8String: MTLDeviceInfo::kFallbackName];
@@ -1258,7 +1263,7 @@ index f58184a..a80a625 100644
  - (instancetype)initWithDevice: (std::shared_ptr<Indium::Device>)device
  {
  	self = [super init];
-@@ -123,6 +208,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -123,6 +213,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		_device = device;
  		_threadExitCondition = [NSCondition new];
  		_threadIsRunning = NO;
@@ -1266,7 +1271,7 @@ index f58184a..a80a625 100644
  		_pollingThread = [[NSThread alloc] initWithTarget: self selector: @selector(pollingLoop) object: nil];
  		[_pollingThread start];
  	}
-@@ -133,6 +219,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -133,6 +224,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  {
  	[_pollingThread release];
  	[_threadExitCondition release];
@@ -1274,7 +1279,7 @@ index f58184a..a80a625 100644
  
  	[super dealloc];
  }
-@@ -153,12 +240,60 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -153,12 +245,60 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  	[_threadExitCondition unlock];
  }
  
@@ -1311,7 +1316,7 @@ index f58184a..a80a625 100644
 +- (BOOL)isRemovable { return NO; }
 +- (BOOL)isHeadless { return NO; }
 +- (NSString*)name { return _name; }
-+- (uint64_t)registryID { return 0; }
++- (uint64_t)registryID { return MTLDeviceInfo::kDefaultRegistryID; }
 +- (BOOL)supportsFamily: (NSUInteger)family { return YES; }
 +- (BOOL)supportsFeatureSet: (NSUInteger)featureSet { return YES; }
 +- (BOOL)supportsTextureSampleCount: (NSUInteger)sampleCount { return sampleCount <= 4; }
@@ -1336,7 +1341,7 @@ index f58184a..a80a625 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -166,6 +301,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -166,6 +306,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1344,7 +1349,7 @@ index f58184a..a80a625 100644
  	return [[MTLComputePipelineStateInternal alloc] initWithState: pso device: self label: descriptor.label];
  }
  
-@@ -183,7 +319,13 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -183,7 +324,13 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
                                                          reflection: (MTLAutoreleasedComputePipelineReflection*)reflection 
                                                               error: (NSError**)error
  {
@@ -1359,7 +1364,7 @@ index f58184a..a80a625 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -191,13 +333,44 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -191,13 +338,44 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1405,7 +1410,7 @@ index f58184a..a80a625 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -205,7 +378,114 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -205,7 +383,118 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1453,7 +1458,9 @@ index f58184a..a80a625 100644
 +- (id<MTLDepthStencilState>)newDepthStencilStateWithDescriptor:(MTLDepthStencilDescriptor*)descriptor
 +{
 +    if (!descriptor) return nil;
-+    auto state = _device->newDepthStencilState([descriptor asIndiumDescriptor]);
++    std::shared_ptr<Indium::DepthStencilState> state;
++    try { state = _device->newDepthStencilState([descriptor asIndiumDescriptor]); }
++    catch (...) { return nil; }
 +    if (!state) return nil;
 +    return [[MTLDepthStencilStateInternal alloc] initWithState:state device:self label:descriptor.label];
 +}
@@ -1475,7 +1482,9 @@ index f58184a..a80a625 100644
 +    desc.lodMaxClamp = descriptor.lodMaxClamp;
 +    desc.supportArgumentBuffers = descriptor.supportArgumentBuffers;
 +    desc.compareFunction = static_cast<Indium::CompareFunction>(descriptor.compareFunction);
-+    auto sampler = _device->newSamplerState(desc);
++    std::shared_ptr<Indium::SamplerState> sampler;
++    try { sampler = _device->newSamplerState(desc); }
++    catch (...) { return nil; }
 +    if (!sampler) return nil;
 +    return [[MTLSamplerStateInternal alloc] initWithSampler:sampler device:self label:descriptor.label];
 +}
@@ -1521,7 +1530,7 @@ index f58184a..a80a625 100644
  }
  
  - (id<MTLCommandQueue>)newCommandQueue
-@@ -275,8 +555,21 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -275,8 +564,21 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  - (id<MTLLibrary>)newLibraryWithData: (dispatch_data_t)data
                                 error: (NSError**)error
  {
@@ -2581,7 +2590,7 @@ index 66a9056..f28235c 100644
 -
  @end
 diff --git a/src/Metal/MTLTexture.mm b/src/Metal/MTLTexture.mm
-index 6c71fb9..822c112 100644
+index 6c71fb9..186b8c0 100644
 --- a/src/Metal/MTLTexture.mm
 +++ b/src/Metal/MTLTexture.mm
 @@ -1,3 +1,5 @@
@@ -2590,7 +2599,7 @@ index 6c71fb9..822c112 100644
  // SPDX-FileCopyrightText: 2026 Darling Developers
  // SPDX-License-Identifier: MPL-2.0
  
-@@ -7,11 +9,37 @@
+@@ -7,11 +9,38 @@
  #import <Metal/MTLPixelFormatInternal.h>
  #import <Metal/MTLTypesInternal.h>
  
@@ -2606,7 +2615,8 @@ index 6c71fb9..822c112 100644
 +		if (FILE* log = fopen("/tmp/metal-trace.log", "a")) {
 +			const unsigned char* b = (const unsigned char*) bytes;
 +			unsigned long nonZero = 0;
-+			size_t probe = std::min<size_t>(4096, (size_t) region.size.width * 4);
++			// Every pixel format takes at least one byte per pixel, so the first `width` bytes lie inside the first row.
++			size_t probe = std::min<size_t>(4096, (size_t) region.size.width);
 +			for (size_t i = 0; i < probe; ++i) if (b[i]) ++nonZero;
 +			fprintf(log, "replaceRegion tex=%p %lux%lu fmt=%lu level=%lu region=(%lu,%lu %lux%lu) firstBytesNonZero=%lu/%zu took=%.1fms\n", texture,
 +				(unsigned long) texture.width, (unsigned long) texture.height, (unsigned long) texture.pixelFormat, (unsigned long) level,
@@ -2628,7 +2638,7 @@ index 6c71fb9..822c112 100644
  @synthesize device = _device;
  @synthesize resourceOptions = _resourceOptions;
  @synthesize label = _label;
-@@ -164,7 +192,9 @@
+@@ -164,7 +193,9 @@
              withBytes: (const void*)pixelBytes
            bytesPerRow: (NSUInteger)bytesPerRow
  {
@@ -2638,7 +2648,7 @@ index 6c71fb9..822c112 100644
  }
  
  - (void)replaceRegion: (MTLRegion)region
-@@ -174,7 +204,9 @@
+@@ -174,7 +205,9 @@
            bytesPerRow: (NSUInteger)bytesPerRow
          bytesPerImage: (NSUInteger)bytesPerImage
  {
@@ -2736,7 +2746,7 @@ index 37cccb3..79b2350 100644
 -
  @end
 diff --git a/src/Metal/MTLVertexDescriptor.mm b/src/Metal/MTLVertexDescriptor.mm
-index cde968d..aa7fe05 100644
+index cde968d..0a016c6 100644
 --- a/src/Metal/MTLVertexDescriptor.mm
 +++ b/src/Metal/MTLVertexDescriptor.mm
 @@ -1,24 +1,435 @@
@@ -3015,8 +3025,8 @@ index cde968d..aa7fe05 100644
 +    if (index >= 31) [NSException raise:NSRangeException format:@"Vertex descriptor index %lu exceeds 30", (unsigned long)index];
 +    MTLVertexBufferLayoutDescriptor* old = _items[index];
 +    _items[index] = [descriptor retain];
-+    [old release];
 +    MTLVertexBufferLayoutArrayRetireItem(self, old);
++    [old release];
 +    const uint32_t bit = 1u << index;
 +    if (descriptor) _present |= bit; else _present &= ~bit;
 +    if (descriptor && object_getClass(descriptor) == [MTLVertexBufferLayoutDescriptor class]) _concrete |= bit; else _concrete &= ~bit;
@@ -3077,8 +3087,8 @@ index cde968d..aa7fe05 100644
 +    if (index >= 31) [NSException raise:NSRangeException format:@"Vertex descriptor index %lu exceeds 30", (unsigned long)index];
 +    MTLVertexAttributeDescriptor* old = _items[index];
 +    _items[index] = [descriptor retain];
-+    [old release];
 +    MTLVertexAttributeArrayRetireItem(self, old);
++    [old release];
 +    const uint32_t bit = 1u << index;
 +    if (descriptor) _present |= bit; else _present &= ~bit;
 +    if (descriptor && object_getClass(descriptor) == [MTLVertexAttributeDescriptor class]) _concrete |= bit; else _concrete &= ~bit;
@@ -3440,7 +3450,7 @@ diff --git a/private-include/Metal/MTLDepthStencilInternal.h b/private-include/M
 new file mode 100644
 --- /dev/null
 +++ b/private-include/Metal/MTLDepthStencilInternal.h
-@@ -0,0 +1,25 @@
+@@ -0,0 +1,27 @@
 +// SPDX-FileCopyrightText: 2026 Darling Developers
 +// SPDX-License-Identifier: MPL-2.0
 +
@@ -3462,15 +3472,17 @@ new file mode 100644
 +- (instancetype)initWithState:(std::shared_ptr<Indium::DepthStencilState>)state device:(id<MTLDevice>)device label:(NSString*)label;
 +#endif
 +@end
++#if DARLING_METAL_ENABLED
 +// Direct access for the encoders: the property getter is a message send that returns the shared_ptr by value.
 +const std::shared_ptr<Indium::DepthStencilState>& MTLDepthStencilGetIndium(id object);
++#endif
 +
 +#endif
 diff --git a/private-include/Metal/MTLDeviceInfo.h b/private-include/Metal/MTLDeviceInfo.h
 new file mode 100644
 --- /dev/null
 +++ b/private-include/Metal/MTLDeviceInfo.h
-@@ -0,0 +1,148 @@
+@@ -0,0 +1,150 @@
 +// SPDX-FileCopyrightText: 2026 Darling Developers
 +// SPDX-License-Identifier: MPL-2.0
 +
@@ -3489,6 +3501,8 @@ new file mode 100644
 +
 +// Used when neither the cleaned nor the raw Vulkan name has any characters.
 +static constexpr const char* kFallbackName = "Darling Indium Device";
++// A real Mac never reports registry ID 0, and apps use it as a key for the device.
++static constexpr uint64_t kDefaultRegistryID = 0x100000439ULL;
 +
 +static inline bool isSpace(char c) {
 +	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
