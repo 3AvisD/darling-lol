@@ -142,6 +142,23 @@ static int record(AudioDeviceID id,bool nonInterleaved,unsigned channels,unsigne
         || seconds<milliseconds/2000.0;
 }
 
+// Vivox's playback unit sets interleaved Float32 stereo at 32 kHz on input scope element 0;
+// only the format is checked, nothing is played.
+static int playbackFormat() {
+    AudioComponentDescription description={kAudioUnitType_Output,kAudioUnitSubType_HALOutput,kAudioUnitManufacturer_Apple,0,0};
+    AudioComponent component=AudioComponentFindNext(nullptr,&description);
+    AudioUnit playback=nullptr;
+    if(!component || AudioComponentInstanceNew(component,&playback) || !playback) return 1;
+    AudioStreamBasicDescription format={32000,kAudioFormatLinearPCM,kAudioFormatFlagIsFloat|kAudioFormatFlagIsPacked,8,1,8,2,32,0};
+    OSStatus status=AudioUnitSetProperty(playback,kAudioUnitProperty_StreamFormat,kAudioUnitScope_Input,0,&format,sizeof(format));
+    AudioStreamBasicDescription unsignedFormat={44100,kAudioFormatLinearPCM,kAudioFormatFlagIsPacked,4,1,4,2,16,0};
+    OSStatus rejected=AudioUnitSetProperty(playback,kAudioUnitProperty_StreamFormat,kAudioUnitScope_Input,0,&unsignedFormat,sizeof(unsignedFormat));
+    AudioComponentInstanceDispose(playback);
+    printf("AUDIO_PLAYBACK_FORMAT interleaved_status=%d unsigned_status=%d\n",(int)status,(int)rejected);
+    fflush(stdout);
+    return status!=noErr || rejected==noErr;
+}
+
 int main() {
     int failures=0;
     failures+=authorization()!=0;
@@ -156,6 +173,7 @@ int main() {
     result=record(id,false,2,400);
     if(result) printf("AUDIO_INPUT_RECORD failed step=%d interleaved_stereo=1\n",result);
     failures+=result!=0;
+    failures+=playbackFormat()!=0;
     printf("AUDIO_INPUT_CHECK failures=%d\n",failures);
     return failures;
 }
