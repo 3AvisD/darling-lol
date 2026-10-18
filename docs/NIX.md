@@ -210,8 +210,18 @@ Darling namespace; `darling-lol --stop` can still stop it.
 ## Files and operational limits
 
 - Workspace: `${XDG_DATA_HOME:-$HOME/.local/share}/darling-lol`.
-- Default guest prefix: `$HOME/.darling`; set `DPREFIX` to use another prefix.
-  Explicit `DPREFIX` and `RIOT_GUEST_HOME` overrides take precedence over saved
+- Default guest prefix: `$HOME/.darling`. The prefix holds the installed
+  clients and game, about 40 GB. To keep it on another drive, close the clients
+  and run `darling-lol --set-prefix /mnt/games/league`. This moves an existing
+  prefix there and saves the path for later launches. Across filesystems it
+  copies first and removes the old prefix only after the copy completes. If the
+  path already holds a Darling prefix, it switches to it and moves nothing. The
+  path must not contain commas or colons (overlayfs uses them as separators).
+  Across filesystems the target must support `user.*` extended attributes (ext4,
+  btrfs, xfs; not NTFS or exFAT), which is checked before copying and again on
+  the finished copy. The new path is saved before the old prefix is deleted.
+  The next launch sets up the runtime in the new prefix.
+- Explicit `DPREFIX` and `RIOT_GUEST_HOME` overrides take precedence over saved
   configuration, so clear stale overrides before switching installations.
 - Package upgrades refresh managed tools and remove previously tracked obsolete
   files. Builds, the installed runtime, guest prefixes, and unmanaged files are
