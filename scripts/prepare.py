@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Fetch pinned Darling sources and apply each patch to its owning repository."""
-import argparse,json,os,subprocess,tempfile
+import argparse,json,os,subprocess,tempfile,sys
 from pathlib import Path
+# --check-only must not create import caches in the source package either.
+sys.dont_write_bytecode=True
 from common import ROOT,render
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--source',type=Path,default=ROOT/'build/darling-src')
@@ -25,19 +27,27 @@ def previous_patches(component):
         if shown.returncode==0:yield render(shown.stdout)
 if not (source/'.git').exists():
     if a.check_only:p.error('check-only requires an existing pinned source checkout')
+    if source.exists():p.error('refusing non-checkout destination; choose an empty source path')
     source.parent.mkdir(parents=True,exist_ok=True)
-    run(['git','clone',manifest['upstream'],str(source)])
-    run(['git','-C',str(source),'checkout','--detach',manifest['revision']])
-    # Recursive initialization can spend a long time fetching nested repos (and
-    # Git LFS assets). Explicit progress keeps the last completed submodule
-    # from looking like the operation that is currently stuck. The pinned
-    # darling-swift .lfsconfig points at the retired git-lfs.darlinghq.org, so
-    # fetch that submodule's LFS objects from GitHub, which still serves them;
-    # otherwise the checkout blocks on the dead host right after sqlite.
-    print('Initializing Darling submodules (large repositories/LFS assets may take a while)...',flush=True)
-    run(['git','-C',str(source),'-c','lfs.url=https://github.com/darlinghq/darling-swift.git/info/lfs',
-         'submodule','update','--init','--recursive','--progress'])
-    print('Darling submodules initialized.',flush=True)
+    # Fetch the exact pin, not today's master. Publish only a complete checkout;
+    # failed downloads are removed without touching an existing user checkout.
+    with tempfile.TemporaryDirectory(prefix='darling-clone-',dir=source.parent) as temporary:
+        checkout=Path(temporary)/'source'
+        run(['git','init',str(checkout)])
+        run(['git','-C',str(checkout),'remote','add','origin',manifest['upstream']])
+        run(['git','-C',str(checkout),'fetch','--depth','1','origin',manifest['revision']])
+        run(['git','-C',str(checkout),'checkout','--detach','FETCH_HEAD'])
+        print('Initializing Darling submodules (large repositories/LFS assets may take a while)...',flush=True)
+        for attempt in range(1,4):
+            try:
+                run(['git','-C',str(checkout),'-c','lfs.url=https://github.com/darlinghq/darling-swift.git/info/lfs',
+                     'submodule','update','--init','--recursive','--depth','1','--progress'])
+                break
+            except subprocess.CalledProcessError:
+                if attempt==3:raise
+                print(f'Submodule fetch interrupted (attempt {attempt}/3). Retrying...',flush=True)
+        checkout.rename(source)
+
 # Never reset someone else's checkout to make a patch apply.
 for component in manifest['components']:
     repo=source/component['path']
