@@ -1642,10 +1642,40 @@ index 0425ae97f..fdf08d2dc 100644
  #endif /* AUDIOHARDWARESTREAMPA_H */
 -
 diff --git a/src/CoreAudio/CoreAudio/pulse/AudioHardwareStreamPAInput.cpp b/src/CoreAudio/CoreAudio/pulse/AudioHardwareStreamPAInput.cpp
-index d6825f1d5..739b70011 100644
+index d6825f1d5..fd9efc988 100644
 --- a/src/CoreAudio/CoreAudio/pulse/AudioHardwareStreamPAInput.cpp
 +++ b/src/CoreAudio/CoreAudio/pulse/AudioHardwareStreamPAInput.cpp
-@@ -25,6 +25,7 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+@@ -21,10 +21,37 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+ #include "AudioHardwareImplPA.h"
+ #include <iostream>
+ #include <vector>
++#include <algorithm>
++#include <cstring>
++#include <mach/mach_time.h>
++#include "../../AudioTrace.h"
++
++static const mach_timebase_info_data_t& timebase() {
++	static mach_timebase_info_data_t tb = [] {
++		mach_timebase_info_data_t t = {0, 0};
++		mach_timebase_info(&t);
++		if (!t.numer || !t.denom) t.numer = t.denom = 1;
++		return t;
++	}();
++	return tb;
++}
++static uint64_t hostToNs(uint64_t host) {
++	return uint64_t((unsigned __int128) host * timebase().numer / timebase().denom);
++}
++static uint64_t nsToHost(uint64_t ns) {
++	return uint64_t((unsigned __int128) ns * timebase().denom / timebase().numer);
++}
++static unsigned g_readEvents = 0;
++static bool readShouldTrace() {
++	if (!rclolAudioTraceEnabled()) return false;
++	unsigned n = g_readEvents++;
++	return n < 40 || n % 1000 == 0;
++}
+ 
  AudioHardwareStreamPAInput::AudioHardwareStreamPAInput(AudioHardwareImplPA* hw, AudioDeviceIOProc callback, void* clientData)
  : AudioHardwareStreamPA(hw, callback, clientData)
  {
@@ -1653,7 +1683,7 @@ index d6825f1d5..739b70011 100644
  	// m_dump.open("/tmp/dump.raw", std::ios_base::out | std::ios_base::binary);
  }
  
-@@ -32,7 +33,6 @@ void AudioHardwareStreamPAInput::paStreamReadCB(pa_stream* s, size_t length, voi
+@@ -32,25 +59,26 @@ void AudioHardwareStreamPAInput::paStreamReadCB(pa_stream* s, size_t length, voi
  {
  	AudioHardwareStreamPAInput* This = static_cast<AudioHardwareStreamPAInput*>(self);
  
@@ -1661,14 +1691,166 @@ index d6825f1d5..739b70011 100644
  
  	if (!This->m_running)
  		return;
-@@ -74,6 +74,7 @@ void AudioHardwareStreamPAInput::paStreamReadCB(pa_stream* s, size_t length, voi
- 		// std::cout << "AudioHardwareStreamPAInput::paStreamReadCB(): bytes=" << nbytes << std::endl;
- 		OSStatus status = This->m_callback(This->m_hw->id(), &fake, abl, &fake, nullptr, nullptr, This->m_clientData);
  
-+        if (!This->m_running) return;
- 		pa_stream_drop(This->m_stream);
+-	AudioTimeStamp fake = {0};
++	const pa_sample_spec* spec = pa_stream_get_sample_spec(This->m_stream);
++	const size_t frameBytes = spec ? pa_frame_size(spec) : 0;
++	const double rate = spec ? double(spec->rate) : 0;
++	if (!frameBytes || rate <= 0)
++		return;
++
+ 	AudioBufferList* abl = static_cast<AudioBufferList*>(alloca(sizeof(AudioBufferList) + sizeof(AudioBuffer)));
+-	std::vector<uint8_t> hole;
  
- 		if (status != noErr)
+ 	// std::cout << "AudioHardwareStreamPAInput::paStreamReadCB()\n";
+ 
+ 	while (true)
+ 	{
+-		abl->mNumberBuffers = 1;
+-		abl->mBuffers[0].mNumberChannels = 2;
+-
+-		size_t nbytes;
++		const void* data = nullptr;
++		size_t nbytes = 0;
+ 
+-		int rv = pa_stream_peek(This->m_stream, (const void**) &abl->mBuffers[0].mData, &nbytes);
++		int rv = pa_stream_peek(This->m_stream, &data, &nbytes);
+ 
+ 		if (rv < 0 || !nbytes)
+ 		{
+@@ -58,29 +86,82 @@ void AudioHardwareStreamPAInput::paStreamReadCB(pa_stream* s, size_t length, voi
+ 			break;
+ 		}
+ 
+-		if (nbytes && !abl->mBuffers[0].mData)
++		// The fragment at the read index was captured `latency` ago: source latency plus
++		// everything still unread. Without timing info yet, count only the unread data.
++		pa_usec_t usec = 0;
++		int negative = 0;
++		uint64_t latencyNs;
++		if (pa_stream_get_latency(This->m_stream, &usec, &negative) == 0)
++			latencyNs = negative ? 0 : uint64_t(usec) * 1000;
++		else
+ 		{
+-			// "If there is a hole, data will be NULL and nbytes will contain the length of the hole."
+-			hole.resize(nbytes);
+-			abl->mBuffers[0].mData = hole.data();
++			size_t readable = pa_stream_readable_size(This->m_stream);
++			latencyNs = uint64_t(pa_bytes_to_usec(std::max(readable, nbytes), spec)) * 1000;
+ 		}
+-		abl->mBuffers[0].mDataByteSize = nbytes;
+-
+-		// This->m_dump.write((char*) abl->mBuffers[0].mData, nbytes);
+-		// This->m_dump.flush();
+-		if (This->m_convertSignedUnsigned)
+-			This->transformSignedUnsigned(abl);
++		const uint64_t nowHost = mach_absolute_time();
+ 
+-		// std::cout << "AudioHardwareStreamPAInput::paStreamReadCB(): bytes=" << nbytes << std::endl;
+-		OSStatus status = This->m_callback(This->m_hw->id(), &fake, abl, &fake, nullptr, nullptr, This->m_clientData);
+-
+-		pa_stream_drop(This->m_stream);
++		const bool hole = !data;
++		if (hole || This->m_convertSignedUnsigned)
++		{
++			// "If there is a hole, data will be NULL and nbytes will contain the length of the hole."
++			// Holes are delivered as silence so the sample clock keeps counting real time.
++			// The peeked memory belongs to PulseAudio, so convert a private copy.
++			This->m_scratch.resize(nbytes);
++			if (data)
++				memcpy(This->m_scratch.data(), data, nbytes);
++			else
++				memset(This->m_scratch.data(), spec->format == PA_SAMPLE_U8 ? 0x80 : 0, nbytes);
++			data = This->m_scratch.data();
++		}
+ 
+-		if (status != noErr)
++		// Like a real HAL, hand the IOProc at most one device buffer per call.
++		const size_t block = std::max(frameBytes, This->m_blockBytes);
++		for (size_t offset = 0; offset + frameBytes <= nbytes; )
+ 		{
+-			pa_stream_cork(This->m_stream, true, [](pa_stream*, int, void*) {}, nullptr);
+-			break;
++			size_t piece = std::min(block, nbytes - offset);
++			piece -= piece % frameBytes;
++
++			abl->mNumberBuffers = 1;
++			abl->mBuffers[0].mNumberChannels = spec->channels;
++			abl->mBuffers[0].mData = const_cast<uint8_t*>(static_cast<const uint8_t*>(data) + offset);
++			abl->mBuffers[0].mDataByteSize = piece;
++
++			if (This->m_convertSignedUnsigned)
++				This->transformSignedUnsigned(abl);
++
++			const uint64_t offsetNs = uint64_t(double(offset / frameBytes) * 1e9 / rate);
++			const uint64_t agoNs = latencyNs > offsetNs ? latencyNs - offsetNs : 0;
++			uint64_t inputHost = nowHost - std::min(nowHost, nsToHost(agoNs));
++			// Keep host time monotonic even when PA's latency estimate jumps.
++			if (inputHost <= This->m_lastInputHost)
++				inputHost = This->m_lastInputHost + 1;
++			This->m_lastInputHost = inputHost;
++
++			AudioTimeStamp input = {0};
++			input.mSampleTime = double(This->m_frames);
++			input.mHostTime = inputHost;
++			input.mRateScalar = 1.0;
++			input.mFlags = kAudioTimeStampHostTimeValid | kAudioTimeStampSampleTimeValid | kAudioTimeStampRateScalarValid;
++
++			AudioTimeStamp now = input;
++			now.mHostTime = std::max(nowHost, inputHost);
++			now.mSampleTime = input.mSampleTime + double(hostToNs(now.mHostTime - inputHost)) * rate / 1e9;
++
++			// This->m_dump.write((char*) abl->mBuffers[0].mData, nbytes);
++			// This->m_dump.flush();
++			// A real HAL ignores the IOProc's result; one failed callback must not
++			// silence the microphone for the rest of the session.
++			OSStatus status = This->m_callback(This->m_hw->id(), &now, abl, &input, nullptr, nullptr, This->m_clientData);
++			if (readShouldTrace())
++				rclolAudioTrace("PA_IN iop bytes=%zu frames=%llu latencyMs=%.2f hole=%d status=%d\n", piece,
++					(unsigned long long) This->m_frames, double(latencyNs) / 1e6, hole, (int) status);
++
++			if (!This->m_running) return;
++			This->m_frames += piece / frameBytes;
++			offset += piece;
+ 		}
++
++		pa_stream_drop(This->m_stream);
+ 	}
+ }
+ 
+@@ -88,10 +169,19 @@ void AudioHardwareStreamPAInput::start()
+ {
+ 	struct pa_buffer_attr battr;
+ 
+-	battr.fragsize = uint32_t(-1);
+-	battr.maxlength = uint32_t(m_bufferSize);
++	// Record streams only use maxlength and fragsize. Ask for fragments of one device buffer
++	// (kAudioDevicePropertyBufferFrameSize) for voice latency, and bound the server-side
++	// backlog so a stalled client can't accumulate seconds of delay.
++	const uint32_t bpf = m_hw->asbd().mBytesPerFrame;
++	uint32_t block = bpf ? (m_hw->bufferSize() / bpf) * bpf : m_bufferSize;
++	if (!block)
++		block = m_bufferSize;
++	m_blockBytes = block;
++
++	battr.fragsize = block;
++	battr.maxlength = block * 16;
+ 	battr.minreq = uint32_t(-1);
+-	battr.prebuf = battr.maxlength;
++	battr.prebuf = uint32_t(-1);
+ 	battr.tlength = uint32_t(-1);
+ 
+ 	// std::cout << "AudioHardwareStreamPAInput::start()\n";
+@@ -101,6 +191,9 @@ void AudioHardwareStreamPAInput::start()
+ 	int rv = pa_stream_connect_record(m_stream, nullptr, &battr,
+ 		pa_stream_flags_t(PA_STREAM_INTERPOLATE_TIMING | PA_STREAM_ADJUST_LATENCY | PA_STREAM_AUTO_TIMING_UPDATE)
+ 	);
++	if (rclolAudioTraceEnabled())
++		rclolAudioTrace("PA_IN start block=%u rate=%g channels=%u rv=%d\n", block, m_hw->asbd().mSampleRate,
++			m_hw->asbd().mChannelsPerFrame, rv);
+ 
+ 	// std::cout << "AudioHardwareStreamPAInput::start() rv = " << rv << std::endl;
+ 	AudioHardwareStreamPA::start();
 diff --git a/src/CoreAudio/CoreAudio/pulse/AudioHardwareStreamPAOutput.cpp b/src/CoreAudio/CoreAudio/pulse/AudioHardwareStreamPAOutput.cpp
 index 278630f02..54b463c2f 100644
 --- a/src/CoreAudio/CoreAudio/pulse/AudioHardwareStreamPAOutput.cpp
@@ -2390,7 +2572,7 @@ index ff83d1e15..1e86f9e99 100644
  	bool m_suspended = true;
  };
 diff --git a/src/CoreAudio/CoreAudioComponent/AUHAL.cpp b/src/CoreAudio/CoreAudioComponent/AUHAL.cpp
-index fe4d1eaa1..9321edcdf 100644
+index fe4d1eaa1..05088f87f 100644
 --- a/src/CoreAudio/CoreAudioComponent/AUHAL.cpp
 +++ b/src/CoreAudio/CoreAudioComponent/AUHAL.cpp
 @@ -1,3 +1,4 @@
@@ -2414,7 +2596,20 @@ index fe4d1eaa1..9321edcdf 100644
  
  #pragma GCC visibility push(default)
  AUDIOCOMPONENT_ENTRY(AUOutputBaseFactory, AUHAL);
-@@ -42,6 +52,37 @@ AUHAL::~AUHAL()
+@@ -29,8 +39,11 @@ enum {
+ 	kInputBus
+ };
+ 
++// Like macOS: element 0 is the output (app -> device) side, element 1 the input
++// (device -> app) side, on both scopes. Without output element 1 the app's
++// recording format and AudioUnitRender(bus 1) had nowhere to go.
+ AUHAL::AUHAL(AudioComponentInstance inInstance, bool supportRecording)
+-: AUBase(inInstance, 1, supportRecording ? 1 : 0)
++: AUBase(inInstance, supportRecording ? 2 : 1, supportRecording ? 2 : 1)
+ {
+ 	UInt32 propSize = sizeof(AudioDeviceID);
+ 	AudioHardwareGetProperty(kAudioHardwarePropertyDefaultOutputDevice, &propSize, &m_outputDevice);
+@@ -42,6 +55,37 @@ AUHAL::~AUHAL()
  	Stop();
  }
  
@@ -2452,7 +2647,7 @@ index fe4d1eaa1..9321edcdf 100644
  bool AUHAL::CanScheduleParameters() const
  {
  	return true;
-@@ -49,7 +90,7 @@ bool AUHAL::CanScheduleParameters() const
+@@ -49,7 +93,7 @@ bool AUHAL::CanScheduleParameters() const
  
  bool AUHAL::StreamFormatWritable(AudioUnitScope scope, AudioUnitElement element)
  {
@@ -2461,7 +2656,59 @@ index fe4d1eaa1..9321edcdf 100644
  }
  
  OSStatus AUHAL::Version()
-@@ -76,19 +117,26 @@ OSStatus AUHAL::Render(AudioUnitRenderActionFlags& ioActionFlags, const AudioTim
+@@ -57,45 +101,112 @@ OSStatus AUHAL::Version()
+ 	return 1;
+ }
+ 
+-// Provide data from the microphone
+-OSStatus AUHAL::Render(AudioUnitRenderActionFlags& ioActionFlags, const AudioTimeStamp& inTimeStamp, UInt32 inNumberFrames)
++// Provide data from the microphone: AudioUnitRender(bus 1), normally called from the input callback.
++// Never blocks; frames not recorded yet are silence. Bypasses NeedsToRender(), as a real AUHAL
++// renders whatever timestamp the client passes.
++OSStatus AUHAL::RenderBus(AudioUnitRenderActionFlags& ioActionFlags, const AudioTimeStamp& inTimeStamp, UInt32 inBusNumber, UInt32 inNumberFrames)
+ {
+-	std::unique_lock<std::mutex> lk(m_dataAvailableMutex);
++	if (inBusNumber != kInputBus || !m_enableInput)
++		return kAudioUnitErr_NoConnection;
+ 
+-	m_dataAvailableCV.wait(lk, [=]{ return m_dataAvailable; });
++	const CAStreamBasicDescription& desc = GetStreamFormat(kAudioUnitScope_Output, kInputBus);
++	const UInt32 sampleBytes = desc.mBitsPerChannel / 8;
++	const UInt32 frameBytes = desc.mChannelsPerFrame * sampleBytes;
++	if (!sampleBytes || !frameBytes)
++		return kAudioUnitErr_FormatNotSupported;
++	const bool planar = desc.mFormatFlags & kAudioFormatFlagIsNonInterleaved;
+ 
+ 	AudioBufferList& abl = GetOutput(kInputBus)->GetBufferList();
++	std::lock_guard<std::mutex> lk(m_dataAvailableMutex);
++	const UInt32 frames = std::min<UInt32>(inNumberFrames, m_bufferUsed / frameBytes);
++	const uint8_t* source = m_buffer.get();
+ 
+-	// TODO: Prepare for non-interleaved audio
+-	UInt32 howMuch = std::min<UInt32>(abl.mBuffers[0].mDataByteSize, m_bufferUsed);
+-	memcpy(abl.mBuffers[0].mData, m_buffer.get(), howMuch);
+-	abl.mBuffers[0].mDataByteSize = howMuch;
++	if (planar)
++	{
++		for (UInt32 c = 0; c < abl.mNumberBuffers && c < desc.mChannelsPerFrame; c++)
++		{
++			uint8_t* destination = static_cast<uint8_t*>(abl.mBuffers[c].mData);
++			for (UInt32 f = 0; f < frames; f++)
++				memcpy(destination + f * sampleBytes, source + f * frameBytes + c * sampleBytes, sampleBytes);
++			memset(destination + frames * sampleBytes, 0, (inNumberFrames - frames) * sampleBytes);
++			abl.mBuffers[c].mDataByteSize = inNumberFrames * sampleBytes;
++		}
++	}
++	else
++	{
++		uint8_t* destination = static_cast<uint8_t*>(abl.mBuffers[0].mData);
++		memcpy(destination, source, frames * frameBytes);
++		memset(destination + frames * frameBytes, 0, (inNumberFrames - frames) * frameBytes);
++		abl.mBuffers[0].mDataByteSize = inNumberFrames * frameBytes;
++	}
+ 
+ 	return noErr;
+ }
  
  OSStatus AUHAL::Start()
  {
@@ -2491,7 +2738,53 @@ index fe4d1eaa1..9321edcdf 100644
  	}
  	if (m_enableInput)
  	{
-@@ -111,20 +159,42 @@ OSStatus AUHAL::Stop()
+-		AudioDeviceCreateIOProcID(m_inputDevice, recordCallback, this, &m_inputProcID);
+-		const CAStreamBasicDescription& desc = GetStreamFormat(kAudioUnitScope_Output, kInputBus);
+-		AudioDeviceSetProperty(m_inputDevice, nullptr, 0, true, kAudioDevicePropertyStreamFormat, sizeof(AudioStreamBasicDescription), &desc);
+-		AudioDeviceStart(m_inputDevice, m_inputProcID);
++		// The device records directly in the client's bus 1 format (PulseAudio converts rate,
++		// channels and sample type); only planar layouts are converted, in RenderBus().
++		OSStatus status = AudioDeviceCreateIOProcID(m_inputDevice, recordCallback, this, &m_inputProcID);
++		if (!status)
++		{
++			const CAStreamBasicDescription& desc = GetStreamFormat(kAudioUnitScope_Output, kInputBus);
++			AudioStreamBasicDescription hardware = desc;
++			hardware.mFormatFlags &= ~kAudioFormatFlagIsNonInterleaved;
++			hardware.mBytesPerFrame = hardware.mChannelsPerFrame * hardware.mBitsPerChannel / 8;
++			hardware.mBytesPerPacket = hardware.mBytesPerFrame;
++			// The device keeps its buffer size in bytes; keep the frame count across the format change.
++			AudioObjectPropertyAddress p = {kAudioDevicePropertyBufferFrameSize, kAudioObjectPropertyScopeInput, kAudioObjectPropertyElementMaster};
++			UInt32 frames = 0, size = sizeof(frames);
++			const bool haveFrames = AudioObjectGetPropertyData(m_inputDevice, &p, 0, nullptr, &size, &frames) == noErr;
++			status = AudioDeviceSetProperty(m_inputDevice, nullptr, 0, true, kAudioDevicePropertyStreamFormat, sizeof(hardware), &hardware);
++			if (!status && haveFrames)
++				AudioObjectSetPropertyData(m_inputDevice, &p, 0, nullptr, sizeof(frames), &frames);
++			{
++				std::lock_guard<std::mutex> lk(m_dataAvailableMutex);
++				m_bufferUsed = 0;
++			}
++			if (!status)
++				status = AudioDeviceStart(m_inputDevice, m_inputProcID);
++			if (status)
++			{
++				AudioDeviceDestroyIOProcID(m_inputDevice, m_inputProcID);
++				m_inputProcID = 0;
++			}
++		}
++		if (status)
++		{
++			if (m_outputProcID)
++			{
++				AudioDeviceStop(m_outputDevice, m_outputProcID);
++				AudioDeviceDestroyIOProcID(m_outputDevice, m_outputProcID);
++				m_outputProcID = 0;
++			}
++			return status;
++		}
+ 	}
+ 
+ 	m_running = m_enableOutput || m_enableInput;
+@@ -111,20 +222,49 @@ OSStatus AUHAL::Stop()
  	{
  		AudioDeviceStop(m_outputDevice, m_outputProcID);
  		AudioDeviceDestroyIOProcID(m_outputDevice, m_outputProcID);
@@ -2529,13 +2822,36 @@ index fe4d1eaa1..9321edcdf 100644
  	switch (inID)
  	{
 +        case kAudioDevicePropertyBufferFrameSize: {
++            // An input-only unit (EnableIO output=0) sizes its input device's IO cycle.
 +            AudioObjectPropertyAddress p={inID,kAudioObjectPropertyScopeOutput,kAudioObjectPropertyElementMaster};
-+            return AudioObjectSetPropertyData(m_outputDevice,&p,0,nullptr,inDataSize,inData);
++            OSStatus status=noErr;
++            if(m_enableOutput || !m_enableInput) status=AudioObjectSetPropertyData(m_outputDevice,&p,0,nullptr,inDataSize,inData);
++            if(!status && m_enableInput) {
++                p.mScope=kAudioObjectPropertyScopeInput;
++                status=AudioObjectSetPropertyData(m_inputDevice,&p,0,nullptr,inDataSize,inData);
++            }
++            return status;
 +        }
  		case kAudioOutputUnitProperty_SetInputCallback:
  		{
  			ca_require(inDataSize == sizeof(AURenderCallbackStruct), InvalidPropertyValue);
-@@ -176,15 +246,23 @@ OSStatus AUHAL::SetProperty(AudioUnitPropertyID inID, AudioUnitScope inScope, Au
+@@ -161,7 +301,14 @@ OSStatus AUHAL::SetProperty(AudioUnitPropertyID inID, AudioUnitScope inScope, Au
+ 			ca_require(inDataSize == sizeof(AudioDeviceID), InvalidPropertyValue);
+ 			const AudioDeviceID* dev = static_cast<const AudioDeviceID*>(inData);
+ 
+-			if (inElement == kOutputBus)
++			// macOS AUHAL has one current device, normally set on element 0; for an
++			// input-only unit (EnableIO input=1, output=0) that is the capture device.
++			if (inElement == kOutputBus && m_enableInput && !m_enableOutput)
++			{
++				m_inputDevice = *dev;
++				PropertyChanged(inID, inScope, inElement);
++			}
++			else if (inElement == kOutputBus)
+ 			{
+ 				m_outputDevice = *dev;
+ 				PropertyChanged(inID, inScope, inElement);
+@@ -176,20 +323,28 @@ OSStatus AUHAL::SetProperty(AudioUnitPropertyID inID, AudioUnitScope inScope, Au
  			return noErr;
  		}
  	}
@@ -2560,7 +2876,13 @@ index fe4d1eaa1..9321edcdf 100644
  		case kAudioOutputUnitProperty_SetInputCallback:
  		{
  			outDataSize = sizeof(AURenderCallbackStruct);
-@@ -210,13 +288,22 @@ OSStatus AUHAL::GetPropertyInfo(AudioUnitPropertyID inID, AudioUnitScope inScope
+ 			outWritable = true;
+-			break;
++			return noErr;
+ 		}
+ 		case kAudioOutputUnitProperty_EnableIO:
+ 		{
+@@ -210,13 +365,23 @@ OSStatus AUHAL::GetPropertyInfo(AudioUnitPropertyID inID, AudioUnitScope inScope
  			return noErr;
  		}
  	}
@@ -2577,14 +2899,15 @@ index fe4d1eaa1..9321edcdf 100644
  	switch (inID)
  	{
 +        case kAudioDevicePropertyBufferFrameSize: {
-+            AudioObjectPropertyAddress p={inID,kAudioObjectPropertyScopeOutput,kAudioObjectPropertyElementMaster};
++            const bool input=m_enableInput && !m_enableOutput;
++            AudioObjectPropertyAddress p={inID,input?kAudioObjectPropertyScopeInput:kAudioObjectPropertyScopeOutput,kAudioObjectPropertyElementMaster};
 +            UInt32 size=sizeof(UInt32);
-+            return AudioObjectGetPropertyData(m_outputDevice,&p,0,nullptr,&size,outData);
++            return AudioObjectGetPropertyData(input?m_inputDevice:m_outputDevice,&p,0,nullptr,&size,outData);
 +        }
  		case kAudioOutputUnitProperty_SetInputCallback:
  		{
  			memcpy(outData, &m_outputAvailableCb, sizeof(m_outputAvailableCb));
-@@ -228,12 +315,12 @@ OSStatus AUHAL::GetProperty(AudioUnitPropertyID inID, AudioUnitScope inScope, Au
+@@ -228,12 +393,12 @@ OSStatus AUHAL::GetProperty(AudioUnitPropertyID inID, AudioUnitScope inScope, Au
  			if (inElement == kOutputBus)
  			{
  				UInt32 value = m_enableOutput;
@@ -2599,7 +2922,20 @@ index fe4d1eaa1..9321edcdf 100644
  			}
  			else
  				return kAudioUnitErr_InvalidElement;
-@@ -277,9 +364,89 @@ OSStatus AUHAL::recordCallback(AudioObjectID inObjectID,
+@@ -241,7 +406,11 @@ OSStatus AUHAL::GetProperty(AudioUnitPropertyID inID, AudioUnitScope inScope, Au
+ 		}
+ 		case kAudioOutputUnitProperty_CurrentDevice:
+ 		{
+-			if (inElement == kOutputBus)
++			if (inElement == kOutputBus && m_enableInput && !m_enableOutput)
++			{
++				memcpy(outData, &m_inputDevice, sizeof(m_inputDevice));
++			}
++			else if (inElement == kOutputBus)
+ 			{
+ 				memcpy(outData, &m_outputDevice, sizeof(m_outputDevice));
+ 			}
+@@ -277,9 +446,89 @@ OSStatus AUHAL::recordCallback(AudioObjectID inObjectID,
  	return This->doRecord(inNow, inInputData, inInputTime);
  }
  
@@ -2689,7 +3025,7 @@ index fe4d1eaa1..9321edcdf 100644
  	if (!HasInput(0))
  	{
  		// std::cerr << "No connection\n";
-@@ -290,9 +457,75 @@ OSStatus AUHAL::doPlayback(const AudioTimeStamp* inNow, AudioBufferList* outOutp
+@@ -290,9 +539,75 @@ OSStatus AUHAL::doPlayback(const AudioTimeStamp* inNow, AudioBufferList* outOutp
  	AudioUnitRenderActionFlags flags = kAudioUnitRenderAction_PreRender;
  	const CAStreamBasicDescription& desc = GetStreamFormat(kAudioUnitScope_Input, kOutputBus);
  
@@ -2768,8 +3104,75 @@ index fe4d1eaa1..9321edcdf 100644
  	// std::cout << "Pull result: " << result << std::endl;
  	// std::cout << "Bytes: " << outOutputData->mBuffers[0].mDataByteSize << std::endl;
  	// m_auhalData.write((char*) outOutputData->mBuffers[0].mData, outOutputData->mBuffers[0].mDataByteSize);
+@@ -303,30 +618,46 @@ OSStatus AUHAL::doPlayback(const AudioTimeStamp* inNow, AudioBufferList* outOutp
+ 
+ OSStatus AUHAL::doRecord(const AudioTimeStamp* inNow, const AudioBufferList* inInputData, const AudioTimeStamp* inInputTime)
+ {
+-	// TODO: Prepare for non-interleaved audio
+-	std::unique_lock<std::mutex> lk(m_dataAvailableMutex);
+-
+-	if (m_bufferSize < inInputData->mBuffers[0].mDataByteSize)
+-	{
+-		m_buffer.reset(new uint8_t[inInputData->mBuffers[0].mDataByteSize]);
+-		m_bufferSize = inInputData->mBuffers[0].mDataByteSize;
+-	}
+-
+-	m_bufferUsed = inInputData->mBuffers[0].mDataByteSize;
+-	memcpy(m_buffer.get(), inInputData->mBuffers[0].mData, m_bufferUsed);
+-
+-	m_dataAvailable = true;
++	// The device records interleaved data in the bus 1 output format (see Start()).
++	const CAStreamBasicDescription& desc = GetStreamFormat(kAudioUnitScope_Output, kInputBus);
++	const UInt32 frameBytes = desc.mChannelsPerFrame * (desc.mBitsPerChannel / 8);
++	if (!inInputData || !inInputData->mNumberBuffers || !frameBytes)
++		return noErr;
+ 
+-	lk.unlock();
+-	m_dataAvailableCV.notify_one();
++	const uint8_t* source = static_cast<const uint8_t*>(inInputData->mBuffers[0].mData);
++	const UInt32 totalFrames = inInputData->mBuffers[0].mDataByteSize / frameBytes;
++	// AudioUnitRender refuses more than kAudioUnitProperty_MaximumFramesPerSlice frames.
++	const UInt32 maxFrames = std::max<UInt32>(1, GetMaxFramesPerSlice());
++	static mach_timebase_info_data_t tb = {0, 0};
++	if (!tb.denom) mach_timebase_info(&tb);
+ 
+-	if (m_outputAvailableCb.inputProc)
++	for (UInt32 offset = 0; offset < totalFrames; )
+ 	{
+-		AudioUnitRenderActionFlags flags = kAudioUnitRenderAction_PostRender;
+-		const CAStreamBasicDescription& desc = GetStreamFormat(kAudioUnitScope_Output, kInputBus);
+-		UInt32 numFrames = m_bufferUsed / desc.mBytesPerFrame;
++		const UInt32 numFrames = std::min(maxFrames, totalFrames - offset);
++		const size_t bytes = size_t(numFrames) * frameBytes;
++		{
++			std::lock_guard<std::mutex> lk(m_dataAvailableMutex);
++			if (m_bufferSize < bytes)
++			{
++				m_buffer.reset(new uint8_t[bytes]);
++				m_bufferSize = bytes;
++			}
++			memcpy(m_buffer.get(), source + size_t(offset) * frameBytes, bytes);
++			m_bufferUsed = bytes;
++		}
+ 
+-		m_outputAvailableCb.inputProc(m_outputAvailableCb.inputProcRefCon, &flags, inInputTime, kInputBus, numFrames, nullptr);
++		AudioTimeStamp time = *inInputTime;
++		time.mSampleTime += offset;
++		if (offset && desc.mSampleRate > 0 && tb.numer)
++			time.mHostTime += uint64_t(double(offset) / desc.mSampleRate * 1e9 * tb.denom / tb.numer);
++
++		// The client pulls the slice with AudioUnitRender(bus 1, numFrames) from this callback.
++		if (m_outputAvailableCb.inputProc)
++		{
++			AudioUnitRenderActionFlags flags = 0;
++			m_outputAvailableCb.inputProc(m_outputAvailableCb.inputProcRefCon, &flags, &time, kInputBus, numFrames, nullptr);
++		}
++		offset += numFrames;
+ 	}
+ 
+ 	return noErr;
 diff --git a/src/CoreAudio/CoreAudioComponent/AUHAL.h b/src/CoreAudio/CoreAudioComponent/AUHAL.h
-index bc21bcbbb..e369f95d1 100644
+index bc21bcbbb..3d6ae48f8 100644
 --- a/src/CoreAudio/CoreAudioComponent/AUHAL.h
 +++ b/src/CoreAudio/CoreAudioComponent/AUHAL.h
 @@ -25,6 +25,7 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
@@ -2790,6 +3193,15 @@ index bc21bcbbb..e369f95d1 100644
  	bool CanScheduleParameters() const override;
  	bool StreamFormatWritable(AudioUnitScope scope, AudioUnitElement element) override;
  	OSStatus Version() override;
+@@ -43,7 +47,7 @@ public:
+ 	OSStatus GetPropertyInfo(AudioUnitPropertyID inID, AudioUnitScope inScope, AudioUnitElement inElement, UInt32& outDataSize, Boolean& outWritable) override;
+ 	OSStatus GetProperty(AudioUnitPropertyID inID, AudioUnitScope inScope, AudioUnitElement inElement, void* outData) override;
+ 
+-	OSStatus Render(AudioUnitRenderActionFlags& ioActionFlags, const AudioTimeStamp& inTimeStamp, UInt32 inNumberFrames) override;
++	OSStatus RenderBus(AudioUnitRenderActionFlags& ioActionFlags, const AudioTimeStamp& inTimeStamp, UInt32 inBusNumber, UInt32 inNumberFrames) override;
+ 
+ 	static OSStatus ComponentEntryDispatch(ComponentParameters *params, AUHAL *This);
+ private:
 @@ -59,6 +63,7 @@ private:
  		void* inClientData);
  
@@ -2798,8 +3210,17 @@ index bc21bcbbb..e369f95d1 100644
  	OSStatus doRecord(const AudioTimeStamp* inNow, const AudioBufferList* inInputData, const AudioTimeStamp* inInputTime);
  	
  protected:
-@@ -76,6 +81,24 @@ protected:
- 	// TODO: Prepare for non-interleaved audio
+@@ -69,13 +74,29 @@ protected:
+ 	AudioDeviceID m_outputDevice, m_inputDevice;
+ 	AudioDeviceIOProcID m_outputProcID = 0, m_inputProcID = 0;
+ 
+-	bool m_dataAvailable = false;
+-	std::condition_variable m_dataAvailableCV;
++	// The latest recorded slice (interleaved, in the bus 1 output format), handed to
++	// AudioUnitRender(bus 1) from inside the input callback.
+ 	std::mutex m_dataAvailableMutex;
+-
+-	// TODO: Prepare for non-interleaved audio
  	std::unique_ptr<uint8_t[]> m_buffer;
  	size_t m_bufferSize = 0, m_bufferUsed = 0;
 +
@@ -2984,10 +3405,16 @@ index cb2896957..b2c25fbd4 100644
 +
  @end
 diff --git a/src/frameworks/AVFoundation/src/AVCaptureDevice.m b/src/frameworks/AVFoundation/src/AVCaptureDevice.m
-index cab525b91..2fcab003d 100644
+index cab525b91..4b3dd6541 100644
 --- a/src/frameworks/AVFoundation/src/AVCaptureDevice.m
 +++ b/src/frameworks/AVFoundation/src/AVCaptureDevice.m
-@@ -21,6 +21,37 @@
+@@ -18,9 +18,75 @@
+ */
+ 
+ #import <AVFoundation/AVCaptureDevice.h>
++#include <dispatch/dispatch.h>
++#include <dlfcn.h>
++#include <CoreAudio/AudioHardware.h>
  
  @implementation AVCaptureDevice
  
@@ -3006,20 +3433,52 @@ index cab525b91..2fcab003d 100644
 +}
 +
 +
++// Darling has no TCC consent store. Microphone input works through CoreAudio
++// (PulseAudio), so audio is authorized whenever CoreAudio reports a default input
++// device. CoreAudio is looked up at run time: AVFoundation does not link it, and
++// this query only reads its device table (no PulseAudio connection is made).
++static BOOL hasDefaultInputDevice(void)
++{
++	static OSStatus (*getProperty)(AudioObjectID, const AudioObjectPropertyAddress*, UInt32, const void*, UInt32*, void*);
++	static dispatch_once_t once;
++	dispatch_once(&once, ^{
++		// Never closed: CoreAudio keeps process-wide state once loaded.
++		void* coreAudio = dlopen("/System/Library/Frameworks/CoreAudio.framework/CoreAudio", RTLD_LAZY | RTLD_LOCAL);
++		if (coreAudio)
++			getProperty = dlsym(coreAudio, "AudioObjectGetPropertyData");
++	});
++	if (!getProperty)
++		return NO;
++	AudioDeviceID device = kAudioObjectUnknown;
++	UInt32 size = sizeof(device);
++	AudioObjectPropertyAddress address = {
++		kAudioHardwarePropertyDefaultInputDevice, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMaster
++	};
++	return getProperty(kAudioObjectSystemObject, &address, 0, NULL, &size, &device) == noErr
++		&& device != kAudioObjectUnknown;
++}
++
 ++ (AVAuthorizationStatus)authorizationStatusForMediaType:(AVMediaType)mediaType
 +{
-+	// Darling has no camera/microphone capture or TCC consent store;
-+	// report Denied so callers take their no-access path instead of
-+	// raising an unrecognized-selector exception.
-+	(void)mediaType;
++	// There is no camera capture; report Denied so callers take their
++	// no-access path instead of raising an unrecognized-selector exception.
++	if ([mediaType isEqualToString: AVMediaTypeAudio] && hasDefaultInputDevice())
++		return AVAuthorizationStatusAuthorized;
 +	return AVAuthorizationStatusDenied;
 +}
 +
 ++ (void)requestAccessForMediaType:(AVMediaType)mediaType completionHandler:(void (^)(BOOL))handler
 +{
-+	(void)mediaType;
-+	if (handler)
-+		handler(NO);
++	if (!handler)
++		return;
++	BOOL granted = [self authorizationStatusForMediaType: mediaType] == AVAuthorizationStatusAuthorized;
++	// macOS calls the handler later on an arbitrary queue, never inside this call;
++	// callers may hold locks here or wait on the main thread for the result.
++	void (^copied)(BOOL) = [handler copy];
++	dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
++		copied(granted);
++		[copied release];
++	});
 +}
 +
  - (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector {
@@ -10798,3 +11257,54 @@ index e789986..0d56b4e 100644
  		}
  	}
  	return t_server_socket;
+diff --git a/src/CoreAudio/CoreAudio/pulse/AudioHardwareImplPAInput.cpp b/src/CoreAudio/CoreAudio/pulse/AudioHardwareImplPAInput.cpp
+index c1fd1d402..777ca7c38 100644
+--- a/src/CoreAudio/CoreAudio/pulse/AudioHardwareImplPAInput.cpp
++++ b/src/CoreAudio/CoreAudio/pulse/AudioHardwareImplPAInput.cpp
+@@ -31,15 +31,18 @@ OSStatus AudioHardwareImplPAInput::getPropertyData(const AudioObjectPropertyAddr
+ {
+ 	if (inAddress->mSelector == kAudioDevicePropertyStreamConfiguration)
+ 	{
++		// A capture device has its channels on the input scope only. Reporting them on the
++		// output scope (copied from the output device) made capture enumerators such as
++		// Vivox and Chromium see a playback-only device with no input channels.
+ 		size_t size = sizeof(AudioBufferList);
+ 
+-		if (inAddress->mScope == kAudioDevicePropertyScopeOutput)
++		if (inAddress->mScope == kAudioDevicePropertyScopeInput)
+ 			size += 1* sizeof(AudioBuffer);
+ 
+ 		// Number of returned buffers is the number of channels
+ 		if (AudioBufferList* abl = static_cast<AudioBufferList*>(outData); abl && *ioDataSize >= size)
+ 		{
+-			if (inAddress->mScope == kAudioDevicePropertyScopeOutput)
++			if (inAddress->mScope == kAudioDevicePropertyScopeInput)
+ 			{
+ 				abl->mNumberBuffers = 1;
+ 				abl->mBuffers[0].mNumberChannels = 2;
+diff --git a/src/CoreAudio/CoreAudio/pulse/AudioHardwareStreamPAInput.h b/src/CoreAudio/CoreAudio/pulse/AudioHardwareStreamPAInput.h
+index 87db50d12..01a7b2a3e 100644
+--- a/src/CoreAudio/CoreAudio/pulse/AudioHardwareStreamPAInput.h
++++ b/src/CoreAudio/CoreAudio/pulse/AudioHardwareStreamPAInput.h
+@@ -21,6 +21,8 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+ #define AUDIOHARDWARESTREAMPAINPUT_H
+ #include "AudioHardwareStreamPA.h"
+ #include <fstream>
++#include <cstdint>
++#include <vector>
+ 
+ class AudioHardwareStreamPAInput : public AudioHardwareStreamPA
+ {
+@@ -30,6 +32,12 @@ private:
+ 	void start() override;
+ 	static void paStreamReadCB(pa_stream* s, size_t length, void* self);
+ 
++	// Only touched on the PA queue.
++	uint64_t m_frames = 0;
++	uint64_t m_lastInputHost = 0;
++	size_t m_blockBytes = 0;
++	std::vector<uint8_t> m_scratch;
++
+ 	// std::ofstream m_dump;
+ };
+ 
