@@ -9,7 +9,17 @@ UNSHARE_BIN="@UNSHARE_BIN@"
 export DARLING_PACKAGE_ID="$SHARE_DIR"
 export DISPLAY="${DISPLAY:-:0}"
 export EGL_PLATFORM="${EGL_PLATFORM:-x11}"
+# The guest prefix: DPREFIX if set, else the one saved by --set-prefix, else ~/.darling.
+if [ -z "${DPREFIX:-}" ] && [ -f "$WORKSPACE/build/config.json" ]; then
+  DPREFIX=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("prefix", ""))' \
+    "$WORKSPACE/build/config.json" 2>/dev/null) || DPREFIX=
+fi
 export DPREFIX="${DPREFIX:-$HOME/.darling}"
+if [ "${1:-}" = --set-prefix ]; then
+  [ $# -eq 2 ] || { echo 'Usage: darling-lol --set-prefix PATH' >&2; exit 2; }
+  # Resolve here: the namespace starts in the workspace, not in this directory.
+  set -- --set-prefix "$(realpath -m -- "$2")"
+fi
 export DARLING_HOST_UID="$(id -u)"
 export DARLING_HOST_GID="$(id -g)"
 export DARLING_WORKSPACE="$WORKSPACE"
@@ -73,6 +83,8 @@ session() {
 case "${1:-}" in
   --shell) shift; "${fhs_command[@]}" bash "$@";;
   --update) shift; "${fhs_command[@]}" ./scripts/update.sh "$@";;
+  # In the namespace, whose root owns the prefix files, so a copy keeps owners.
+  --set-prefix) "${fhs_command[@]}" python3 ./scripts/nix-prefix.py "$2";;
   --installer) shift; session --installer "$@";;
   *)
     if [ $# -gt 0 ]; then
