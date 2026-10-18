@@ -3,8 +3,10 @@ import importlib.util
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -30,6 +32,26 @@ class IdleTests(unittest.TestCase):
         (process / 'maps').read_text.side_effect = FileNotFoundError()
         self.assertFalse(idle.client_active(Path('/fixture/prefix'), processes=[process]))
 
+    def test_crash_handlers_alone_do_not_keep_the_prefix_active(self):
+        spec = importlib.util.spec_from_file_location('nix_idle_handlers', ROOT / 'scripts/nix-idle.py')
+        assert spec is not None and spec.loader is not None
+        idle = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(idle)
+        with tempfile.TemporaryDirectory() as folder:
+            prefix = Path(folder) / 'prefix'
+            app = prefix / 'Applications/League of Legends.app'
+
+            def process(pid, executable):
+                entry = Path(folder) / 'proc' / str(pid)
+                entry.mkdir(parents=True)
+                (entry / 'maps').write_text(f'7f00-7f01 r-xp 0 0:0 1 {app}/Contents/MacOS/{executable}\n')
+                (entry / 'cmdline').write_bytes(f'/Applications/League of Legends.app/Contents/MacOS/{executable}\0--flag\0'.encode())
+                return entry
+
+            handlers = [process(1, 'LeagueCrashHandler'), process(2, 'chrome_crashpad_handler')]
+            self.assertFalse(idle.client_active(prefix, processes=handlers))
+            self.assertTrue(idle.client_active(prefix, processes=[*handlers, process(3, 'LeagueClientUx')]))
+
 
 class LifecycleTests(unittest.TestCase):
     def setUp(self):
@@ -54,9 +76,16 @@ def client_active(prefix, **kwargs):
     with open(os.environ['TEST_LOG'], 'a') as f:
         f.write('scan\\n')
     return calls < 2
+def server_running(prefix):
+    return os.environ.get('SERVER_RUNNING', '1') == '1'
 ''')
         (scripts / 'darling-rootless.sh').write_text('''#!/bin/bash
 echo "shutdown:$*" >> "$TEST_LOG"
+# Like darling shutdown, end the client command that the server ran.
+if [ -n "${CLIENT_SLEEP:-}" ]; then
+  for _ in 1 2 3 4 5 6 7 8 9 10; do [ -e "$TEST_LOG.pid" ] && break; sleep 0.2; done
+fi
+[ -e "$TEST_LOG.pid" ] && kill "$(cat "$TEST_LOG.pid")"
 if [ "${SHUTDOWN_RC:-0}" != 0 ] && [ ! -e "$TEST_LOG.retried" ]; then
   touch "$TEST_LOG.retried"
   exit "$SHUTDOWN_RC"
@@ -65,6 +94,10 @@ exit 0
 ''')
         client = scripts / 'run.sh'
         client.write_text('''#!/usr/bin/env bash
+if [ -n "${CLIENT_SLEEP:-}" ]; then
+  echo "$$" > "$TEST_LOG.pid"
+  exec sleep "$CLIENT_SLEEP"
+fi
 echo client-finished >> "$TEST_LOG"
 exit "${CLIENT_RC:-0}"
 '''.replace('#!/usr/bin/env bash', '#!' + str(shutil.which('bash'))))
@@ -89,11 +122,38 @@ exit "${CLIENT_RC:-0}"
         self.assertEqual(self.log.read_text().splitlines().count('shutdown:shutdown'), 2)
         self.assertIn('shutdown:shutdown', self.log.read_text())
 
+    def test_stop_request_shuts_down_without_waiting_for_command_or_clients(self):
+        (self.root / '.stop-request').touch()
+        result = self.run_session(CLIENT_SLEEP='60')
+        self.assertEqual(result.returncode, 128 + 15, result.stderr)
+        self.assertIn('Stopping Darling', result.stderr)
+        self.assertEqual(self.log.read_text().splitlines(), ['shutdown:shutdown'])
+
+    def test_interrupt_shuts_down_without_waiting_for_command_or_clients(self):
+        session = subprocess.Popen(['bash', str(self.root / 'scripts/nix-session.sh')],
+                                   env=dict(self.env, CLIENT_SLEEP='60'), text=True,
+                                   stderr=subprocess.PIPE)
+        pid_file = Path(str(self.log) + '.pid')
+        for _ in range(50):
+            if pid_file.exists():
+                break
+            time.sleep(0.1)
+        session.send_signal(signal.SIGINT)
+        _, stderr = session.communicate(timeout=10)
+        self.assertEqual(session.returncode, 128 + signal.SIGINT, stderr)
+        self.assertEqual(self.log.read_text().splitlines(), ['shutdown:shutdown'])
+
+    def test_failed_shutdown_is_not_retried_once_the_server_is_gone(self):
+        result = self.run_session(SHUTDOWN_RC='23', SERVER_RUNNING='0')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.log.read_text().splitlines().count('shutdown:shutdown'), 1)
+
     def test_shutdown_retries_when_terminal_diagnostics_fail(self):
         spec = importlib.util.spec_from_file_location('lifecycle_fixture', self.root / 'scripts/nix-lifecycle.py')
         lifecycle = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(lifecycle)
         child = MagicMock()
+        child.poll.return_value = 17
         child.wait.return_value = 17
         stderr = MagicMock()
         stderr.write.side_effect = OSError('terminal disconnected')

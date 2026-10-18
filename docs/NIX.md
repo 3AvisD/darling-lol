@@ -57,8 +57,15 @@ for prompts and session output.
 
 Keep the terminal open while clients are running and until cleanup completes.
 Default and installer sessions wait for clients to exit, then shut Darling down
-in the same namespace. A failed shutdown is retried without discarding that
-namespace.
+in the same namespace. Crash handlers do not count as clients, because they do
+not exit on their own under Darling. A failed shutdown is retried without
+discarding that namespace.
+
+To end a session while clients are still running, press Ctrl+C in its terminal,
+close the terminal, or run `darling-lol --stop` from anywhere. Each of these
+makes the session shut Darling down and exit. If the session does not exit
+within 30 seconds, `darling-lol --stop` kills the prefix's `darlingserver`
+itself. It also stops a server that outlived its session.
 
 ## Install permanently
 
@@ -198,7 +205,7 @@ nix run github:lucannez64/darling-lol#shell
 Use the launcher-provided shell rather than entering the raw FHS environment.
 If you start Darling manually in this shell, run `darling shutdown` there
 before exiting. A separately launched shell cannot reconnect to an existing
-Darling namespace.
+Darling namespace; `darling-lol --stop` can still stop it.
 
 ## Files and operational limits
 
