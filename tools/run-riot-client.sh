@@ -106,7 +106,9 @@ fi
 # On affected setups Chromium's default temp directory is unusable. Electron
 # can copy app.asar entries to temporary files for async reads and report a
 # failed copy as "not found". Use a writable guest directory by default.
-exec env -u ELECTRON_RUN_AS_NODE -u DYLD_INSERT_LIBRARIES EGL_PLATFORM=x11 \
+# exec-guest.py closes host file descriptors above stderr before starting the guest. A shell
+# loop cannot: dash only accepts single-digit descriptors in redirections.
+exec python3 "$runner_dir/exec-guest.py" env -u ELECTRON_RUN_AS_NODE -u DYLD_INSERT_LIBRARIES EGL_PLATFORM=x11 \
   MAC_CHROMIUM_TMPDIR="${MAC_CHROMIUM_TMPDIR:-/private/tmp}" \
   LANG="${RCLOL_GUEST_LOCALE:-en_US.UTF-8}" LC_ALL="${RCLOL_GUEST_LOCALE:-en_US.UTF-8}" \
   mesa_glthread="${RCLOL_MESA_GLTHREAD-${mesa_glthread-false}}" \
