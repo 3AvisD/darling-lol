@@ -121,6 +121,48 @@ ownership or window information cannot be read. A hidden background client or
 download is restarted when recovery is enabled. Other desktop environments are
 not supported by this helper; recovery is off by default.
 
+### Client window stays black after a match
+
+The League client keeps its Chromium/CEF UI (`LeagueClientUx` and its helpers)
+alive during a match. Riot's own "Close client during game" option closes that UI
+on Windows, but under Darling the pre-match instance keeps running: the client the
+backend starts when the match ends is a second CEF instance on the same
+`--user-data-dir`, and its window never paints. Its DOM and audio work and the
+window stays black. Closing the client by hand during the match leaves the same
+state for the same reason.
+
+An opt-in helper closes that UI itself, from the host, and only while a match
+runs, so the client that appears afterwards is the only instance:
+
+```sh
+RCLOL_CLOSE_CLIENT_IN_GAME=1 ./scripts/run.sh
+```
+
+This is not a memory measure: the UI is closed because it competes with the game
+for CPU during the match. Measured on a four-core host with a Radeon RX 550, a
+practice match reported roughly 120 FPS with the client UI running and roughly
+180 FPS with it closed. On that host a local supervisor using the same detection
+closed 13 client processes (2027 MiB resident) when a practice match started, and
+the client came back as one instance with a painted window when it ended; the
+helper described here has not been through a live match yet. Riot's own option is
+the equivalent on Windows, so leave either one disabled if the in-client chat is
+wanted during a match.
+
+The helper is off by default and fails closed: it attributes both the game and the
+client to the launcher's prefix through the loader's `__mldr_sockpath` (guest
+processes do not carry `DPREFIX`), never closes a client younger than 60 seconds
+(the one the backend starts after a match), leaves the Riot client, the League
+backend and the game untouched, and takes no action when ownership, the
+environment or the stat fields cannot be read. The client UI is recognised by the
+name of its executable, not by the command line: `LeagueCrashHandler` processes
+carry the client UI name in their arguments only, so they are left alone. It
+leaves by itself after ten minutes without a client or a match. Diagnose it in one
+observation, without waiting for a match:
+
+```sh
+python3 tools/close-league-client-in-game.py --once --dry-run
+```
+
 ### Downloads repeatedly fail with an IPv6 CONNECT_TO error
 
 The bundled downloader was observed retrying CDN chunks with:
