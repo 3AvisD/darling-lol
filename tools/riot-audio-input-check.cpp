@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <pthread.h>
 #include <unistd.h>
 
 extern "C" void* const AVMediaTypeAudio;
@@ -49,15 +50,16 @@ static int authorization() {
     SEL status=sel_registerName("authorizationStatusForMediaType:");
     auto query=(long(*)(id,SEL,void*))objc_msgSend;
     long audio=query((id)device,status,AVMediaTypeAudio),video=query((id)device,status,AVMediaTypeVideo);
-    __block int granted=-1;
-    __block bool returned=false;
-    __block bool synchronous=false;
+    // macOS calls the handler on another queue, never on the requesting thread inside the call.
+    // Shared with the handler's thread, so atomic; read only after the handler signals.
+    static std::atomic<int> granted{-1};
+    static std::atomic<bool> synchronous{false};
+    const pthread_t caller=pthread_self();
     dispatch_semaphore_t done=dispatch_semaphore_create(0);
     auto request=(void(*)(id,SEL,void*,void(^)(BOOL)))objc_msgSend;
     request((id)device,sel_registerName("requestAccessForMediaType:completionHandler:"),AVMediaTypeAudio,^(BOOL value) {
-        synchronous=!returned;granted=value;dispatch_semaphore_signal(done);
+        synchronous=pthread_equal(pthread_self(),caller)!=0;granted=value;dispatch_semaphore_signal(done);
     });
-    returned=true;
     long waited=dispatch_semaphore_wait(done,dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC));
     printf("AUDIO_INPUT_AUTH audio=%ld video=%ld request_granted=%d async=%d\n",audio,video,(int)granted,!waited && !synchronous);
     fflush(stdout);
