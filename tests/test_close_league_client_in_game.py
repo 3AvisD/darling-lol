@@ -194,6 +194,19 @@ class InGameCloseTests(unittest.TestCase):
             in_game.close_ui(self.proc, {'123': identity, '124': 1})
         self.assertEqual(kill.call_args_list, [])
 
+    def test_idle_clock_starts_only_after_a_client_or_match(self):
+        empty = {'game': False, 'ui': {}}
+        client = {'game': False, 'ui': {'10': 5}}
+        match = {'game': True, 'ui': {}}
+        # Before any client (long patch or login): never idle, however long it takes.
+        self.assertEqual(in_game.update_idle(empty, False, None, 5000.0), (False, None))
+        # A client or a match marks the session as seen and keeps the clock stopped.
+        self.assertEqual(in_game.update_idle(client, False, None, 10.0), (True, None))
+        self.assertEqual(in_game.update_idle(match, True, 50.0, 60.0), (True, None))
+        # Afterwards the clock starts once and keeps its start time.
+        self.assertEqual(in_game.update_idle(empty, True, None, 70.0), (True, 70.0))
+        self.assertEqual(in_game.update_idle(empty, True, 70.0, 900.0), (True, 70.0))
+
     def test_close_decision_covers_limits_and_cooldown(self):
         state = {'game': True, 'ui': {'123': 1}}
         self.assertEqual(in_game.close_decision(state, 0, 0.0, 100.0), 'close')

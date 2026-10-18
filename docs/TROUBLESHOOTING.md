@@ -156,7 +156,8 @@ backend and the game untouched, and takes no action when ownership, the
 environment or the stat fields cannot be read. The client UI is recognised by the
 name of its executable, not by the command line: `LeagueCrashHandler` processes
 carry the client UI name in their arguments only, so they are left alone. It
-leaves by itself after ten minutes without a client or a match. Diagnose it in one
+leaves by itself ten minutes after the last client or match is gone (the clock does
+not run before the first client appears, so a long patch or login is fine). Diagnose it in one
 observation, without waiting for a match:
 
 ```sh
