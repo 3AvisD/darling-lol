@@ -106,6 +106,39 @@ class RuntimeIdentityTests(unittest.TestCase):
         env.pop('DPREFIX')
         self.assertEqual(self.state('check', env).returncode, 0)
 
+    def test_inventory_ignores_changes_inside_backup_directories(self):
+        spec = importlib.util.spec_from_file_location('inventory_fixture', self.root / 'scripts/nix-state.py')
+        state = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(state)
+        runtime = self.root / 'usr-local/libexec/darling'
+        for suffix in ('.before-test', '.rt-test', '.llvm-test'):
+            backup = runtime / ('backup' + suffix) / 'nested'
+            backup.mkdir(parents=True)
+            saved = backup / 'saved.dylib'
+            saved.write_text('old backup')
+            before = state.inventory(runtime)
+            saved.write_text('changed backup')
+            self.assertEqual(state.inventory(runtime), before)
+
+    def test_inventory_is_independent_of_filesystem_directory_order(self):
+        from unittest.mock import patch
+        spec = importlib.util.spec_from_file_location('inventory_fixture', self.root / 'scripts/nix-state.py')
+        state = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(state)
+        runtime = self.root / 'usr-local/libexec/darling'
+        for name in ('a', 'b'):
+            folder = runtime / name
+            folder.mkdir()
+            (folder / 'file').write_text(name)
+        original_walk = os.walk
+        def reversed_walk(*args, **kwargs):
+            for directory, dirs, files in original_walk(*args, **kwargs):
+                dirs.reverse()
+                yield directory, dirs, files
+        before = state.inventory(runtime)
+        with patch.object(state.os, 'walk', reversed_walk):
+            self.assertEqual(state.inventory(runtime), before)
+
 
 if __name__ == '__main__':
     unittest.main()
