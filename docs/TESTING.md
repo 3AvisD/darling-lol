@@ -31,7 +31,9 @@ The patch check uses temporary base indexes and does not reset or modify the sou
 
 ## NSURLSession lifecycle regression
 
-After configuring and building the patched Darling source:
+After configuring, building and installing the patched Darling runtime (including
+CFNetwork), run the probe. Supply `--frameworks` and `--libraries` when using
+staged overlays instead of the installed runtime:
 
 ```sh
 python3 tools/build-riot-urlsession-check.py
@@ -53,8 +55,11 @@ overlays, and keeps diagnostics in mode-0600 `build/urlsession-check.log`.
 Expected checks: five successful HTTP GETs with exact response bytes/status;
 connection refusal delivered as an error; repeated resume/cancel without
 duplicate completion; finish waiting for task completion; and session
-invalidation delivered once for both graceful finish and cancellation.
-Expected output includes `URLSESSION_PASS` and `LIFECYCLE_PASS`. The original
+invalidation delivered once for both graceful finish and cancellation; shared-session
+invalidation leaving later requests usable; and completion delivery honoring a
+suspended custom delegate queue.
+Expected output includes `URLSESSION_PASS`, `LIFECYCLE_PASS`,
+`SHARED_SESSION_PASS` and `QUEUE_PASS`. The original
 runtime aborts on missing data-task initialization or session invalidation.
 These checks do not establish full NSURLSession conformance or transport-level
 interruption of an already-running request.

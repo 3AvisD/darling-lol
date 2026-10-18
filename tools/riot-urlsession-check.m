@@ -53,6 +53,29 @@ static int lifecycle_check(int cancel) {
     [session release]; [delegate release];
     return 0;
 }
+static int queue_check(void) {
+    NSOperationQueue *queue = [[NSOperationQueue alloc] init];
+    [queue setMaxConcurrentOperationCount:1];
+    [queue setSuspended:YES];
+    NSURLSession *session = [[NSURLSession sessionWithConfiguration:[NSURLSessionConfiguration defaultSessionConfiguration] delegate:nil delegateQueue:queue] retain];
+    dispatch_semaphore_t completed = dispatch_semaphore_create(0);
+    __block int callbacks = 0, correctQueue = 0;
+    NSURLSessionDataTask *task = [session dataTaskWithURL:[NSURL URLWithString:probeURL] completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        correctQueue = [NSOperationQueue currentQueue] == queue;
+        ++callbacks;
+        dispatch_semaphore_signal(completed);
+    }];
+    [task cancel];
+    [session finishTasksAndInvalidate];
+    // A suspended delegate queue must also suspend task completion delivery.
+    if (!dispatch_semaphore_wait(completed, dispatch_time(DISPATCH_TIME_NOW, 100*NSEC_PER_MSEC))) return 20;
+    [queue setSuspended:NO];
+    if (dispatch_semaphore_wait(completed, dispatch_time(DISPATCH_TIME_NOW, 15*NSEC_PER_SEC))) return 21;
+    if (callbacks != 1 || !correctQueue) return 22;
+    [session release]; [queue release];
+    puts("QUEUE_PASS: completion obeys delegate queue and suspension");
+    return 0;
+}
 int main(int argc, const char **argv) { @autoreleasepool {
  if (argc != 3) { puts("Usage: probe <loopback-success-url> <loopback-error-url>"); return 64; }
  probeURL = [NSString stringWithUTF8String:argv[1]];
@@ -60,6 +83,11 @@ int main(int argc, const char **argv) { @autoreleasepool {
  for (int i=0;i<5;i++) if (session_check(probeURL,0)) return 1;
  if (session_check(probeURL,1)) return 2;
  if (session_check(failureURL,2)) return 3;
+ [[NSURLSession sharedSession] finishTasksAndInvalidate];
+ [[NSURLSession sharedSession] invalidateAndCancel];
+ if (session_check(probeURL,0)) { puts("SHARED_SESSION_FAIL"); return 5; }
+ puts("SHARED_SESSION_PASS: invalidation leaves singleton usable");
+ if (queue_check()) { puts("QUEUE_FAIL"); return 6; }
  if (lifecycle_check(0) || lifecycle_check(1)) { puts("LIFECYCLE_FAIL"); return 4; }
  puts("LIFECYCLE_PASS: finish waits for request; cancel delivers callback; invalidation once");
  puts("URLSESSION_PASS: 5 HTTP requests and cancel/resume, callbacks exactly once");

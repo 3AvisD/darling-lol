@@ -68,9 +68,11 @@ try:
                                 env=env, stdout=stream, stderr=subprocess.STDOUT, timeout=90)
     text = log.read_text(errors='replace')
     for line in text.splitlines():
-        if line.startswith(('LIFECYCLE_PASS:', 'URLSESSION_PASS:', 'LIFECYCLE_FAIL', 'FAIL ', 'TIMEOUT')):
+        if line.startswith(('LIFECYCLE_PASS:', 'URLSESSION_PASS:', 'SHARED_SESSION_PASS:', 'QUEUE_PASS:',
+                            'LIFECYCLE_FAIL', 'SHARED_SESSION_FAIL', 'QUEUE_FAIL', 'FAIL ', 'TIMEOUT')):
             print(line)
-    if result.returncode or 'LIFECYCLE_PASS:' not in text or 'URLSESSION_PASS:' not in text:
+    required = ('LIFECYCLE_PASS:', 'URLSESSION_PASS:', 'SHARED_SESSION_PASS:', 'QUEUE_PASS:')
+    if result.returncode or not all(marker in text for marker in required):
         raise SystemExit(f'Probe failed (exit {result.returncode}); inspect private log {log}')
 finally:
     server.shutdown()

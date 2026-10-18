@@ -412,3 +412,8 @@ If a black fullscreen game has only its normal Metal child and becomes visible a
 ### Visible cursor while relative on Xwayland (PR #18)
 
 When Xwayland does not honour warps, the virtual cursor follows real pointer motion and application warps leave it in place. Expected warp echoes are still discarded using their request serial and coordinates. This keeps clicks and camera edge panning aligned with the visible cursor on GNOME/gamescope. The contributor confirmed this path in a gamescope practice-tool session; plain GNOME and NVIDIA still require manual verification.
+
+Recovery requires every matching client to be at least 60 seconds old and a
+complete Hyprland window record (`class`, `title`, `mapped`, `hidden`). A second
+process scan after window inspection must find the same client identities and
+no game. Missing information or shutdown failure leaves normal launch in charge.
