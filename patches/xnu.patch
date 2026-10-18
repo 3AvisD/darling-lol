@@ -1576,7 +1576,7 @@ index dc8fbb8..171746a 100644
 +	__linux_sched_yield_site("SWTYLD");
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
-index 206e92e..0646cb7 100644
+index 206e92e..1a763fe 100644
 --- a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
 +++ b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
 @@ -151,8 +151,13 @@ void sigrt_handler(int signum, struct linux_siginfo* info, struct linux_ucontext
@@ -1595,7 +1595,7 @@ index 206e92e..0646cb7 100644
  	}
  
  	if (signum == SIGNAL_SIGEXC_SUSPEND) {
-@@ -267,13 +272,150 @@ static void state_from_kernel(struct linux_ucontext* ctxt, const void* tstate, c
+@@ -267,13 +272,165 @@ static void state_from_kernel(struct linux_ucontext* ctxt, const void* tstate, c
  #endif
  }
  
@@ -1673,9 +1673,24 @@ index 206e92e..0646cb7 100644
 +
 +#endif
 +
++/* Native driver threads have no Darling RPC connection. Forward resize
++ * notifications to the guest main thread without allocating or using RPC.
++ * Other signals, including synchronous faults and queued payloads, retain
++ * their existing handling. Never swallow a failed forward. */
++static int forward_native_resize_signal(int linux_signum, int status) {
++    if (status != -32 /* -LINUX_EPIPE */ || linux_signum != LINUX_SIGWINCH)
++        return 0;
++    long pid = LINUX_SYSCALL(__NR_getpid);
++    if (LINUX_SYSCALL(__NR_gettid) == pid)
++        return 0;
++    return LINUX_SYSCALL(__NR_tgkill, pid, pid, linux_signum) == 0;
++}
++
  void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_ucontext* ctxt)
  {
  	int status = dserver_rpc_interrupt_enter();
++	if (forward_native_resize_signal(linux_signum, status))
++		return;
 +	int relaxed = 0;
 +
 +#ifdef __x86_64__
@@ -1747,7 +1762,7 @@ index 206e92e..0646cb7 100644
  	}
  
  	kern_printf("sigexc_handler(%d, %p, %p)\n", linux_signum, info, ctxt);
-@@ -359,7 +501,13 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
+@@ -359,7 +516,13 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
  						sizeof(sa.sa_mask));
  
  				// Resend signal to self

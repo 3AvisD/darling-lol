@@ -10706,3 +10706,19 @@ index 0000000..1f3c473
 +    }
 +}
 +#endif
+diff --git a/src/startup/mldr/elfcalls/threads.c b/src/startup/mldr/elfcalls/threads.c
+index e789986..0d56b4e 100644
+--- a/src/startup/mldr/elfcalls/threads.c
++++ b/src/startup/mldr/elfcalls/threads.c
+@@ -387,8 +387,9 @@ int __darling_thread_rpc_socket(void) {
+ 			// this is the main thread
+ 			t_server_socket = __dserver_main_thread_socket_fd;
+ 		} else {
+-			// threads should already have a per-thread socket assigned when they're created
+-			abort();
++			// Native host-library threads do not have a Darling RPC connection.
++			// Let the caller report EPIPE, including the resize-signal bridge.
++			return -1;
+ 		}
+ 	}
+ 	return t_server_socket;
