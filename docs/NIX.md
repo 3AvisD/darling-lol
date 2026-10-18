@@ -217,6 +217,9 @@ Darling namespace; `darling-lol --stop` can still stop it.
   copies first and removes the old prefix only after the copy completes. If the
   path already holds a Darling prefix, it switches to it and moves nothing. The
   path must not contain commas or colons (overlayfs uses them as separators).
+  Across filesystems the target must support `user.*` extended attributes (ext4,
+  btrfs, xfs; not NTFS or exFAT), which is checked before copying and again on
+  the finished copy. The new path is saved before the old prefix is deleted.
   The next launch sets up the runtime in the new prefix.
 - Explicit `DPREFIX` and `RIOT_GUEST_HOME` overrides take precedence over saved
   configuration, so clear stale overrides before switching installations.
