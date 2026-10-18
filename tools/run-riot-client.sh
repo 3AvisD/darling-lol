@@ -92,7 +92,10 @@ if [ -n "${RCLOL_REFRESH_HZ-}" ]; then export RCLOL_REFRESH_HZ; fi
 export MESA_NO_ERROR="${MESA_NO_ERROR:-1}"
 # NVIDIA proprietary driver: limit pre-rendered frames.
 export __GL_MaxFramesAllowed="${__GL_MaxFramesAllowed:-1}"
-export __GL_THREADED_OPTIMIZATIONS="${__GL_THREADED_OPTIMIZATIONS:-1}"
+# Threaded optimizations stay off: with them, NVIDIA 580 (the last branch for
+# Pascal GPUs) with egl-x11 1.0.6 rejects the X11 EGLDisplay with EGL_BAD_DISPLAY
+# on every thread that has a context current, and the game window stays black.
+export __GL_THREADED_OPTIMIZATIONS="${__GL_THREADED_OPTIMIZATIONS:-0}"
 export __GL_YIELD="${__GL_YIELD:-NOTHING}"
 # Reduce timer slack for tighter scheduling in the game process tree.
 if [ -w /proc/self/timerslack_ns ]; then
