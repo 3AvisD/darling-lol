@@ -40,6 +40,7 @@ class MetalDeviceInfoTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout)
             self.assertIn('METAL_DEVICE_INFO failures=0 pass=1', result.stdout)
             self.assertIn('PASS registry ID is non-zero', result.stdout)
+            self.assertIn('PASS Mac GPU name', result.stdout)
 
 
 if __name__ == '__main__':
