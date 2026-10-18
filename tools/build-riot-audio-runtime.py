@@ -43,14 +43,16 @@ if matrix_obj in link:
     link[link.index(matrix_obj)]=str(obj)
 else:
     link.append(str(obj))
-# The default-output unit must be recompiled too: its SetProperty refuses kAudioOutputUnitProperty_CurrentDevice unless patched.
-obj=project/'build/riot-DefaultOutputAU.o'
-subprocess.run(['clang++',*component_flags['CXX_DEFINES'],*component_flags['CXX_INCLUDES'],
-    *component_flags['CXX_FLAGS'],'-O2','-c',str(project/'build/darling-src/src/CoreAudio/CoreAudioComponent/DefaultOutputAU.cpp'),
-    '-o',str(obj)],check=True)
-default_obj='CMakeFiles/CoreAudioComponent.dir/DefaultOutputAU.cpp.o'
-assert default_obj in link, 'DefaultOutputAU object missing from the link line'
-link[link.index(default_obj)]=str(obj)
+# The AUHAL subclasses must be recompiled too: they share AUHAL.h's layout and vtable, and the default-output
+# unit's SetProperty refuses kAudioOutputUnitProperty_CurrentDevice unless patched.
+for name in ['DefaultOutputAU','SystemOutputAU']:
+    obj=project/f'build/riot-{name}.o'
+    subprocess.run(['clang++',*component_flags['CXX_DEFINES'],*component_flags['CXX_INCLUDES'],
+        *component_flags['CXX_FLAGS'],'-O2','-c',str(project/f'build/darling-src/src/CoreAudio/CoreAudioComponent/{name}.cpp'),
+        '-o',str(obj)],check=True)
+    default_obj=f'CMakeFiles/CoreAudioComponent.dir/{name}.cpp.o'
+    assert default_obj in link, f'{name} object missing from the link line'
+    link[link.index(default_obj)]=str(obj)
 link[link.index('-o')+1]=str(project/'build/riot-CoreAudioComponent')
 subprocess.run(link,cwd=component,check=True)
 toolbox=build/'src/CoreAudio/AudioToolbox'
@@ -90,3 +92,10 @@ subprocess.run(['clang++',*cpp_flags['CXX_DEFINES'],*cpp_flags['CXX_INCLUDES'],
 subprocess.run(['clang++','-target','x86_64-apple-macosx11.0','-fuse-ld=lld','-nostdlib',
     '-isysroot','@DARLING_SDK@',str(obj),'-lSystem','-lc++',
     str(project/'build/riot-AudioToolbox'),'-o',str(project/'build/riot-audio-graph-check')],check=True)
+
+obj=project/'build/riot-audio-input-check.o'
+subprocess.run(['clang++',*cpp_flags['CXX_DEFINES'],*cpp_flags['CXX_INCLUDES'],
+    *cpp_flags['CXX_FLAGS'],'-O2','-c',str(project/'tools/riot-audio-input-check.cpp'),'-o',str(obj)],check=True)
+subprocess.run(['clang++','-target','x86_64-apple-macosx11.0','-fuse-ld=lld','-nostdlib',
+    '-isysroot','@DARLING_SDK@',str(obj),'-lSystem','-lc++','-lobjc','-framework','CoreAudio',
+    '-framework','AudioToolbox','-framework','AVFoundation','-o',str(project/'build/riot-audio-input-check')],check=True)
