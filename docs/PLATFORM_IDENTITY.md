@@ -134,3 +134,15 @@ a per-prefix lock. Repeated writes preserve identifiers and unchanged files.
 Previewing a fresh identity generates a sample; only `--write` makes it stable.
 To restore host-derived defaults after provisioning, remove both identity files
 while stopped, so a later provisioning run cannot reimport the legacy copy.
+
+## system_profiler
+
+The prefix's `/usr/sbin/system_profiler` (installed by
+`tools/install-darling-system-profiler.py`) answers `SPHardwareDataType` and
+`SPSoftwareDataType` from the running guest: model, serial number, platform UUID
+and provisioning UDID from IOKit's `IOPlatformExpertDevice` (via `ioreg`), CPU,
+cache and memory from `sysctl`, and the OS version from `sw_vers` and `uname`. It
+keeps no identity of its own, so it reports the same values as IOKit, including any
+override saved by this tool. A field the guest does not provide is left out.
+`python3 -m unittest tests.test_system_profiler` checks the output with stub
+commands.
