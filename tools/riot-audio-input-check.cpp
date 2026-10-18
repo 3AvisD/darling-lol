@@ -20,7 +20,8 @@ static std::atomic<unsigned> callbacks{0}, renderErrors{0}, nonIncreasing{0}, ze
 static std::atomic<unsigned long long> totalFrames{0};
 static double lastSample=-1;
 static bool planar;
-static float samples[2][4096];
+static unsigned interleavedChannels=1;
+static float samples[2][2*4096];
 
 static OSStatus input(void*,AudioUnitRenderActionFlags* flags,const AudioTimeStamp* time,UInt32 bus,UInt32 frames,AudioBufferList*) {
     ++callbacks;
@@ -31,15 +32,15 @@ static OSStatus input(void*,AudioUnitRenderActionFlags* flags,const AudioTimeSta
     auto* list=(AudioBufferList*)storage;
     list->mNumberBuffers=planar?2:1;
     for(unsigned b=0;b<list->mNumberBuffers;++b) {
-        list->mBuffers[b].mNumberChannels=1;
-        list->mBuffers[b].mDataByteSize=frames*sizeof(float);
+        list->mBuffers[b].mNumberChannels=planar?1:interleavedChannels;
+        list->mBuffers[b].mDataByteSize=frames*sizeof(float)*list->mBuffers[b].mNumberChannels;
         list->mBuffers[b].mData=samples[b];
     }
     AudioUnitRenderActionFlags renderFlags=0;
     OSStatus status=AudioUnitRender(unit,&renderFlags,time,bus,frames,list);
     if(status) ++renderErrors;
     else for(unsigned b=0;b<list->mNumberBuffers;++b)
-        if(list->mBuffers[b].mDataByteSize!=frames*sizeof(float)) ++badBuffers;
+        if(list->mBuffers[b].mDataByteSize!=frames*sizeof(float)*list->mBuffers[b].mNumberChannels) ++badBuffers;
     totalFrames+=frames;
     return noErr;
 }
@@ -95,19 +96,24 @@ static int device(AudioDeviceID* out) {
     return channels[0]!=2 || channels[1]!=0 || status || !streams || !listed;
 }
 
-static int record(AudioDeviceID id,bool nonInterleaved,unsigned milliseconds) {
+static int record(AudioDeviceID id,bool nonInterleaved,unsigned channels,unsigned milliseconds) {
     AudioComponentDescription description={kAudioUnitType_Output,kAudioUnitSubType_HALOutput,kAudioUnitManufacturer_Apple,0,0};
     AudioComponent component=AudioComponentFindNext(nullptr,&description);
     if(!component || AudioComponentInstanceNew(component,&unit) || !unit) return 1;
-    planar=nonInterleaved;callbacks=0;renderErrors=0;nonIncreasing=0;zeroFrames=0;badBuffers=0;totalFrames=0;lastSample=-1;
+    planar=nonInterleaved;interleavedChannels=channels;callbacks=0;renderErrors=0;nonIncreasing=0;zeroFrames=0;badBuffers=0;totalFrames=0;lastSample=-1;
     UInt32 on=1,off=0;
     if(AudioUnitSetProperty(unit,kAudioOutputUnitProperty_EnableIO,kAudioUnitScope_Input,1,&on,sizeof(on))) return 2;
     if(AudioUnitSetProperty(unit,kAudioOutputUnitProperty_EnableIO,kAudioUnitScope_Output,0,&off,sizeof(off))) return 3;
-    if(AudioUnitSetProperty(unit,kAudioOutputUnitProperty_CurrentDevice,kAudioUnitScope_Global,0,&id,sizeof(id))) return 4;
+    // Vivox (the interleaved stereo run) sets the capture device on element 1.
+    const AudioUnitElement deviceElement=channels==2?1:0;
+    if(AudioUnitSetProperty(unit,kAudioOutputUnitProperty_CurrentDevice,kAudioUnitScope_Global,deviceElement,&id,sizeof(id))) return 4;
     AudioDeviceID current=0;UInt32 size=sizeof(current);
-    if(AudioUnitGetProperty(unit,kAudioOutputUnitProperty_CurrentDevice,kAudioUnitScope_Global,0,&current,&size) || current!=id) return 5;
+    if(AudioUnitGetProperty(unit,kAudioOutputUnitProperty_CurrentDevice,kAudioUnitScope_Global,deviceElement,&current,&size) || current!=id) return 5;
     AudioStreamBasicDescription format=nonInterleaved
         ? AudioStreamBasicDescription{44100,kAudioFormatLinearPCM,kAudioFormatFlagIsFloat|kAudioFormatFlagIsPacked|kAudioFormatFlagIsNonInterleaved,4,1,4,2,32,0}
+        : channels==2
+        // Vivox's recording format: interleaved Float32 stereo at the device rate.
+        ? AudioStreamBasicDescription{44100,kAudioFormatLinearPCM,kAudioFormatFlagIsFloat|kAudioFormatFlagIsPacked,8,1,8,2,32,0}
         : AudioStreamBasicDescription{48000,kAudioFormatLinearPCM,kAudioFormatFlagIsFloat|kAudioFormatFlagIsPacked,4,1,4,1,32,0};
     OSStatus status=AudioUnitSetProperty(unit,kAudioUnitProperty_StreamFormat,kAudioUnitScope_Output,1,&format,sizeof(format));
     if(status) {printf("AUDIO_INPUT_FORMAT status=%d\n",status);return 6;}
@@ -126,8 +132,8 @@ static int record(AudioDeviceID id,bool nonInterleaved,unsigned milliseconds) {
     AudioUnitUninitialize(unit);
     AudioComponentInstanceDispose(unit);
     double seconds=double(totalFrames)/format.mSampleRate;
-    printf("AUDIO_INPUT_RECORD planar=%d rate=%.0f callbacks=%u frames=%llu seconds=%.3f render_errors=%u bad_buffers=%u "
-        "nonincreasing=%u zero_frames=%u stop_status=%d quiet_after_stop=%d\n",nonInterleaved,format.mSampleRate,count,
+    printf("AUDIO_INPUT_RECORD planar=%d channels=%u rate=%.0f callbacks=%u frames=%llu seconds=%.3f render_errors=%u bad_buffers=%u "
+        "nonincreasing=%u zero_frames=%u stop_status=%d quiet_after_stop=%d\n",nonInterleaved,(unsigned)format.mChannelsPerFrame,format.mSampleRate,count,
         (unsigned long long)totalFrames,seconds,(unsigned)renderErrors,(unsigned)badBuffers,(unsigned)nonIncreasing,
         (unsigned)zeroFrames,stopped,quiet);
     fflush(stdout);
@@ -141,11 +147,14 @@ int main() {
     failures+=authorization()!=0;
     AudioDeviceID id=kAudioObjectUnknown;
     if(device(&id)) return 100+failures;
-    int result=record(id,false,1000);
+    int result=record(id,false,1,1000);
     if(result) printf("AUDIO_INPUT_RECORD failed step=%d\n",result);
     failures+=result!=0;
-    result=record(id,true,400);
+    result=record(id,true,2,400);
     if(result) printf("AUDIO_INPUT_RECORD failed step=%d planar=1\n",result);
+    failures+=result!=0;
+    result=record(id,false,2,400);
+    if(result) printf("AUDIO_INPUT_RECORD failed step=%d interleaved_stereo=1\n",result);
     failures+=result!=0;
     printf("AUDIO_INPUT_CHECK failures=%d\n",failures);
     return failures;
