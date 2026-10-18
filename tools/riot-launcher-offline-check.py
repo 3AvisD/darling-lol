@@ -16,15 +16,28 @@ def check():
         folder = Path(directory)
         launcher = folder / "launch.sh"
         launcher.write_text((ROOT / "tools/run-riot-client.sh").read_text().replace("@GUEST_HOME@", "/Users/offline-check"))
+        (folder / "exec-guest.py").write_text((ROOT / "tools/exec-guest.py").read_text())
         binary_folder = folder / "bin"
         binary_folder.mkdir()
         log = folder / "calls.jsonl"
         stub = f'''#!{sys.executable}
 import json, os, sys
 record = {{"command": os.path.basename(sys.argv[0]), "args": sys.argv[1:]}}
+# The launcher starts the guest through exec-guest.py; run it for real.
+if record["command"] == "python3" and sys.argv[1:] and os.path.basename(sys.argv[1]) == "exec-guest.py":
+    os.execv(sys.executable, [sys.executable] + sys.argv[1:])
 if record["command"] == "darling":
+    # Descriptors open now were inherited; the one listdir used is closed again before this check.
+    def is_open(fd):
+        try:
+            os.fstat(fd)
+            return True
+        except OSError:
+            return False
+    record["fds"] = sorted(fd for fd in map(int, os.listdir("/proc/self/fd")) if is_open(fd))
     record["flags"] = {{key: os.environ.get(key) for key in
-        ("RCLOL_APP_ARG3", "RCLOL_APP_ARG3_SLOT", "RCLOL_UX_ARG2", "RCLOL_UX_ARG2_SLOT", "RCLOL_UX_ARG1", "RCLOL_APP_ARGS", "RCLOL_APP_ARG2", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH", "DARLING_XSHM_LIBRARY")}}
+        ("RCLOL_APP_ARG3", "RCLOL_APP_ARG3_SLOT", "RCLOL_UX_ARG2", "RCLOL_UX_ARG2_SLOT", "RCLOL_UX_ARG1", "RCLOL_APP_ARGS", "RCLOL_APP_ARG2", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH", "DARLING_XSHM_LIBRARY",
+         "WAYLAND_DISPLAY", "XAUTHORITY", "DRI_PRIME", "MESA_NO_ERROR", "__GL_THREADED_OPTIMIZATIONS", "SHELL")}}
 with open({str(log)!r}, "a") as output:
     output.write(json.dumps(record) + "\\n")
 '''
@@ -60,7 +73,15 @@ with open({str(log)!r}, "a") as output:
             "RCLOL_OPEN_URL_BRIDGE": "1",
             "RCLOL_DISABLE_GPU_VSYNC": "1",
         })
-        subprocess.run(["sh", str(launcher)], env=env, check=True, capture_output=True, text=True)
+        # Leaked host descriptors, including multi-digit ones, must not reach the guest.
+        leaked = list(os.pipe())
+        for target in (12, 200):
+            leaked.append(os.dup2(leaked[0], target, inheritable=False))
+        try:
+            subprocess.run(["sh", str(launcher)], env=env, check=True, capture_output=True, text=True, pass_fds=leaked)
+        finally:
+            for fd in leaked:
+                os.close(fd)
         records = [json.loads(line) for line in log.read_text().splitlines()]
         maintenance = [r for r in records if r["command"] == "python3"]
         assert [Path(r["args"][0]).name for r in maintenance] == [
@@ -70,6 +91,7 @@ with open({str(log)!r}, "a") as output:
         launches = [r for r in records if r["command"] == "darling"]
         assert len(launches) == 1, "unexpected launch count"
         launch = launches[0]
+        assert launch["fds"] == [0, 1, 2], f"inherited descriptors reached the guest: {launch['fds']}"
         assert all(launch["flags"][key] is None for key in (
             "RCLOL_APP_ARG3", "RCLOL_APP_ARG3_SLOT", "RCLOL_UX_ARG2", "RCLOL_UX_ARG2_SLOT"
         )), "inherited inspector/unlimited-frame argument survived"
@@ -95,7 +117,17 @@ with open({str(log)!r}, "a") as output:
         subprocess.run(["sh", str(launcher)], env=env, check=True, capture_output=True, text=True)
         clean = json.loads(log.read_text().splitlines()[-1])
         assert clean["flags"]["DYLD_INSERT_LIBRARIES"] is None
-        print("LAUNCHER_OFFLINE pass=1 installed=PASS installer=PASS inherited_injection=absent runtime=preserved")
+        # The opt-in host environment filter drops session metadata but never the launcher's GPU tuning.
+        env.update({"RCLOL_FILTER_HOST_ENV": "1", "WAYLAND_DISPLAY": "wayland-0", "XAUTHORITY": "/tmp/xauth",
+                    "DRI_PRIME": "1", "SHELL": "/bin/fish"})
+        env.pop("MESA_NO_ERROR", None)
+        env.pop("__GL_THREADED_OPTIMIZATIONS", None)
+        subprocess.run(["sh", str(launcher)], env=env, check=True, capture_output=True, text=True)
+        filtered = json.loads(log.read_text().splitlines()[-1])["flags"]
+        assert filtered["WAYLAND_DISPLAY"] is None and filtered["SHELL"] == "/bin/zsh", "host session metadata survived"
+        assert (filtered["XAUTHORITY"], filtered["DRI_PRIME"]) == ("/tmp/xauth", "1"), "X11/GPU selection lost"
+        assert (filtered["MESA_NO_ERROR"], filtered["__GL_THREADED_OPTIMIZATIONS"]) == ("1", "0"), "launcher GPU tuning lost"
+        print("LAUNCHER_OFFLINE pass=1 installed=PASS installer=PASS inherited_injection=absent runtime=preserved inherited_fds=closed host_env_filter=PASS")
 
 
 if __name__ == "__main__":

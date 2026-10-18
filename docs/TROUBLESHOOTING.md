@@ -375,6 +375,27 @@ Tested on a GTX 1060 6GB with driver 580.178.04 on NixOS, Hyprland and Xwayland:
 the client and the tutorial match render on the NVIDIA GPU. Newer drivers were not
 retested with the option off.
 
+### Metal device name and memory budget
+
+`MTLDevice` reports the host GPU: its Vulkan name in macOS style (for example
+`AMD Radeon RX 6800 XT (RADV NAVI21)` becomes `AMD Radeon RX 6800 XT`) and a working set
+(`recommendedMaxWorkingSetSize`) from the GPU's Vulkan memory heaps. Apps size their GPU
+allocations from the working set, so only override it to match the card's real memory.
+Both can be overridden per launch:
+
+```sh
+DARLING_METAL_GPU_NAME='AMD Radeon Pro 5500M' DARLING_METAL_VRAM_MB=4096 ./scripts/run.sh
+```
+
+The Riot launcher sets `DARLING_METAL_MAC_GPU_NAME=1`: the name becomes the GPU that
+the MacBookPro16,1 IOKit reports shipped with, from the host's vendor: `AMD Radeon Pro 5500M`
+on AMD and `Intel UHD Graphics 630` on Intel. NVIDIA GPUs keep their own name, so the game
+never takes AMD or Intel driver paths on an NVIDIA card. The working set is still the host's.
+`DARLING_METAL_MAC_GPU_NAME=0 ./scripts/run.sh` reports the host name instead; other Darling
+apps report it unless they set the variable. `DARLING_METAL_GPU_NAME` wins over both.
+
+`registryID` is a fixed non-zero value, as on a real Mac.
+
 ### Host-side checks
 
 These are host settings, not game settings. Run on AC power, and use a performance power profile (`powerprofilesctl set performance`, or `asusctl profile -P Performance` on ASUS laptops). On the tested desktop the game is limited mostly by its own main thread on the CPU, not by the GPU (see [status](STATUS.md#game-fps-2026-10-1314)), so laptop CPU power limits matter as much as the GPU choice.
