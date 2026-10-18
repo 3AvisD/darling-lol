@@ -375,6 +375,20 @@ Tested on a GTX 1060 6GB with driver 580.178.04 on NixOS, Hyprland and Xwayland:
 the client and the tutorial match render on the NVIDIA GPU. Newer drivers were not
 retested with the option off.
 
+### Metal device name and memory budget
+
+`MTLDevice` reports the host GPU: its Vulkan name in macOS style (for example
+`AMD Radeon RX 6800 XT (RADV NAVI21)` becomes `AMD Radeon RX 6800 XT`) and a working set
+(`recommendedMaxWorkingSetSize`) from the GPU's Vulkan memory heaps. Apps size their GPU
+allocations from the working set, so only override it to match the card's real memory.
+Both can be overridden per launch:
+
+```sh
+DARLING_METAL_GPU_NAME='AMD Radeon Pro 5500M' DARLING_METAL_VRAM_MB=4096 ./scripts/run.sh
+```
+
+`registryID` is a fixed non-zero value, as on a real Mac.
+
 ### Host-side checks
 
 These are host settings, not game settings. Run on AC power, and use a performance power profile (`powerprofilesctl set performance`, or `asusctl profile -P Performance` on ASUS laptops). On the tested desktop the game is limited mostly by its own main thread on the CPU, not by the GPU (see [status](STATUS.md#game-fps-2026-10-1314)), so laptop CPU power limits matter as much as the GPU choice.

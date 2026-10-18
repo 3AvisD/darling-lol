@@ -49,6 +49,13 @@ int main() {
 	expectName("", MTLDeviceInfo::kFallbackName);
 	expectName(nullptr, MTLDeviceInfo::kFallbackName);
 
+	// -[MTLDevice registryID]: never 0, like a real Mac.
+	{
+		bool ok = MTLDeviceInfo::kDefaultRegistryID != 0;
+		failures += !ok;
+		std::printf("%s registry ID is non-zero\n", ok ? "PASS" : "FAIL");
+	}
+
 	// DARLING_METAL_GPU_NAME override.
 	{
 		bool ok = MTLDeviceInfo::resolveName("My GPU", "AMD Radeon RX 6800 XT (RADV NAVI21)") == "My GPU"
