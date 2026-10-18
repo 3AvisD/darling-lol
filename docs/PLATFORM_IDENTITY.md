@@ -90,7 +90,12 @@ python3 tools/configure-darling-platform.py --prefix /absolute/prefix --provisio
 
 Launch Darling normally afterwards. This requires the updated iokitd from this
 PR; the config tool alone cannot update an older running daemon. Provisioning
-is never called automatically by installation or launch.
+is never called automatically by installation or launch. The one exception is
+`scripts/update.sh`: after installing, it runs
+`configure-darling-platform.py --replace-known-defaults --write`, which
+provisions the prefix only if its saved identity still contains the shared
+serial or UUID below. Prefixes without saved identity files, or whose saved
+values are all custom, are left byte-for-byte unchanged.
 
 Missing serials use 12 characters and missing MLBs use 17 characters, sampled
 with Python's `secrets` module from `0123456789ABCDEFGHJKLMNPQRSTUVWXYZ` (Base-34).
@@ -106,7 +111,8 @@ example with your chosen unicast OUI). It only affects a missing ROM. An OUI
 does not make a generated identity Apple-issued.
 
 Provisioning replaces the known shared serial `C02ZL0GVMD6N` and UUID
-`6F3B2A1E-8C4D-4E5F-9A7B-1D2C3E4F5A6B`, along with the latter's derived fields.
+`6F3B2A1E-8C4D-4E5F-9A7B-1D2C3E4F5A6B`, along with the latter's derived fields
+(including a standalone `system-id` or `provisioning_UDID` derived from it).
 It preserves other existing custom values, including imported serials and UUIDs
 that do not follow the generated formats. A standalone custom `system-id` is
 preserved by deriving its UUID instead of generating a different one. Model,
