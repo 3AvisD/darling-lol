@@ -126,6 +126,7 @@ int main() {
         poll = sources.function(source, 'Indium::PrivateDevice::pollEvents')
         harness = '''
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cassert>
 #include <cstdint>
@@ -159,6 +160,8 @@ public:
     std::mutex _pollingMutex, _eventLoopMutex;
     int _device=0;
     uint64_t _completionSpinNanoseconds=1000000;
+    std::atomic<uint64_t> _eventLoopRegistrations {0};
+    std::atomic<unsigned> _eventLoopBlockedPollers {0};
     std::vector<VkSemaphore> _eventLoopSemaphores={1};
     std::vector<uint64_t> _eventLoopWaitValues={1};
     std::vector<std::function<void()>> _eventLoopCallbacks={nullptr};

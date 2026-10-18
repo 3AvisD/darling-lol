@@ -269,6 +269,11 @@ Compare matches on the same map: Bilgewater runs a few percent below Hexgate.
 
 On Hyprland, also check that direct scanout is off (`hyprctl getoption render:direct_scanout` prints `int: 0`). The first match with it off ran about 16 FPS faster than the previous one on the same build; see the next section.
 
+On the NVIDIA proprietary driver, check the submit worker's kernel time: a thread of the game process spending most of its time in the kernel (`/proc/<pid>/task/<tid>/stat` system time, or `perf trace -s -p <pid>`) points at driver calls. Each `vkQueueSubmit2` and each CPU-side `vkSignalSemaphore` is an RM control ioctl (command `0xc020462a`) that queues on a driver-wide lock. Before 2026-10-18 every command buffer signalled the event loop's wake-up semaphore, ~25 times per frame; with lazy wake-ups (default) and a 5 ms batch window (`/tmp/metal-submit-batch-us` = `5000`, `/tmp/metal-submit-batch-max` = `64`) an RTX 4090 ran at 206–552 FPS against 91–147 FPS with `/tmp/metal-no-lazy-wakeup`, in alternating 20 s phases of one match (the later phases with wake-ups on were capped at 240 FPS) (see [setup](SETUP.md#metal-and-indium-overlays)).
+
+The NVIDIA performance figures above were reported on an earlier runtime base;
+they have not been remeasured after integration with current `main`.
+
 ## Hybrid graphics laptops (AMD/Intel iGPU + NVIDIA)
 
 Metal renders with Vulkan, and each finished frame is handed to an OpenGL (EGL) context that presents it. The hand-off uses opaque file descriptors, which only work when Vulkan and OpenGL run on the same GPU. Indium takes the first Vulkan device the loader lists, and on a hybrid laptop both that device and the EGL context are normally the integrated GPU, so the discrete GPU stays idle. A report in [issue #3](https://github.com/lucannez64/darling-lol/issues/3) (Ryzen 9 5900HS, RTX 3060 Laptop) measured 60-70 FPS in ARAM on the integrated GPU; on the NVIDIA GPU the game showed a black screen. **Running on an NVIDIA GPU is not validated.**
