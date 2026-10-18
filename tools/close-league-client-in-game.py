@@ -49,7 +49,7 @@ KILL_GRACE = 2.0
 POLL_SECONDS = 5.0
 COOLDOWN_SECONDS = 30.0  # minimum between two closes in the same match
 MAX_CLOSES = 3           # give up on a client that keeps reopening during a match
-IDLE_SECONDS = 600.0     # leave after this long without a client or a game
+IDLE_SECONDS = 600.0     # leave after this long without a client or a game, once one was seen
 
 
 def target_prefix():
@@ -165,6 +165,20 @@ def close_decision(state, closes, last_close, now):
     return 'close'
 
 
+def update_idle(state, seen, idle_since, now):
+    """Return (seen, idle_since) after one observation.
+
+    The idle clock only starts once a client UI or a match has been seen: a long
+    patch or login can keep the League client closed for more than IDLE_SECONDS
+    after launch, and leaving then would skip the match that follows.
+    """
+    active = state['game'] or bool(state['ui'])
+    seen = seen or active
+    if active or not seen:
+        return seen, None
+    return seen, now if idle_since is None else idle_since
+
+
 def supervise(proc_root=Path('/proc'), prefix=None, once=False, dry_run=False, out=sys.stdout):
     """Watch for a match and close the client UI while it runs."""
     prefix = prefix or target_prefix()
@@ -177,6 +191,7 @@ def supervise(proc_root=Path('/proc'), prefix=None, once=False, dry_run=False, o
     closes = 0
     last_close = 0.0
     limit_reported = False
+    seen = False
     idle_since = None
     while True:
         state = match_state(proc_root, prefix)
@@ -215,11 +230,7 @@ def supervise(proc_root=Path('/proc'), prefix=None, once=False, dry_run=False, o
                               'running match (%d processes: %s)'
                               % (len(closed), ','.join(sorted(closed, key=int))),
                               file=out, flush=True)
-            idle = not state['game'] and not state['ui']
-            if idle and idle_since is None:
-                idle_since = now
-            elif not idle:
-                idle_since = None
+            seen, idle_since = update_idle(state, seen, idle_since, now)
         if once:
             if state is not None:
                 print('close-league-client-in-game: one observation: match=%s client_ui=%d'
