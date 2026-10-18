@@ -3,6 +3,30 @@
 import os
 from pathlib import Path
 
+# Crash handlers do not exit after their clients under Darling, so a mapping by
+# one of them alone does not mean that a client still uses the prefix.
+CRASH_HANDLERS = {'RiotClientCrashHandler', 'LeagueCrashHandler', 'chrome_crashpad_handler'}
+
+
+def crash_handler(process):
+    executable = (process / 'cmdline').read_bytes().split(b'\0', 1)[0]
+    return os.path.basename(executable.decode(errors='replace')) in CRASH_HANDLERS
+
+
+def server_running(prefix):
+    """Whether the prefix marker names a live (not zombie) process."""
+    try:
+        pid = int((prefix / '.init.pid').read_text().strip())
+    except FileNotFoundError:
+        return False
+    if pid <= 0:
+        return False
+    try:
+        status = (Path('/proc') / str(pid) / 'status').read_text()
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+    return not any(line.startswith('State:') and line.split()[1] == 'Z' for line in status.splitlines())
+
 
 def client_active(prefix, *, processes=None):
     """Check exact-prefix mappings; only vanished processes may be skipped."""
@@ -22,7 +46,7 @@ def client_active(prefix, *, processes=None):
             if processes is None and (process / 'uid_map').read_text() != namespace_map:
                 continue
             mappings = (process / 'maps').read_text()
-            if any(path in mappings for path in paths):
+            if any(path in mappings for path in paths) and not crash_handler(process):
                 return True
         except (FileNotFoundError, ProcessLookupError):
             # Process exited between enumeration and inspection.
@@ -35,20 +59,13 @@ def client_active(prefix, *, processes=None):
 def main():
     prefix = Path(os.environ.get('DPREFIX', str(Path.home() / '.darling'))).resolve()
     try:
-        pid = int((prefix / '.init.pid').read_text().strip())
-    except FileNotFoundError:
-        pid = 0
-    except (OSError, ValueError):
+        running = server_running(prefix)
+    except ValueError:
         raise SystemExit('Cannot validate prefix server marker; inspect it before maintenance.')
-    if pid > 0:
-        try:
-            status = (Path('/proc') / str(pid) / 'status').read_text()
-            if not any(line.startswith('State:') and line.split()[1] == 'Z' for line in status.splitlines()):
-                raise SystemExit('Prefix has a live server marker; exit Riot/League and run darling shutdown in the ORIGINAL namespace before updating. No process was stopped.')
-        except (FileNotFoundError, ProcessLookupError):
-            pass
-        except OSError as error:
-            raise SystemExit(f'Cannot validate prefix server marker: {error}') from error
+    except OSError as error:
+        raise SystemExit(f'Cannot validate prefix server marker: {error}') from error
+    if running:
+        raise SystemExit('Prefix has a live server marker; exit Riot/League and run darling-lol --stop before updating. No process was stopped.')
     try:
         active = client_active(prefix)
     except (OSError, RuntimeError) as error:
