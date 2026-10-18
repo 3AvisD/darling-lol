@@ -348,6 +348,27 @@ with sway/Xwayland using CPU readback. The initial polling change improved their
 reported rate from about 20 to 27 FPS. Those observations predate the narrowed
 integration; they do not establish hybrid-GPU or general NVIDIA support.
 
+### NVIDIA 580 (Pascal and older): black game window
+
+Driver 580 is the last branch for Pascal (GTX 10-series) and older GPUs. With
+`__GL_THREADED_OPTIMIZATIONS=1`, this driver with egl-x11 1.0.6 rejects the X11
+`EGLDisplay` with `EGL_BAD_DISPLAY` on every thread that has a context current.
+The display stays valid on other threads, and `eglReleaseThread()` makes it work
+again on the failing one. A small native EGL program outside Darling shows the
+same: `eglQueryString(display, EGL_VENDOR)` after `eglMakeCurrent` returns
+`NVIDIA` without the variable and fails with `EGL_BAD_DISPLAY` with it.
+
+In the Riot client the main thread loses EGL right after its first window frame;
+`CGLCreateContext` then fails with CGL error 10004 and, if another display is
+opened, glvnd hands it to Mesa's software renderer, which cannot present the
+game's NVIDIA Vulkan frames. The launcher therefore leaves threaded optimizations
+off (`__GL_THREADED_OPTIMIZATIONS=0`). Setting the variable to `1` before launch
+restores the old behaviour.
+
+Tested on a GTX 1060 6GB with driver 580.178.04 on NixOS, Hyprland and Xwayland:
+the client and the tutorial match render on the NVIDIA GPU. Newer drivers were not
+retested with the option off.
+
 ### Host-side checks
 
 These are host settings, not game settings. Run on AC power, and use a performance power profile (`powerprofilesctl set performance`, or `asusctl profile -P Performance` on ASUS laptops). On the tested desktop the game is limited mostly by its own main thread on the CPU, not by the GPU (see [status](STATUS.md#game-fps-2026-10-1314)), so laptop CPU power limits matter as much as the GPU choice.
