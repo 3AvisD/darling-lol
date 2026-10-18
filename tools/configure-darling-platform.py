@@ -182,13 +182,23 @@ def save(prefix, properties):
     return atomic_write(destination(prefix), encoded)
 
 
+def has_known_defaults(properties):
+    """True when an identity still carries the shared serial, UUID, or a field derived from that UUID."""
+    return (properties.get('IOPlatformSerialNumber') == KNOWN_SERIAL
+            or str(properties.get('IOPlatformUUID', '')).upper() == KNOWN_UUID
+            or str(properties.get('provisioning_UDID', '')).upper() == KNOWN_UUID
+            or properties.get('system-id') == uuid.UUID(KNOWN_UUID).bytes_le)
+
+
 def provision(properties, rom_oui=None):
     """Fill missing identifiers, replacing only the two known shared defaults."""
     result = validate(properties)
     if result.get('IOPlatformSerialNumber') == KNOWN_SERIAL:
         result.pop('IOPlatformSerialNumber')
-    if result.get('IOPlatformUUID', '').upper() == KNOWN_UUID:
-        result.pop('IOPlatformUUID')
+    if (result.get('IOPlatformUUID', '').upper() == KNOWN_UUID
+            or result.get('provisioning_UDID', '').upper() == KNOWN_UUID
+            or result.get('system-id') == uuid.UUID(KNOWN_UUID).bytes_le):
+        result.pop('IOPlatformUUID', None)
         result.pop('system-id', None)
         result.pop('provisioning_UDID', None)
     for key, length in [('IOPlatformSerialNumber', 12), ('mlb-serial-number', 17)]:
@@ -274,8 +284,14 @@ def main(argv=None):
     parser.add_argument('--provision', action='store_true', help='Generate missing synthetic identifiers and provision prefix metadata')
     parser.add_argument('--runtime-root', type=Path, help='Runtime supplying SystemVersion.plist (default: saved SDK or /usr/local/libexec/darling)')
     parser.add_argument('--rom-oui', help='Explicit three-byte unicast OUI for a missing ROM; default is locally administered')
+    parser.add_argument('--replace-known-defaults', action='store_true',
+                        help='Provision only if the prefix identity still has the shared serial or UUID; otherwise change nothing')
     parser.add_argument('--write', action='store_true', help='Write validated overrides to a stopped prefix (otherwise preview only)')
     args = parser.parse_args(argv)
+    if args.replace_known_defaults:
+        if args.source or args.set:
+            parser.error('--replace-known-defaults cannot be combined with --import or --set')
+        args.provision = True
     config = Path(__file__).resolve().parents[1] / 'build/config.json'
     saved = json.loads(config.read_text()) if config.exists() else {}
     prefix = args.prefix or Path(os.environ.get('DPREFIX') or saved.get('prefix', str(Path.home() / '.darling')))
@@ -288,11 +304,19 @@ def main(argv=None):
             rom_oui = bytes.fromhex(args.rom_oui.replace(':', '').replace('-', ''))
             if len(rom_oui) != 3 or rom_oui[0] & 1:
                 raise ValueError('--rom-oui requires exactly three unicast bytes')
+        identity_files = [checked_path(prefix, 'private/etc/darling-smbios.conf'), destination(prefix)]
+        if args.replace_known_defaults and not any(path.exists() for path in identity_files):
+            print('No saved platform identity; nothing to replace.')
+            return 0
         with prefix_lock(prefix) if args.write else nullcontext():
             path = destination(prefix)
             properties = {}
+            if args.replace_known_defaults and not any(
+                    path.exists() and has_known_defaults(load(path)) for path in identity_files):
+                print('Platform identity has no shared defaults; nothing changed.')
+                return 0
             if args.provision:
-                legacy = checked_path(prefix, 'private/etc/darling-smbios.conf')
+                legacy = identity_files[0]
                 if legacy.exists():
                     properties.update(load(legacy))
             if path.exists():

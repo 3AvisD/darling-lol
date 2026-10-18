@@ -16,6 +16,9 @@ if [ -d build/venv/bin ]; then PATH="$repo/build/venv/bin:$PATH"; export PATH; f
 # A server killed by the base install leaves a stale .init.pid that makes darling shell fail.
 python3 build/runtime/tools/ensure-darling-runtime.py
 # Initialize the normal user-owned prefix before installing overrides.
+# Darling treats a missing prefix directory as new; only then is an identity generated below.
+new_prefix=
+[ -e "$prefix_dir" ] || new_prefix=1
 darling shell /usr/bin/true
 # The prefix has no /private/tmp of its own, so the guest falls through to the root-owned
 # installed layer and every write there (the Riot installer's temp files) fails with EACCES.
@@ -26,6 +29,12 @@ chmod 1777 "$prefix/private/tmp"
 python3 build/runtime/tools/ensure-darling-root-certificates.py || \
   echo 'Darling system root store not installed; the launcher retries it' >&2
 python3 build/runtime/tools/stop-darling-runtime.py
+# Give a new prefix its own synthetic serial, MLB, UUID and ROM instead of the host-derived defaults.
+# Existing prefixes keep their identity; update.sh only replaces the old shared serial and UUID.
+if [ -n "$new_prefix" ]; then
+  python3 tools/configure-darling-platform.py --prefix "$prefix_dir" --provision --write || \
+    echo 'Platform identity not provisioned; run tools/configure-darling-platform.py --provision --write' >&2
+fi
 sh build/runtime/tools/install-riot-presentation-runtime.sh
 sh build/runtime/tools/install-riot-gpu-runtime.sh
 # darling-lol perf: build and install optimized libc/libc++/libplatform.

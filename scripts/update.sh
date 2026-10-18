@@ -7,6 +7,13 @@
 set -eu
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo"
+# Older setups shipped one serial and UUID shared by every install. Give a prefix that still
+# has them its own identity; any other saved values, and prefixes without them, are left alone.
+replace_shared_identity() {
+  python3 build/runtime/tools/stop-darling-runtime.py
+  python3 tools/configure-darling-platform.py --replace-known-defaults --write || \
+    echo 'Could not replace the shared platform identity; run tools/configure-darling-platform.py --provision --write' >&2
+}
 if [ -n "${DARLING_WORKSPACE:-}" ]; then
   python3 scripts/nix-idle.py
   # Initial setup and upgrades use the same supported user-owned install path.
@@ -21,6 +28,7 @@ if [ -n "${DARLING_WORKSPACE:-}" ]; then
   cmake --install build/darling-src/build
   python3 scripts/nix-state.py stamp-base
   ./scripts/install-runtime.sh
+  replace_shared_identity
   echo 'Rootless update installed. In this shell use scripts/run.sh; otherwise exit this shell and start darling-lol.'
   exit 0
 fi
@@ -45,4 +53,5 @@ PY
 python3 build/runtime/tools/stop-darling-runtime.py
 sudo cmake --install build/darling-src/build
 ./scripts/install-runtime.sh
+replace_shared_identity
 echo 'Update installed. Start Darling with: sh scripts/run.sh'
