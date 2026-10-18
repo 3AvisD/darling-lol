@@ -48,8 +48,29 @@ int main(void) {
     XEvent map={0};map.type=KeymapNotify;[display postXEvent:&map];expectModifier(0x37,0);
     key(display,KeyPress,66,0);expectModifier(0x39,NSAlphaShiftKeyMask);
     key(display,KeyRelease,66,LockMask);expectModifier(0x39,NSAlphaShiftKeyMask);
+    // GNOME overview: Super press delivered, release swallowed, no focus change.
+    // The next event's server state lacks Mod4, so Command must be released first.
+    key(display,KeyPress,133,LockMask);expectModifier(0x37,NSAlphaShiftKeyMask|NSCommandKeyMask);
+    NSUInteger before=[events count];
+    key(display,KeyPress,50,LockMask);
+    assert([events count]==before+2);
+    NSEvent *released=[events objectAtIndex:before];
+    assert([released keyCode]==0x37 && [released modifierFlags]==NSAlphaShiftKeyMask);
+    expectModifier(0x38,NSAlphaShiftKeyMask|NSShiftKeyMask);
+    // A modifier that is still held stays held.
+    key(display,KeyPress,133,LockMask|ShiftMask);expectModifier(0x37,NSAlphaShiftKeyMask|NSShiftKeyMask|NSCommandKeyMask);
+    before=[events count];
+    key(display,KeyRelease,50,LockMask|ShiftMask|Mod4Mask);
+    assert([events count]==before+1);
+    expectModifier(0x38,NSAlphaShiftKeyMask|NSCommandKeyMask);
+    // Right Alt reports Mod1 on layouts without AltGr; that still counts as held.
+    key(display,KeyPress,108,LockMask|Mod4Mask);
+    before=[events count];
+    key(display,KeyRelease,133,LockMask|Mod4Mask|Mod1Mask);
+    assert([events count]==before+1);
+    expectModifier(0x37,NSAlphaShiftKeyMask|NSAlternateKeyMask|NSFunctionKeyMask);
     method_setImplementation(method,original);
-    puts("PASS Super=Command, Alt=Option, both Command keys, post-transition flags, focus-loss release, missed-release reconciliation, Caps Lock");
+    puts("PASS Super=Command, Alt=Option, both Command keys, post-transition flags, focus-loss release, missed-release reconciliation, Caps Lock, swallowed Super release");
     [events release];
  }
  return 0;

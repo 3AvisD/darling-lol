@@ -2687,7 +2687,7 @@ index 18189404..12cde429 100644
 +- (NSRect) frameForRootRect: (NSRect) rect;
  @end
 diff --git a/AppKit/X11.backend/X11Display.m b/AppKit/X11.backend/X11Display.m
-index 5ae29bf4..47fb6552 100644
+index 5ae29bf4..a4a880b0 100644
 --- a/AppKit/X11.backend/X11Display.m
 +++ b/AppKit/X11.backend/X11Display.m
 @@ -48,12 +48,271 @@
@@ -3575,7 +3575,7 @@ index 5ae29bf4..47fb6552 100644
  }
  
  - (NSEventModifierFlags) modifierFlagsForState: (unsigned int) state {
-@@ -1010,17 +1625,96 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1010,17 +1625,136 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
      return result;
  }
  
@@ -3620,6 +3620,28 @@ index 5ae29bf4..47fb6552 100644
 +    }
 +}
 +
++/* A compositor can eat a modifier release without moving focus: GNOME's
++ * overview delivers Super's press, swallows its release and hands the
++ * keyboard back with no FocusOut, leaving Command held in the guest. Every
++ * input event carries the server's modifier state, so release any key we
++ * think is held whose modifier is missing there. `except` is the key of a
++ * modifier event, whose state predates its own transition. */
++- (void) releaseModifierKeysMissingFromState:(unsigned int)state except:(unsigned int)except window:(id)delegate {
++    static const unsigned char keys[] = { 50, 62, 37, 105, 64, 108, 133, 134 };
++    for (unsigned int i = 0; i < sizeof(keys); ++i) {
++        unsigned int key = keys[i];
++        if (key == except || !_modifierKeysDown[key]) continue;
++        unsigned int held = rclolModifierMask(key);
++        if (key == 108) held |= Mod1Mask; /* Right Alt is Mod1 on layouts without AltGr. */
++        if (state & held) continue;
++        _modifierKeysDown[key] = 0;
++        unsigned int now = state & ~(ShiftMask | ControlMask | Mod1Mask | Mod4Mask | Mod5Mask);
++        for (unsigned int j = 0; j < sizeof(keys); ++j)
++            if (_modifierKeysDown[keys[j]]) now |= rclolModifierMask(keys[j]);
++        [self postModifierKey:key state:now window:delegate];
++    }
++}
++
  - (void) postXEvent: (XEvent *) ev {
      id event = nil;
      NSEventType type;
@@ -3649,6 +3671,24 @@ index 5ae29bf4..47fb6552 100644
 +    /* Expected warp echoes are among the events queued when the warp was synced; motion ages them itself. */
 +    if (_relativeMouse.active && ev->type != MotionNotify)
 +        X11RelativeMouseTick(&_relativeMouse);
++
++    /* Events sent by other clients carry whatever state they chose. */
++    switch (ev->xany.send_event ? 0 : ev->type) {
++    case KeyPress: case KeyRelease:
++        [self releaseModifierKeysMissingFromState:ev->xkey.state except:ev->xkey.keycode window:delegate];
++        break;
++    case ButtonPress: case ButtonRelease:
++        [self releaseModifierKeysMissingFromState:ev->xbutton.state except:0 window:delegate];
++        break;
++    case MotionNotify:
++        [self releaseModifierKeysMissingFromState:ev->xmotion.state except:0 window:delegate];
++        break;
++    case EnterNotify: case LeaveNotify:
++        [self releaseModifierKeysMissingFromState:ev->xcrossing.state except:0 window:delegate];
++        break;
++    default:
++        break;
++    }
  
      switch (ev->type) {
      case KeyPress:
@@ -3672,7 +3712,7 @@ index 5ae29bf4..47fb6552 100644
          NSEventModifierFlags modifierFlags = [self modifierFlagsForState: ev->xkey.state];
          char buf[20] = {0};
          KeySym keySym;
-@@ -1030,7 +1724,11 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1030,7 +1764,11 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
              break;
  
          if (ev->type == KeyPress) {
@@ -3685,7 +3725,7 @@ index 5ae29bf4..47fb6552 100644
              buf[strLen] = 0;
          } else {
              // Xutf8LookupString() may not be used with KeyRelease
-@@ -1038,6 +1736,18 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1038,6 +1776,18 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
              buf[strLen] = 0;
          }
  
@@ -3704,7 +3744,7 @@ index 5ae29bf4..47fb6552 100644
          id str = [[NSString alloc] initWithCString: buf
                                            encoding: NSUTF8StringEncoding];
          NSPoint pos =
-@@ -1077,6 +1787,32 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1077,6 +1827,32 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case ButtonPress:;
@@ -3737,7 +3777,7 @@ index 5ae29bf4..47fb6552 100644
          NSTimeInterval now = [[NSDate date] timeIntervalSinceReferenceDate];
  
          if (now - lastClickTimeStamp < [self doubleClickInterval]) {
-@@ -1086,8 +1822,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1086,8 +1862,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          }
          lastClickTimeStamp = now;
  
@@ -3748,7 +3788,7 @@ index 5ae29bf4..47fb6552 100644
  
          switch (ev->xbutton.button) {
          case Button1:
-@@ -1096,10 +1832,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1096,10 +1872,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          case Button3:
              type = NSRightMouseDown;
              break;
@@ -3759,7 +3799,7 @@ index 5ae29bf4..47fb6552 100644
          default:
              type = NSOtherMouseDown;
          }
-@@ -1113,14 +1845,22 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1113,14 +1885,22 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                          clickCount: clickCount
                              deltaX: 0.0
                              deltaY: 0.0];
@@ -3786,7 +3826,7 @@ index 5ae29bf4..47fb6552 100644
          CGFloat deltaY = 0.0;
  
          switch (ev->xbutton.button) {
-@@ -1130,14 +1870,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1130,14 +1910,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          case Button3:
              type = NSRightMouseUp;
              break;
@@ -3801,7 +3841,7 @@ index 5ae29bf4..47fb6552 100644
          default:
              type = NSOtherMouseUp;
          }
-@@ -1151,7 +1883,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1151,7 +1923,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                          clickCount: clickCount
                              deltaX: 0.0
                              deltaY: deltaY];
@@ -3812,7 +3852,7 @@ index 5ae29bf4..47fb6552 100644
          [self postEvent: event atStart: NO];
          break;
  
-@@ -1160,49 +1894,95 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1160,49 +1934,95 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
              // ev->xmotion.x, ev->xmotion.y, ev->xmotion.x_root,
              // ev->xmotion.y_root);
  
@@ -3934,7 +3974,7 @@ index 5ae29bf4..47fb6552 100644
                      mouseEventWithType: type
                                location: pos
                           modifierFlags:
-@@ -1211,28 +1991,58 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1211,28 +2031,58 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                              clickCount: 1
                                  deltaX: deltaX
                                  deltaY: deltaY];
@@ -3995,7 +4035,7 @@ index 5ae29bf4..47fb6552 100644
          NSLog(@"FocusIn");
          if ([delegate attachedSheet]) {
              [[delegate attachedSheet] makeKeyAndOrderFront: delegate];
-@@ -1243,28 +2053,62 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1243,28 +2093,62 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                                   checkForAppDeactivation: NO];
              lastFocusedWindow = nil;
          }
@@ -4060,7 +4100,7 @@ index 5ae29bf4..47fb6552 100644
          O2Rect rect = NSMakeRect(ev->xexpose.x, ev->xexpose.y,
                                   ev->xexpose.width, ev->xexpose.height);
  
-@@ -1301,11 +2145,23 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1301,11 +2185,23 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case UnmapNotify:
@@ -4088,7 +4128,7 @@ index 5ae29bf4..47fb6552 100644
          break;
  
      case MapRequest:
-@@ -1317,10 +2173,21 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1317,10 +2213,21 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case ConfigureNotify:
@@ -4110,7 +4150,7 @@ index 5ae29bf4..47fb6552 100644
          break;
  
      case ConfigureRequest:
-@@ -1344,6 +2211,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1344,6 +2251,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case PropertyNotify:
@@ -4119,7 +4159,7 @@ index 5ae29bf4..47fb6552 100644
          if ([window respondsToSelector: @selector(propertyNotify:)]) {
              [window propertyNotify: &ev->xproperty];
          }
-@@ -1399,7 +2268,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1399,7 +2308,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      default:
@@ -4130,7 +4170,7 @@ index 5ae29bf4..47fb6552 100644
              [self _invalidateRRCache];
              break;
          }
-@@ -1433,6 +2304,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1433,6 +2344,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
      NSLog(@"Request code: %d:%d", errorEvent->request_code,
            errorEvent->minor_code);
      NSLog(@"Error code: %d", errorEvent->error_code);
@@ -4141,7 +4181,7 @@ index 5ae29bf4..47fb6552 100644
      return 0;
  }
  
-@@ -1476,54 +2351,279 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
+@@ -1476,54 +2391,279 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
      return frame;
  }
  
@@ -4194,8 +4234,8 @@ index 5ae29bf4..47fb6552 100644
 -                 position.x, position.y);
 -    XSync(_display, False);
 +    [self warpPointerToRootX: x y: y];
-+}
-+
+ }
+ 
 +/* Confinement preserves absolute motion and edge panning. Relative mode holds
 + * its own grab and is left alone while requested. */
 +- (void) updateMouseConfinementForWindow:(X11Window *)window {
@@ -4382,8 +4422,8 @@ index 5ae29bf4..47fb6552 100644
 +    X11RelativeMouseEnd(&_relativeMouse);
 +    _relativeWindow = None;
 +    rclolPointerStamp = 0;
- }
- 
++}
++
 +/* CGAssociateMouseAndMouseCursorPosition(!doGrab). */
  - (void) grabMouse: (BOOL) doGrab {
 +    BOOL rclolRelativeBefore = _relativeMouse.active;
