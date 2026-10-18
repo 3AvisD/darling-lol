@@ -1377,7 +1377,7 @@ index c3f5d056..dbd93174 100644
          @"NSTouchBarItemIdentifierCharacterPicker";
  
 diff --git a/AppKit/NSView.m b/AppKit/NSView.m
-index 8ac2bbdc..08197fbc 100644
+index 8ac2bbdc..a0fb4f37 100644
 --- a/AppKit/NSView.m
 +++ b/AppKit/NSView.m
 @@ -46,6 +46,12 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
@@ -1590,11 +1590,47 @@ index 8ac2bbdc..08197fbc 100644
          }
  
          [_subviews
+@@ -2687,6 +2786,17 @@ static NSView *viewBeingPrinted = nil;
+          slideBack: (BOOL) slideBack
+ {
+     location = [self convertPoint: location toView: nil];
++    if ([NSDraggingManager draggingManager] == nil) {
++        // darling-lol: no drag manager on X11; NSWindow runs the drag in-process.
++        [[self window] dragImage: image
++                              at: location
++                          offset: offset
++                           event: event
++                      pasteboard: pasteboard
++                          source: source
++                       slideBack: slideBack];
++        return;
++    }
+     [[NSDraggingManager draggingManager] dragImage: image
+                                                 at: location
+                                             offset: offset
+@@ -2783,7 +2893,8 @@ static NSView *viewBeingPrinted = nil;
+ }
+ 
+ - (BOOL) prepareForDragOperation: (id<NSDraggingInfo>) sender {
+-    return NO;
++    // darling-lol: AppKit goes ahead when a destination doesn't implement this (Chromium).
++    return YES;
+ }
+ 
+ - (BOOL) performDragOperation: (id<NSDraggingInfo>) sender {
 diff --git a/AppKit/NSWindow.m b/AppKit/NSWindow.m
-index d545120a..b2845478 100644
+index d545120a..79760f47 100644
 --- a/AppKit/NSWindow.m
 +++ b/AppKit/NSWindow.m
-@@ -45,6 +45,21 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+@@ -27,6 +27,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ #import <AppKit/NSEvent_CoreGraphics.h>
+ #import <AppKit/NSGraphics.h>
+ #import <AppKit/NSImage.h>
++#import <AppKit/NSImageView.h>
+ #import <AppKit/NSMainMenuView.h>
+ #import <AppKit/NSMenu.h>
+ #import <AppKit/NSMenuItem.h>
+@@ -45,6 +46,21 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
  #import <AppKit/NSWindowAnimationContext.h>
  #import <ApplicationServices/ApplicationServices.h>
  #import <CoreGraphics/CGWindow.h>
@@ -1616,7 +1652,7 @@ index d545120a..b2845478 100644
  
  const NSNotificationName NSWindowDidBecomeKeyNotification =
          @"NSWindowDidBecomeKeyNotification";
-@@ -204,6 +219,25 @@ NSInteger NSBitsPerPixelFromDepth(NSWindowDepth depth) {
+@@ -204,6 +220,122 @@ NSInteger NSBitsPerPixelFromDepth(NSWindowDepth depth) {
  
  @end
  
@@ -1639,10 +1675,107 @@ index d545120a..b2845478 100644
 +    return view;
 +}
 +
++/* darling-lol: the X11 backend has no NSDraggingManager, so drags run in-process
++ * (see -_localDragImage:...): this is the NSDraggingInfo handed to destinations. */
++@interface _NSLocalDraggingInfo : NSObject <NSDraggingInfo> {
++  @public
++    NSPasteboard *_pasteboard;
++    NSImage *_image;
++    id _source;
++    NSWindow *_destinationWindow;
++    NSPoint _screenPoint;
++    NSDragOperation _sourceMask;
++}
++@end
++
++@implementation _NSLocalDraggingInfo
++
++- (NSPasteboard *) draggingPasteboard {
++    return _pasteboard;
++}
++
++- (NSDragOperation) draggingSourceOperationMask {
++    return _sourceMask;
++}
++
++- (NSPoint) draggingLocation {
++    if (_destinationWindow == nil)
++        return _screenPoint;
++    return [_destinationWindow convertScreenToBase: _screenPoint];
++}
++
++- (NSImage *) draggedImage {
++    return _image;
++}
++
++- (NSPoint) draggedImageLocation {
++    return [self draggingLocation];
++}
++
++- (NSWindow *) draggingDestinationWindow {
++    return _destinationWindow;
++}
++
++- (id) draggingSource {
++    return _source;
++}
++
++- (void) slideDraggedImageTo: (NSPoint) point {
++}
++
++- (int) draggingSequenceNumber {
++    return 0;
++}
++
++- (NSArray *) namesOfPromisedFilesDroppedAtDestination: (NSURL *) destination {
++    return nil;
++}
++
++@end
++
++// Shows the drag image under the pointer. Can't become key, so X11 makes it
++// override-redirect and the window manager leaves it alone.
++@interface _NSDragImageWindow : NSWindow
++@end
++
++@implementation _NSDragImageWindow
++
++- (BOOL) canBecomeKeyWindow {
++    return NO;
++}
++
++- (BOOL) canBecomeMainWindow {
++    return NO;
++}
++
++@end
++
++/* One -nextEventMatchingMask: pass handles a single run loop source, and Chromium
++ * runs one task per pass: during a drag its drop-target replies fall behind.
++ * Run sources until idle (wait == 0) or until the deadline (wait > 0). */
++static void _NSLocalDragRunPending(NSTimeInterval budget, BOOL wait) {
++    CFAbsoluteTime deadline = CFAbsoluteTimeGetCurrent() + budget;
++    for (;;) {
++        CFTimeInterval left = deadline - CFAbsoluteTimeGetCurrent();
++        if (left <= 0)
++            break;
++        SInt32 result = CFRunLoopRunInMode(kCFRunLoopDefaultMode, wait ? MIN(left, 0.01) : 0, true);
++        if (!wait && result != kCFRunLoopRunHandledSource)
++            break;
++    }
++}
++
++static BOOL _NSLocalDragTrace(void) {
++    static int trace = -1;
++    if (trace < 0)
++        trace = getenv("DARLING_DRAG_TRACE") != NULL;
++    return trace;
++}
++
  @implementation NSWindow
  
  @synthesize identifier = _identifier;
-@@ -218,7 +252,8 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -218,7 +350,8 @@ static BOOL _allowsAutomaticWindowTabbing;
  /* This method is Cococtron specific and can be override by subclasses, do not
   * change method name */
  + (BOOL) hasMainMenuForStyleMask: (NSWindowStyleMask) styleMask {
@@ -1652,7 +1785,7 @@ index d545120a..b2845478 100644
  }
  
  /* This method is Cococtron specific and can be override by subclasses, do not
-@@ -318,6 +353,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -318,6 +451,7 @@ static BOOL _allowsAutomaticWindowTabbing;
          [NSApplication sharedApplication];
      }
      _styleMask = styleMask;
@@ -1660,7 +1793,7 @@ index d545120a..b2845478 100644
      _backingType = backing;
      _isDeferred = defer;
  
-@@ -351,7 +387,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -351,7 +485,7 @@ static BOOL _allowsAutomaticWindowTabbing;
      [_backgroundView _setWindow: self];
      [_backgroundView setNextResponder: self];
  
@@ -1669,7 +1802,7 @@ index d545120a..b2845478 100644
      _contentView = [[NSView alloc] initWithFrame: contentViewFrame];
      [_contentView setAutoresizesSubviews: YES];
      [_contentView
-@@ -399,6 +435,8 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -399,6 +533,8 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (void) dealloc {
@@ -1678,7 +1811,7 @@ index d545120a..b2845478 100644
      [[NSNotificationCenter defaultCenter] removeObserver: self];
      [_childWindows release];
      [_title release];
-@@ -934,6 +972,22 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -934,6 +1070,22 @@ static BOOL _allowsAutomaticWindowTabbing;
      return _animationContext;
  }
  
@@ -1701,7 +1834,7 @@ index d545120a..b2845478 100644
  - (void) setFrame: (NSRect) newFrame
            display: (BOOL) display
            animate: (BOOL) animate
-@@ -944,8 +998,19 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -944,8 +1096,19 @@ static BOOL _allowsAutomaticWindowTabbing;
      _frame = newFrame;
      _makeSureIsOnAScreen = YES;
  
@@ -1722,7 +1855,7 @@ index d545120a..b2845478 100644
  
      if (didSize) {
          [self resetCursorRects];
-@@ -1025,7 +1090,34 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1025,7 +1188,34 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (void) setMovable: (BOOL) movable {
@@ -1758,7 +1891,7 @@ index d545120a..b2845478 100644
  }
  
  - (void) setBackingType: (NSBackingStoreType) value {
-@@ -1234,6 +1326,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1234,6 +1424,7 @@ static BOOL _allowsAutomaticWindowTabbing;
  
  - (void) setIgnoresMouseEvents: (BOOL) value {
      _ignoresMouseEvents = value;
@@ -1766,7 +1899,7 @@ index d545120a..b2845478 100644
  }
  
  - (void) setAspectRatio: (NSSize) value {
-@@ -1413,8 +1506,14 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1413,8 +1604,14 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (NSButton *) standardWindowButton: (NSWindowButton) value {
@@ -1783,7 +1916,7 @@ index d545120a..b2845478 100644
  }
  
  - (NSButtonCell *) defaultButtonCell {
-@@ -1425,6 +1524,17 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1425,6 +1622,17 @@ static BOOL _allowsAutomaticWindowTabbing;
      return [_sheetContext sheet];
  }
  
@@ -1801,7 +1934,7 @@ index d545120a..b2845478 100644
  - (id) windowController {
      return _windowController;
  }
-@@ -1511,10 +1621,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1511,10 +1719,7 @@ static BOOL _allowsAutomaticWindowTabbing;
      return [_platformWindow isMiniaturized];
  }
  
@@ -1813,7 +1946,7 @@ index d545120a..b2845478 100644
  
  - (BOOL) inLiveResize {
      return _isInLiveResize;
-@@ -1561,6 +1668,117 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1561,6 +1766,117 @@ static BOOL _allowsAutomaticWindowTabbing;
      return point;
  }
  
@@ -1931,7 +2064,7 @@ index d545120a..b2845478 100644
  - (NSRect) frameRectForContentRect: (NSRect) contentRect {
      // hasMainMenu is an instance method so we can't just use the class method
      //  frameRectForContentRect:styleMask:
-@@ -1580,6 +1798,10 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1580,6 +1896,10 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (NSRect) contentRectForFrameRect: (NSRect) frameRect {
@@ -1942,7 +2075,7 @@ index d545120a..b2845478 100644
      NSRect result = [[NSDisplay currentDisplay] insetRect: frameRect
                             forNativeWindowBorderWithStyle: [self styleMask]];
  
-@@ -2155,6 +2377,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2155,6 +2475,7 @@ static BOOL _allowsAutomaticWindowTabbing;
  - (void) orderWindow: (NSWindowOrderingMode) place
            relativeTo: (NSInteger) relativeTo
  {
@@ -1950,7 +2083,7 @@ index d545120a..b2845478 100644
      // The move notifications are sent under unknown conditions around
      // orderFront: in the Apple AppKit, we do them all the time here until it's
      // figured out. I suspect it is a side effect of off-screen windows being at
-@@ -2208,6 +2431,8 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2208,6 +2529,8 @@ static BOOL _allowsAutomaticWindowTabbing;
          break;
      }
  
@@ -1959,7 +2092,7 @@ index d545120a..b2845478 100644
      [self postNotificationName: NSWindowDidMoveNotification];
  }
  
-@@ -2257,6 +2482,12 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2257,6 +2580,12 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (void) sendEvent: (NSEvent *) event {
@@ -1972,7 +2105,7 @@ index d545120a..b2845478 100644
      // Some events can cause our window to be destroyed
      // So make sure self lives at least through this current run loop...
      [[self retain] autorelease];
-@@ -2300,6 +2531,10 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2300,6 +2629,10 @@ static BOOL _allowsAutomaticWindowTabbing;
  
      case NSLeftMouseDown: {
          NSView *view = [_backgroundView hitTest: [event locationInWindow]];
@@ -1983,7 +2116,7 @@ index d545120a..b2845478 100644
  
          if ([view acceptsFirstResponder]) {
              if ([view needsPanelToBecomeKey]) {
-@@ -2307,6 +2542,27 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2307,6 +2640,27 @@ static BOOL _allowsAutomaticWindowTabbing;
              }
          }
  
@@ -2011,7 +2144,7 @@ index d545120a..b2845478 100644
          // Event goes to view, not first responder.
          [view mouseDown: event];
          _mouseDownLocationInWindow = [event locationInWindow];
-@@ -2330,6 +2586,31 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2330,6 +2684,31 @@ static BOOL _allowsAutomaticWindowTabbing;
          _mouseDownLocationInWindow = NSMakePoint(NAN, NAN);
          break;
  
@@ -2043,7 +2176,209 @@ index d545120a..b2845478 100644
      case NSMouseMoved: {
          NSView *hit = [_backgroundView hitTest: [event locationInWindow]];
  
-@@ -2536,6 +2817,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2478,6 +2857,190 @@ static BOOL _allowsAutomaticWindowTabbing;
+     _draggedTypes = nil;
+ }
+ 
++// The registered drag destination under screenPoint in this window, if any.
++- (NSView *) _localDragDestinationAt: (NSPoint) screenPoint types: (NSArray *) types {
++    NSView *root = [self contentView];
++    while ([root superview] != nil)
++        root = [root superview];
++    NSView *view = [root hitTest: [self convertScreenToBase: screenPoint]];
++    while (view != nil && [[view registeredDraggedTypes] firstObjectCommonWithArray: types] == nil)
++        view = [view superview];
++    return view;
++}
++
++/* darling-lol: drag loop for backends without an NSDraggingManager (X11). Covers drags
++ * between this app's own windows; nothing crosses to other X clients. Like AppKit's,
++ * it returns once the drag is over and always ends with -draggedImage:endedAt:operation:,
++ * which Chromium waits for before the page takes mouse input again. */
++- (void) _localDragImage: (NSImage *) image
++                      at: (NSPoint) imageLocation
++                   event: (NSEvent *) event
++              pasteboard: (NSPasteboard *) pasteboard
++                  source: (id) source
++{
++    _NSLocalDraggingInfo *info = [[_NSLocalDraggingInfo alloc] init];
++    info->_pasteboard = pasteboard;
++    info->_image = image;
++    info->_source = source;
++    info->_sourceMask = NSDragOperationEvery;
++    if ([source respondsToSelector: @selector(draggingSourceOperationMaskForLocal:)])
++        info->_sourceMask = [source draggingSourceOperationMaskForLocal: YES];
++
++    NSPoint screenPoint;
++    if (event != nil && [event window] != nil)
++        screenPoint = [[event window] convertBaseToScreen: [event locationInWindow]];
++    else
++        screenPoint = [self convertBaseToScreen: [self mouseLocationOutsideOfEventStream]];
++
++    // The image keeps its offset from the pointer, as on macOS.
++    _NSDragImageWindow *imageWindow = nil;
++    NSPoint imageOffset = NSZeroPoint;
++    NSSize imageSize = [image size];
++    if (imageSize.width >= 1 && imageSize.height >= 1) {
++        NSPoint imageOrigin = [self convertBaseToScreen: imageLocation];
++        imageOffset = NSMakePoint(screenPoint.x - imageOrigin.x, screenPoint.y - imageOrigin.y);
++        imageWindow = [[_NSDragImageWindow alloc]
++                initWithContentRect: NSMakeRect(imageOrigin.x, imageOrigin.y, imageSize.width, imageSize.height)
++                          styleMask: NSBorderlessWindowMask
++                            backing: NSBackingStoreBuffered
++                              defer: NO];
++        [imageWindow setReleasedWhenClosed: NO];
++        [imageWindow setIgnoresMouseEvents: YES];
++        [imageWindow setLevel: NSPopUpMenuWindowLevel];
++        [imageWindow setHasShadow: NO];
++        NSImageView *imageView = [[NSImageView alloc]
++                initWithFrame: NSMakeRect(0, 0, imageSize.width, imageSize.height)];
++        [imageView setImage: image];
++        [imageView setImageScaling: NSImageScaleNone];
++        [imageWindow setContentView: imageView];
++        [imageView release];
++        [imageWindow orderFront: nil];
++    }
++
++    NSArray *types = [pasteboard types];
++    id destination = nil;
++    NSDragOperation operation = NSDragOperationNone;
++    BOOL dropped = NO;
++    BOOL moved = YES;
++    const char *ending = "release";
++
++    if (_NSLocalDragTrace())
++        NSLog(@"DRAGTRACE start at %.0f,%.0f window=%@ image=%.0fx%.0f mask=0x%lx types=%@",
++              screenPoint.x, screenPoint.y, [self className], imageSize.width, imageSize.height,
++              (unsigned long) info->_sourceMask, types);
++
++    for (;;) {
++        if (moved) {
++            NSWindow *window = nil;
++            if (NSPointInRect(screenPoint, [self frame]))
++                window = self;
++            else {
++                for (NSWindow *candidate in [NSApp orderedWindows]) {
++                    if (candidate != imageWindow && [candidate isVisible] &&
++                        NSPointInRect(screenPoint, [candidate frame])) {
++                        window = candidate;
++                        break;
++                    }
++                }
++            }
++            info->_screenPoint = screenPoint;
++            info->_destinationWindow = window;
++            NSView *view = [window _localDragDestinationAt: screenPoint types: types];
++
++            if (view != destination) {
++                if ([destination respondsToSelector: @selector(draggingExited:)])
++                    [destination draggingExited: info];
++                destination = view;
++                operation = NSDragOperationNone;
++                if ([destination respondsToSelector: @selector(draggingEntered:)])
++                    operation = [destination draggingEntered: info];
++                if (_NSLocalDragTrace())
++                    NSLog(@"DRAGTRACE destination %@ at %.0f,%.0f operation=0x%lx", [view className],
++                          screenPoint.x, screenPoint.y, (unsigned long) operation);
++            } else if ([destination respondsToSelector: @selector(draggingUpdated:)]) {
++                operation = [destination draggingUpdated: info];
++            }
++            [imageWindow setFrameOrigin: NSMakePoint(screenPoint.x - imageOffset.x,
++                                                     screenPoint.y - imageOffset.y)];
++            if ([source respondsToSelector: @selector(draggedImage:movedTo:)])
++                [source draggedImage: image movedTo: screenPoint];
++            _NSLocalDragRunPending(0.008, NO);
++        }
++        if (dropped)
++            break;
++
++        // Short timeout: the wait below doesn't wake for run loop sources, and
++        // a release delivered before the loop started never shows up as an event.
++        NSEvent *next = [NSApp nextEventMatchingMask: NSLeftMouseUpMask | NSLeftMouseDraggedMask |
++                                                      NSMouseMovedMask | NSKeyDownMask
++                                           untilDate: [NSDate dateWithTimeIntervalSinceNow: 0.05]
++                                              inMode: NSDefaultRunLoopMode
++                                             dequeue: YES];
++        moved = NO;
++        if (next == nil) {
++            NSUInteger buttons = [NSEvent pressedMouseButtons];
++            if ((buttons & 1) == 0) {
++                dropped = moved = YES;
++                ending = "button up, no event";
++            }
++            continue;
++        }
++        if ([next type] == NSKeyDown) {
++            if ([next keyCode] == 53 || [[next characters] isEqual: @"\033"]) {
++                ending = "escape";
++                break;
++            }
++            continue;
++        }
++        if ([next window] != nil)
++            screenPoint = [[next window] convertBaseToScreen: [next locationInWindow]];
++        else
++            screenPoint = [next locationInWindow];
++        moved = YES;
++        if (_NSLocalDragTrace())
++            NSLog(@"DRAGTRACE event type=%d window=%@ at %.0f,%.0f", (int) [next type],
++                  [[next window] className], screenPoint.x, screenPoint.y);
++        if ([next type] == NSLeftMouseUp)
++            dropped = YES;
++    }
++
++    [imageWindow orderOut: nil];
++    [imageWindow release];
++
++    // The operation for the release point arrives asynchronously (Chromium):
++    // let it come in, then ask again.
++    if (dropped && [destination respondsToSelector: @selector(draggingUpdated:)]) {
++        _NSLocalDragRunPending(0.1, YES);
++        operation = [destination draggingUpdated: info];
++        if (_NSLocalDragTrace())
++            NSLog(@"DRAGTRACE release operation=0x%lx", (unsigned long) operation);
++    }
++
++    BOOL performed = NO;
++    if (dropped && destination != nil && operation != NSDragOperationNone) {
++        performed = YES;
++        if ([destination respondsToSelector: @selector(prepareForDragOperation:)])
++            performed = [destination prepareForDragOperation: info];
++        if (performed)
++            performed = [destination respondsToSelector: @selector(performDragOperation:)] &&
++                        [destination performDragOperation: info];
++        if (performed && [destination respondsToSelector: @selector(concludeDragOperation:)])
++            [destination concludeDragOperation: info];
++    } else if ([destination respondsToSelector: @selector(draggingExited:)]) {
++        [destination draggingExited: info];
++    }
++    if (!performed)
++        operation = NSDragOperationNone;
++
++    if (_NSLocalDragTrace())
++        NSLog(@"DRAGTRACE end (%s) at %.0f,%.0f destination=%@ performed=%d operation=0x%lx", ending,
++              screenPoint.x, screenPoint.y, [destination className], performed, (unsigned long) operation);
++
++    if ([source respondsToSelector: @selector(draggedImage:endedAt:operation:)])
++        [source draggedImage: image endedAt: screenPoint operation: operation];
++    [info release];
++}
++
+ - (void) dragImage: (NSImage *) image
+                 at: (NSPoint) location
+             offset: (NSSize) offset
+@@ -2486,6 +3049,10 @@ static BOOL _allowsAutomaticWindowTabbing;
+             source: (id) source
+          slideBack: (BOOL) slideBack
+ {
++    if ([NSDraggingManager draggingManager] == nil) {
++        [self _localDragImage: image at: location event: event pasteboard: pasteboard source: source];
++        return;
++    }
+     [[NSDraggingManager draggingManager] dragImage: image
+                                                 at: location
+                                             offset: offset
+@@ -2536,6 +3103,7 @@ static BOOL _allowsAutomaticWindowTabbing;
      } else {
          [[self platformWindow] hideWindow];
      }
@@ -2051,7 +2386,7 @@ index d545120a..b2845478 100644
  }
  
  - (void) orderFront: (id) sender {
-@@ -3064,6 +3346,13 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -3064,6 +3632,13 @@ static BOOL _allowsAutomaticWindowTabbing;
      if (didSize) {
          // Don't redraw everything unless we really have to.
          [_backgroundView setFrameSize: _frame.size];
@@ -2065,7 +2400,7 @@ index d545120a..b2845478 100644
          [_backgroundView setNeedsDisplay: YES];
          [self resetCursorRects];
          [self saveFrameUsingName: _autosaveFrameName];
-@@ -3260,8 +3549,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -3260,8 +3835,7 @@ static BOOL _allowsAutomaticWindowTabbing;
                  mouseWasInside && !mouseIsInside) {
                  [exited addObject: area];
              }
@@ -2075,7 +2410,7 @@ index d545120a..b2845478 100644
                  [moved addObject: area];
              }
              if (options & NSTrackingCursorUpdate && !mouseWasInside &&
-@@ -3459,7 +3747,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -3459,7 +4033,7 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (CGSubWindow *) _createSubWindowWithFrame: (CGRect) frame {
@@ -4130,7 +4465,7 @@ index 411903cc..4b196afd 100644
      NSMutableDictionary<NSPasteboardType, NSData *> *_typeToData;
      NSMutableDictionary<NSPasteboardType, id<NSPasteboardTypeOwner>>
 diff --git a/AppKit/X11.backend/X11Pasteboard.m b/AppKit/X11.backend/X11Pasteboard.m
-index 0e91a5d1..1e4cec1b 100644
+index 0e91a5d1..9feeffa1 100644
 --- a/AppKit/X11.backend/X11Pasteboard.m
 +++ b/AppKit/X11.backend/X11Pasteboard.m
 @@ -18,6 +18,8 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
@@ -4161,17 +4496,39 @@ index 0e91a5d1..1e4cec1b 100644
      if (_typeToData != nil) {
          // Already an owner.
          return;
-@@ -93,7 +94,8 @@ static NSMutableDictionary<NSPasteboardName, X11Pasteboard *> *nameToPboard;
+@@ -78,12 +79,19 @@ static NSMutableDictionary<NSPasteboardName, X11Pasteboard *> *nameToPboard;
+     _changeCount++;
+ }
+ 
++// pasteboardChangedOwner: is optional (Chromium's drag source lacks it); once per owner.
++- (void) notifyOwnersChanged {
++    NSArray *owners = [[NSSet setWithArray: [_typeToOwner allValues]] allObjects];
++    for (id owner in owners) {
++        if ([owner respondsToSelector: @selector(pasteboardChangedOwner:)])
++            [owner pasteboardChangedOwner: self];
++    }
++}
++
+ - (NSInteger) clearContents {
+     [self ensureSelectionOwner];
+ 
+-    for (id owner in [_typeToOwner allValues]) {
+-        [owner pasteboardChangedOwner: self];
+-    }
++    [self notifyOwnersChanged];
+     [_typeToOwner removeAllObjects];
+     [_typeToData removeAllObjects];
+ 
+@@ -93,7 +101,7 @@ static NSMutableDictionary<NSPasteboardName, X11Pasteboard *> *nameToPboard;
  - (void) giveUpSelectionOwner {
      _changeCount++;
  
 -    [self clearContents];
-+    for (id owner in [_typeToOwner allValues])
-+        [owner pasteboardChangedOwner: self];
++    [self notifyOwnersChanged];
  
      [_typeToOwner release];
      _typeToOwner = nil;
-@@ -115,12 +117,47 @@ static NSMutableDictionary<NSPasteboardName, X11Pasteboard *> *nameToPboard;
+@@ -115,12 +123,47 @@ static NSMutableDictionary<NSPasteboardName, X11Pasteboard *> *nameToPboard;
      [super dealloc];
  }
  
@@ -4220,7 +4577,7 @@ index 0e91a5d1..1e4cec1b 100644
  }
  
  + (NSArray<NSString *> *) targetsForType: (NSPasteboardType) type {
-@@ -177,7 +214,7 @@ static NSMutableDictionary<NSPasteboardName, X11Pasteboard *> *nameToPboard;
+@@ -177,7 +220,7 @@ static NSMutableDictionary<NSPasteboardName, X11Pasteboard *> *nameToPboard;
  }
  
  - (NSData *) dataForType: (NSPasteboardType) type {
@@ -4229,7 +4586,7 @@ index 0e91a5d1..1e4cec1b 100644
      if (_typeToOwner != nil) {
          // We're the owner; just fetch the data directly.
          id<NSPasteboardTypeOwner> owner = _typeToOwner[type];
-@@ -185,25 +222,26 @@ static NSMutableDictionary<NSPasteboardName, X11Pasteboard *> *nameToPboard;
+@@ -185,25 +228,26 @@ static NSMutableDictionary<NSPasteboardName, X11Pasteboard *> *nameToPboard;
          return _typeToData[type];
      }
  
@@ -4270,7 +4627,7 @@ index 0e91a5d1..1e4cec1b 100644
  
      NSStringEncoding encoding = NSUnicodeStringEncoding;
      if ([type isEqual: NSStringPboardType]) {
-@@ -252,8 +290,37 @@ static NSMutableDictionary<NSPasteboardName, X11Pasteboard *> *nameToPboard;
+@@ -252,8 +296,37 @@ static NSMutableDictionary<NSPasteboardName, X11Pasteboard *> *nameToPboard;
  }
  
  - (NSArray<NSPasteboardType> *) types {
