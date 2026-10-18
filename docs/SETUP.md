@@ -73,6 +73,17 @@ opts in to Hyprland-only recovery of a default-prefix Riot session with no
 visible window; it is off by default. See [troubleshooting](TROUBLESHOOTING.md#riot-exits-and-league-reports-that-it-lost-its-connection)
 for the observed failures, recovery guards and NSURLSession limitations.
 
+`RCLOL_FILTER_HOST_ENV=1` opts in to removing host desktop-session variables before
+the guest starts: `WAYLAND_DISPLAY`, `XDG_SESSION_*`, `XDG_CURRENT_DESKTOP`,
+GNOME/KDE/GDM, systemd, SSH agent, terminal, toolkit (`QT_*`, `GTK_*`, `GDK_*`),
+Flatpak/Snap/AppImage and exported shell functions, and `SHELL` becomes `/bin/zsh`.
+It is off by default. Variables that Darling or the host graphics and audio libraries read
+are always kept: `DISPLAY`, `XAUTHORITY`, `XDG_RUNTIME_DIR` and the XDG base directories,
+D-Bus, PulseAudio/PipeWire/ALSA, `DRI_PRIME`, `MESA_*`, `__GL_*`, `__NV_*`, `VK_*`,
+`LD_PRELOAD` and `LD_LIBRARY_PATH`. List names to keep anyway in `RCLOL_KEEP_HOST_ENV`,
+for example `RCLOL_KEEP_HOST_ENV=WAYLAND_DISPLAY`. The launcher always closes inherited
+file descriptors above stderr before the guest starts.
+
 ## Updating an existing runtime
 
 `./scripts/update.sh` updates everything after `git pull`: `build.sh`, then the base install, then `install-runtime.sh`. When a pull changes a patch, `prepare.py` finds the earlier version applied in that component (its copy in `build/applied-patches`, or a version from this repository's history), reverts it, and applies the new one. It never resets a repository; if neither version matches, it stops and names the repository with other edits. The steps below update single components instead.
