@@ -163,9 +163,9 @@ LaunchServices now opens `http`, `https` and `mailto` links on the Linux desktop
 
 ## Riot client shows "Not Found" instead of its UI
 
-The client window opens but only shows `Not Found`, and its log has `ENOENT, dist/renderer/index.html not found in …/app.asar` although the archive contains that file. Electron cannot hand out a descriptor into `app.asar`, so its asynchronous `fs.open` copies the file to a temporary file first (`copyFileOut`) and reports a failed copy as "not found". Chromium on macOS takes its temporary directory from `NSTemporaryDirectory()`, not `TMPDIR`, and that directory is unusable here, so every copy fails. Synchronous reads such as `fs.readFileSync` do not copy and keep working, which is why the rest of the client starts.
+On affected setups, including the reported NixOS installation, the client window opens but only shows `Not Found`, and its log has `ENOENT, dist/renderer/index.html not found in …/app.asar` although the archive contains that file. Electron's asynchronous file opening can copy an archive entry to a temporary file first (`copyFileOut`), and a failed copy can be reported as "not found". Chromium checks `MAC_CHROMIUM_TMPDIR` before falling back to `NSTemporaryDirectory()`; an unusable default temporary directory can therefore produce this symptom even while synchronous archive reads work.
 
-The launcher sets `MAC_CHROMIUM_TMPDIR=/private/tmp`, which Chromium checks first; `scripts/install-runtime.sh` already creates that guest directory with mode `1777`. To check the archive outside the client, run the client binary as Node (`ELECTRON_RUN_AS_NODE=1`) with a script that calls `fs.createReadStream` on a file inside `app.asar`: it fails without the variable and reads the file with it.
+The launcher defaults `MAC_CHROMIUM_TMPDIR` to `/private/tmp`, preserving a non-empty override. `scripts/install-runtime.sh` creates that guest directory with mode `1777`. Verify directory creation and temporary-file writes with a standalone guest probe, then launch the client normally and check whether its UI loads. Do not run diagnostic scripts through Riot's executable. This workaround addresses temporary-file failures; an actually missing or damaged archive needs separate investigation.
 
 ## Language dropdown closes Riot, or client resize leaves a clipped UI
 
