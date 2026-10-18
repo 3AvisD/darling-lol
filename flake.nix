@@ -10,6 +10,7 @@
     let
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
+      llvmPackages = pkgs.llvmPackages_21;
 
       # Python environment with dependencies required by tooling
       pythonEnv = pkgs.python3.withPackages (
@@ -36,10 +37,9 @@
         gnumake
         ninja
         pkg-config
-        clang
-        lld
-        llvm
-        llvm.dev
+        llvmPackages.clang
+        llvmPackages.lld
+        llvmPackages.llvm
         llvmPackages.clang-unwrapped
         bison
         flex
@@ -54,16 +54,11 @@
 
         # System & core libraries
         glibc
-        glibc.dev
         glibc.static
         zlib
-        zlib.dev
         libffi
-        libffi.dev
         libbsd
-        libbsd.dev
         libmd
-        libmd.dev
         libcap
         libelf
         fuse
@@ -131,8 +126,7 @@
       darlingLolFhs = pkgs.buildFHSEnv {
         name = "darling-lol-fhs";
         targetPkgs = pkgs: buildDeps;
-        multiPkgs = pkgs: [ pkgs.glibc ];
-
+        # multiArch is disabled; glibc is already in targetPkgs and the FHS base.
         extraOutputsToInstall = [ "dev" "out" ];
 
         extraBwrapArgs = [
@@ -143,44 +137,18 @@
         ];
 
         extraBuildCommands = ''
-          mkdir -p bin usr/bin
-          rm -f bin/clang bin/clang++ usr/bin/clang usr/bin/clang++
-          ln -sfn /usr-local $out/usr/local
-          cat << 'EOF' > usr/bin/clang
-#!/usr/bin/env bash
-is_darwin=0
-for a in "$@"; do
-  if [[ "$a" == *darwin* ]] || [[ "$a" == *apple* ]] || [[ "$a" == *macosx* ]]; then
-    is_darwin=1
-    break
-  fi
-done
-if [[ "$is_darwin" -eq 1 ]]; then
-  exec ${pkgs.llvmPackages.clang-unwrapped}/bin/clang "$@"
-else
-  exec ${pkgs.clang}/bin/clang -idirafter /usr/include "$@"
-fi
-EOF
-          chmod +x usr/bin/clang
-
-          cat << 'EOF' > usr/bin/clang++
-#!/usr/bin/env bash
-is_darwin=0
-for a in "$@"; do
-  if [[ "$a" == *darwin* ]] || [[ "$a" == *apple* ]] || [[ "$a" == *macosx* ]]; then
-    is_darwin=1
-    break
-  fi
-done
-if [[ "$is_darwin" -eq 1 ]]; then
-  exec ${pkgs.llvmPackages.clang-unwrapped}/bin/clang++ "$@"
-else
-  exec ${pkgs.clang}/bin/clang++ -idirafter /usr/include "$@"
-fi
-EOF
-          chmod +x usr/bin/clang++
-          cp -f usr/bin/clang bin/clang
-          cp -f usr/bin/clang++ bin/clang++
+          mkdir -p "$out/usr/bin"
+          rm -f "$out/usr/bin/clang" "$out/usr/bin/clang++"
+          ln -sfn /usr-local "$out/usr/local"
+          {
+            printf '%s\n' '#!/bin/sh' \
+              'wrapped=${llvmPackages.clang}/bin' \
+              'unwrapped=${llvmPackages.clang-unwrapped}/bin'
+            cat ${./scripts/nix-compiler.sh}
+          } > "$out/usr/bin/clang"
+          chmod +x "$out/usr/bin/clang"
+          ln -s clang "$out/usr/bin/clang++"
+          # /bin is already a guest-absolute symlink to /usr/bin.
         '';
 
         profile = ''

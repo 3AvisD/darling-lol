@@ -397,8 +397,11 @@ class SessionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='nix-dispatch-test-') as directory:
             root = Path(directory)
             (root / 'scripts').mkdir()
-            for name in ['nix-state.py', 'nix-session.sh']:
+            for name in ['nix-state.py', 'nix-session.sh', 'nix-lifecycle.py']:
                 shutil.copy(ROOT / 'scripts' / name, root / 'scripts' / name)
+            # Keep lifecycle dispatch inert: no real /proc scan or Darling call.
+            (root / 'scripts/nix-idle.py').write_text('def client_active(prefix): return False\n')
+            (root / 'scripts/darling-rootless.sh').write_text('exit 0\n')
             (root / 'usr-local/bin').mkdir(parents=True)
             (root / 'usr-local/bin/darling').write_text('never executed')
             (root / 'usr-local/bin/darlingserver').write_text('never executed')

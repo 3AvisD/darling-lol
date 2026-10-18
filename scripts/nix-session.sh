@@ -27,6 +27,6 @@ if [ "${1:-}" = --installer ] ||
      [ ! -d "$DPREFIX/Users/Shared/Riot Games/Riot Client.app" ]; }; then
   interactive
   read -r -p 'Region [euw]: ' region || exit 1
-  exec ./scripts/installer.sh "${region:-euw}"
+  exec python3 scripts/nix-lifecycle.py ./scripts/installer.sh "${region:-euw}"
 fi
-exec ./scripts/run.sh
+exec python3 scripts/nix-lifecycle.py ./scripts/run.sh
