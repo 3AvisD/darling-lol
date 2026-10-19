@@ -11230,10 +11230,21 @@ index 072a6e2..c804100 100755
  
  echo "No instances running now"
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 8077b7e..0556080 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -236,7 +236,12 @@ InstallSymlink(/Volumes/SystemRoot/usr/share/zoneinfo ${CMAKE_INSTALL_PREFIX}/li
+@@ -204,8 +204,9 @@
+ InstallSymlink(private/etc ${CMAKE_INSTALL_PREFIX}/libexec/darling/etc)
+ InstallSymlink(private/var ${CMAKE_INSTALL_PREFIX}/libexec/darling/var)
+ 
+-install(FILES etc/resolv.conf
+-	DESTINATION libexec/darling/private/etc)
++# Follow the host resolver, including local DNS proxies and network changes.
++# Prefix-local resolver overrides still take precedence over this base symlink.
++InstallSymlink(/Volumes/SystemRoot/etc/resolv.conf ${CMAKE_INSTALL_PREFIX}/libexec/darling/private/etc/resolv.conf)
+ InstallSymlink(/Volumes/SystemRoot/etc/machine-id ${CMAKE_INSTALL_PREFIX}/libexec/darling/private/etc/machine-id)
+ InstallSymlink(/Volumes/SystemRoot/etc/nsswitch.conf ${CMAKE_INSTALL_PREFIX}/libexec/darling/private/etc/nsswitch.conf)
+ 
+@@ -236,7 +237,12 @@
  install(DIRECTORY DESTINATION libexec/darling/Library/Preferences)
  
  if(NOT DEBIAN_PACKAGING)
