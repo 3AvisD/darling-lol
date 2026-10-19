@@ -11316,13 +11316,80 @@ index 00000000..19cd9ea9
 +
 +@end
 diff --git a/AppKit/NSSavePanel.subproj/NSSavePanel.m b/AppKit/NSSavePanel.subproj/NSSavePanel.m
-index 50c3d59e..5872e594 100644
+index 50c3d59e..be5a8463 100644
 --- a/AppKit/NSSavePanel.subproj/NSSavePanel.m
 +++ b/AppKit/NSSavePanel.subproj/NSSavePanel.m
-@@ -124,8 +124,48 @@ static NSSavePanel *_newPanel = nil;
-     [NSApp stopModalWithCode: NSCancelButton];
+@@ -113,19 +113,108 @@
+     }
  }
  
++/* Paths of the rows selected in the file list. Safe with no selection. */
++- (NSArray *) _selectedPaths {
++    NSMutableArray *paths = [NSMutableArray array];
++    NSIndexSet *rows = [_outlineView selectedRowIndexes];
++    for (NSUInteger row = [rows firstIndex]; row != NSNotFound;
++         row = [rows indexGreaterThanIndex: row]) {
++        id item = [_outlineView itemAtRow: row];
++        if ([item isKindOfClass: [NSURL class]] && [[item path] length] > 0)
++            [paths addObject: [item path]];
++    }
++    return paths;
++}
++
++/* What the Open/Save button accepts: the selected rows, or with nothing
++ * selected the directory being shown. An empty result keeps the panel up. */
++- (NSArray *) _acceptablePaths {
++    NSArray *selected = [self _selectedPaths];
++    if ([selected count] > 0)
++        return selected;
++    if ([_directory length] > 0)
++        return @[ _directory ];
++    return @[];
++}
++
++- (void) _setAcceptedPaths: (NSArray *) paths {
++    [self _setFilename: [paths firstObject]];
++}
++
++/* End the modal session this panel is running and take the panel off screen.
++ * The session is stopped only when this panel is the modal window, never
++ * another session that happens to be on top. The panel is hidden here as well
++ * so a dialog whose session cannot be stopped still goes away. */
++- (void) _dismissWithCode: (NSModalResponse) code {
++    if ([NSApp modalWindow] == self)
++        [NSApp stopModalWithCode: code];
++    [self orderOut: nil];
++}
++
+ - (IBAction) _selectFile: (id) sender {
+-    NSURL *url = [_outlineView itemAtRow: [_outlineView selectedRow]];
+-    [self _setFilename: [url path]];
+-
+-    [NSApp stopModalWithCode: NSOKButton];
++    NSArray *paths = [self _acceptablePaths];
++    if ([paths count] == 0)
++        return;
++    @try {
++        [self _setAcceptedPaths: paths];
++    } @catch (NSException *exception) {
++        NSLog(@"NSSavePanel: could not record the chosen file: %@", exception);
++        [self _dismissWithCode: NSCancelButton];
++        return;
++    }
++    [self _dismissWithCode: NSOKButton];
+ }
+ 
+ - (IBAction) _cancel: (id) sender {
+-    [NSApp stopModalWithCode: NSCancelButton];
+-}
+-
++    [self _dismissWithCode: NSCancelButton];
++}
++
++- (void) cancelOperation: (id) sender {
++    [self _cancel: sender];
++}
++
 +// Electron (Riot Client UI) opens its file dialogs through these and waits
 +// for the handler; run the panel modally and report the result.
  - (void) beginWithCompletionHandler: (void (^)(NSModalResponse result)) handler {
@@ -11366,6 +11433,57 @@ index 50c3d59e..5872e594 100644
 +
 +- (BOOL) canSelectHiddenExtension {
 +    return NO;
+ }
+ 
+ - (NSInteger) runModalForDirectory: (NSString *) directory
+diff --git a/AppKit/NSSavePanel.subproj/NSOpenPanel.m b/AppKit/NSSavePanel.subproj/NSOpenPanel.m
+index dfd33637..9388b186 100644
+--- a/AppKit/NSSavePanel.subproj/NSOpenPanel.m
++++ b/AppKit/NSSavePanel.subproj/NSOpenPanel.m
+@@ -23,6 +23,8 @@
+ 
+ @interface NSSavePanel (Private)
+ - (void) _setFilename: (NSString *) filename;
++- (NSArray *) _selectedPaths;
++- (void) _setAcceptedPaths: (NSArray *) paths;
+ @end
+ 
+ @implementation NSOpenPanel
+@@ -92,7 +94,36 @@
+ 
+ - (void) _setFilename: (NSString *) filename {
+     [super _setFilename: filename];
+-    _filenames = [@[ filename ] retain];
++    [self _setAcceptedPaths: [filename length] > 0 ? @[ filename ] : @[]];
++}
++
++- (void) _setAcceptedPaths: (NSArray *) paths {
++    if (!_allowsMultipleSelection && [paths count] > 1)
++        paths = @[ [paths firstObject] ];
++    @synchronized(self) {
++        NSArray *copy = [paths copy];
++        [_filenames release];
++        _filenames = copy;
++    }
++    [super _setFilename: [paths firstObject]];
++}
++
++/* Open only accepts what the panel was configured to choose. With nothing
++ * selected, a directory chooser accepts the directory being shown. */
++- (NSArray *) _acceptablePaths {
++    NSFileManager *manager = [NSFileManager defaultManager];
++    NSMutableArray *result = [NSMutableArray array];
++    for (NSString *path in [self _selectedPaths]) {
++        BOOL isDirectory = NO;
++        if (![manager fileExistsAtPath: path isDirectory: &isDirectory])
++            continue;
++        if (isDirectory ? _canChooseDirectories : _canChooseFiles)
++            [result addObject: path];
++    }
++    if ([result count] == 0 && [[self _selectedPaths] count] == 0 &&
++        _canChooseDirectories && [[self directory] length] > 0)
++        [result addObject: [self directory]];
++    return result;
  }
  
  - (NSInteger) runModalForDirectory: (NSString *) directory
