@@ -48,4 +48,14 @@ subprocess.run(['clang', *flags['C_DEFINES'], *flags['C_INCLUDES'], *flags['C_FL
     str(project / 'tools/riot-fullscreen-geometry-check.m'), '-o', str(probe)], check=True)
 subprocess.run(['clang', '-target', 'x86_64-apple-macosx11.0', '-fuse-ld=lld',
     '-nostdlib', '-isysroot', sdk, str(probe), '-lSystem', '-lobjc', '-framework', 'Foundation',
-    '-o', str(project / 'build/riot-fullscreen-geometry-check')], check=True)
+     '-o', str(project / 'build/riot-fullscreen-geometry-check')], check=True)
+
+# Query the actual native hints after Cocoa title/style changes, without mapping windows.
+probe = project / 'build/riot-window-decorations-check.o'
+subprocess.run(['clang', *flags['C_DEFINES'], *flags['C_INCLUDES'], *flags['C_FLAGS'],
+    '-O3', '-march=native', '-mtune=generic', '-UNDEBUG', '-Wno-macro-redefined', '-c',
+    str(project / 'tools/riot-window-decorations-check.m'), '-o', str(probe)], check=True)
+subprocess.run(['clang', '-target', 'x86_64-apple-macosx11.0', '-fuse-ld=lld',
+    '-nostdlib', '-isysroot', sdk, str(probe), '-lSystem', '-lobjc', '-framework', 'AppKit',
+    '-framework', 'Foundation', '-framework', 'CoreGraphics',
+    '-o', str(project / 'build/riot-window-decorations-check')], check=True)
