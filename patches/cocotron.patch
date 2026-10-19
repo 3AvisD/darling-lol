@@ -1690,7 +1690,7 @@ index 8ac2bbdc..a0fb4f37 100644
  
  - (BOOL) performDragOperation: (id<NSDraggingInfo>) sender {
 diff --git a/AppKit/NSWindow.m b/AppKit/NSWindow.m
-index d545120a..79760f47 100644
+index d545120a..1920e594 100644
 --- a/AppKit/NSWindow.m
 +++ b/AppKit/NSWindow.m
 @@ -27,6 +27,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
@@ -2462,15 +2462,28 @@ index d545120a..79760f47 100644
      [[NSDraggingManager draggingManager] dragImage: image
                                                  at: location
                                              offset: offset
-@@ -2536,6 +3116,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2527,15 +3107,19 @@ static BOOL _allowsAutomaticWindowTabbing;
+ }
+ 
+ - (void) setIsVisible: (BOOL) visible {
+-    if (_isVisible == visible) {
++    /* darling-lol: hiding always reaches the platform window, which may be mapped while _isVisible is NO. */
++    if (_isVisible == visible && visible) {
+         return;
+     }
++    BOOL changed = _isVisible != visible;
+     _isVisible = visible;
+     if (visible) {
+         [[self platformWindow] showWindowWithoutActivation];
      } else {
          [[self platformWindow] hideWindow];
      }
-+    [self postNotificationName: NSWindowDidChangeOcclusionStateNotification];
++    if (changed)
++        [self postNotificationName: NSWindowDidChangeOcclusionStateNotification];
  }
  
  - (void) orderFront: (id) sender {
-@@ -3064,6 +3645,13 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -3064,6 +3648,13 @@ static BOOL _allowsAutomaticWindowTabbing;
      if (didSize) {
          // Don't redraw everything unless we really have to.
          [_backgroundView setFrameSize: _frame.size];
@@ -2484,7 +2497,7 @@ index d545120a..79760f47 100644
          [_backgroundView setNeedsDisplay: YES];
          [self resetCursorRects];
          [self saveFrameUsingName: _autosaveFrameName];
-@@ -3260,8 +3848,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -3260,8 +3851,7 @@ static BOOL _allowsAutomaticWindowTabbing;
                  mouseWasInside && !mouseIsInside) {
                  [exited addObject: area];
              }
@@ -2494,7 +2507,7 @@ index d545120a..79760f47 100644
                  [moved addObject: area];
              }
              if (options & NSTrackingCursorUpdate && !mouseWasInside &&
-@@ -3459,7 +4046,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -3459,7 +4049,7 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (CGSubWindow *) _createSubWindowWithFrame: (CGRect) frame {
@@ -5075,7 +5088,7 @@ index bfe3839a..48cfac4c 100644
  - (void) frameChanged;
  - (void) setLastKnownCursorPosition: (CGPoint) point;
 diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
-index f4925b66..730d4692 100644
+index f4925b66..e458d96f 100644
 --- a/AppKit/X11.backend/X11Window.m
 +++ b/AppKit/X11.backend/X11Window.m
 @@ -18,11 +18,14 @@
@@ -5571,7 +5584,7 @@ index f4925b66..730d4692 100644
      struct {
          unsigned long flags;
          unsigned long functions;
-@@ -356,8 +620,14 @@ static NSData *makeWindowIcon() {
+@@ -356,11 +620,25 @@ static NSData *makeWindowIcon() {
  
  - (void) ensureMapped {
      if (!_mapped) {
@@ -5586,7 +5599,18 @@ index f4925b66..730d4692 100644
      }
  }
  
-@@ -377,15 +647,27 @@ static NSData *makeWindowIcon() {
++/* darling-lol: only map for a window AppKit considers visible. NSWindow sets _isVisible before
++ * ordering, so ordered windows still map; a hidden one (like the client's splash) must not be
++ * revived by a later restack or makeKey. */
++- (void) ensureMappedIfVisible {
++    if (_delegate == nil || [_delegate isVisible])
++        [self ensureMapped];
++}
++
+ - (void) showWindowWithoutActivation {
+     [self ensureMapped];
+ }
+@@ -377,15 +655,27 @@ static NSData *makeWindowIcon() {
  - (void) syncDelegateProperties {
      long mask = KeyPressMask | KeyReleaseMask | ExposureMask |
                  StructureNotifyMask | EnterWindowMask | LeaveWindowMask |
@@ -5619,7 +5643,7 @@ index f4925b66..730d4692 100644
      // TODO: background color
  }
  
-@@ -393,6 +675,28 @@ static NSData *makeWindowIcon() {
+@@ -393,6 +683,28 @@ static NSData *makeWindowIcon() {
      // This is essentially dealloc; we release our contexts
      // and windows, but unlike dealloc, this method can be called
      // several times, so set everything to nil/NULL/0.
@@ -5648,7 +5672,7 @@ index f4925b66..730d4692 100644
      [_context release];
      _context = nil;
  
-@@ -421,6 +725,392 @@ static NSData *makeWindowIcon() {
+@@ -421,6 +733,392 @@ static NSData *makeWindowIcon() {
      }
  }
  
@@ -6041,7 +6065,7 @@ index f4925b66..730d4692 100644
  - (Window) windowHandle {
      return _window;
  }
-@@ -470,14 +1160,32 @@ static NSData *makeWindowIcon() {
+@@ -470,14 +1168,32 @@ static NSData *makeWindowIcon() {
      const char *text = [title cString];
      XStringListToTextProperty((char **) &text, 1, &prop);
      XSetWMName(_display, _window, &prop);
@@ -6075,7 +6099,7 @@ index f4925b66..730d4692 100644
  }
  
  - (void) setHasShadow: (BOOL) value {
-@@ -488,6 +1196,25 @@ static NSData *makeWindowIcon() {
+@@ -488,6 +1204,25 @@ static NSData *makeWindowIcon() {
      _level = value;
  }
  
@@ -6101,9 +6125,30 @@ index f4925b66..730d4692 100644
  - (void) setOpaque: (BOOL) value {
      _isOpaque = value;
  }
-@@ -543,6 +1270,21 @@ static NSData *makeWindowIcon() {
+@@ -518,7 +1253,7 @@ static NSData *makeWindowIcon() {
+ 
+ - (void) placeAboveWindow: (NSInteger) otherNumber {
+     X11Window *other = [X11Window windowWithWindowNumber: otherNumber];
+-    [self ensureMapped];
++    [self ensureMappedIfVisible];
+ 
+     if (!other) {
+         XRaiseWindow(_display, _window);
+@@ -530,7 +1265,7 @@ static NSData *makeWindowIcon() {
+ 
+ - (void) placeBelowWindow: (NSInteger) otherNumber {
+     X11Window *other = [X11Window windowWithWindowNumber: otherNumber];
+-    [self ensureMapped];
++    [self ensureMappedIfVisible];
+ 
+     if (!other) {
+         XLowerWindow(_display, _window);
+@@ -541,8 +1276,23 @@ static NSData *makeWindowIcon() {
+ }
+ 
  - (void) makeKey {
-     [self ensureMapped];
+-    [self ensureMapped];
++    [self ensureMappedIfVisible];
      XRaiseWindow(_display, _window);
 +    /* darling-lol: League's game window is managed (not override-redirect), so keyboard focus is
 +     * the WM's to give. Ask for activation once when the game makes it key; the WM's focus-stealing
@@ -6123,7 +6168,7 @@ index f4925b66..730d4692 100644
  }
  
  - (void) makeMain {
-@@ -559,7 +1301,29 @@ static NSData *makeWindowIcon() {
+@@ -559,7 +1309,29 @@ static NSData *makeWindowIcon() {
      XRaiseWindow(_display, _window);
  }
  
@@ -6153,7 +6198,7 @@ index f4925b66..730d4692 100644
      Atom wmState = XInternAtom(_display, "_NET_WM_STATE", FALSE);
      Atom hiddenState = XInternAtom(_display, "_NET_WM_STATE_HIDDEN", FALSE);
  
-@@ -593,8 +1357,10 @@ static NSData *makeWindowIcon() {
+@@ -593,8 +1365,10 @@ static NSData *makeWindowIcon() {
      if (_cglContext == NULL) {
          CGLError error;
  
@@ -6166,7 +6211,7 @@ index f4925b66..730d4692 100644
              NSLog(@"CGLCreateContext failed at %s %d with error %d", __FILE__,
                    __LINE__, error);
  
-@@ -615,6 +1381,12 @@ static NSData *makeWindowIcon() {
+@@ -615,6 +1389,12 @@ static NSData *makeWindowIcon() {
  }
  
  - (void) openGLFlushBuffer {
@@ -6179,7 +6224,7 @@ index f4925b66..730d4692 100644
      CGLError error;
  
      CGLContextObj prevContext = CGLGetCurrentContext();
-@@ -652,7 +1424,7 @@ static NSData *makeWindowIcon() {
+@@ -652,7 +1432,7 @@ static NSData *makeWindowIcon() {
  }
  
  - (O2Rect) frame {
@@ -6188,7 +6233,7 @@ index f4925b66..730d4692 100644
  }
  
  static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
-@@ -666,6 +1438,7 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
+@@ -666,6 +1446,7 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
  }
  
  - (void) frameChanged {
@@ -6196,7 +6241,7 @@ index f4925b66..730d4692 100644
      XErrorHandler previousHandler = XSetErrorHandler(ignoreBadWindow);
      @try {
          Window root, parent;
-@@ -710,19 +1483,13 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
+@@ -710,19 +1491,13 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
      [_deviceDictionary addEntriesFromDictionary: entries];
  }
  
