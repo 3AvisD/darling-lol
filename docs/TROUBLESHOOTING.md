@@ -210,7 +210,7 @@ prefix `/etc` directory can also shadow the base `/etc -> private/etc` link.
 Check resolution inside the guest with:
 
 ```sh
-darling shell curl https://clientconfig.rpg.riotgames.com/
+darling shell curl --noproxy '*' https://clientconfig.rpg.riotgames.com/
 ```
 
 An HTTP response establishes that resolution succeeded even if that endpoint
