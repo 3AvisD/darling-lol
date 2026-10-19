@@ -541,3 +541,40 @@ Recovery requires every matching client to be at least 60 seconds old and a
 complete Hyprland window record (`class`, `title`, `mapped`, `hidden`). A second
 process scan after window inspection must find the same client identities and
 no game. Missing information or shutdown failure leaves normal launch in charge.
+
+## Variable refresh rate (VRR)
+
+Full-window borderless game layers now use the opaque managed X11 parent
+surface for presentation. Previously they swapped an independent child while
+the managed parent remained static. Using one surface lets the compositor
+track the game's updates for VRR and avoids scanning out an empty parent.
+Partial views, titled windows and other applications retain child drawables.
+The child fallback retains the compositor-bypass prohibition that prevents
+black screens. The fullscreen parent path advertises `_VARIABLE_REFRESH=1`;
+leaving fullscreen clears that request. Desktop/driver policy still decides
+whether to enable adaptive sync.
+
+With the game and both clients closed, rebuild with `./scripts/update.sh`;
+CoreGraphics, QuartzCore and the X11 backend must be updated together. Enable
+VRR in the desktop and monitor, and compare the monitor's live refresh reading
+to a frame cap below its maximum refresh, initially with VSync off. VRR and
+VSync are separate: this change does not implement an in-game frame limiter.
+See [the VRR probe and manual checks](TESTING.md#vrr-presentation-regression-46).
+
+Standalone child, parent and nested-parent presentation probes passed locally;
+monitor-level VRR and the reporter's in-game behavior still need confirmation.
+
+## VSync and frame caps (#46)
+
+The Metal layer's `displaySyncEnabled` property previously had no effect on
+the window swap interval. A game that delegates pacing to VSync could run
+uncapped when VSync was enabled. The compositor now applies that property to
+the window before swapping, including nested Metal layers and setting changes.
+If several Metal layers share a window, any layer requesting VSync enables it
+for that window. Other windows retain independent swap settings.
+
+Exit the game and both clients, then run `./scripts/update.sh` to rebuild and
+install the QuartzCore and OpenGL changes. Until updated, disable in-game
+VSync to use the game's frame cap, as the issue reporter confirmed. Physical
+scanout timing still depends on the driver and desktop compositor; the fix
+has standalone regression coverage but needs an in-game timing retest.

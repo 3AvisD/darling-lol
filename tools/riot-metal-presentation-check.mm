@@ -8,6 +8,14 @@
 #import <OpenGL/gl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
+extern "C" void _dispatch_main_queue_callback_4CF(void *);
+
+@interface PresentationCheckWindow : NSWindow
+@end
+@implementation PresentationCheckWindow
+- (BOOL)canBecomeKeyWindow { return YES; }
+@end
 
 static void verifyPresentation(bool value, const char* message) {
     if (!value) { fprintf(stderr, "FAIL: %s\n", message); exit(1); }
@@ -18,7 +26,12 @@ static void pump(NSApplication* app) {
         NSEvent* event = [app nextEventMatchingMask:NSAnyEventMask untilDate:[NSDate distantPast]
                                             inMode:NSDefaultRunLoopMode dequeue:YES];
         if (event) [app sendEvent:event];
-        [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.005]];
+        // A timed NSRunLoop wait can miss its deadline on Darling when the
+        // X connection is quiet. Parent presentation no longer supplies child
+        // Expose events to wake it; service sources without a blocking wait.
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.0, true);
+        _dispatch_main_queue_callback_4CF(nullptr);
+        usleep(1000);
     }
 }
 int main() {
@@ -35,6 +48,7 @@ int main() {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
         verifyPresentation(device != nil, "device");
         CAMetalLayer* layer = [CAMetalLayer layer];
+        verifyPresentation(layer.displaySyncEnabled == YES, "VSync enabled by default");
         layer.device = device;
         layer.drawableSize = CGSizeMake(160,96);
         layer.frame = CGRectMake(0,0,160,96);
@@ -52,12 +66,17 @@ int main() {
         } else {
             view.layer = layer;
         }
-        NSWindow* window = [[NSWindow alloc] initWithContentRect:NSMakeRect(50,50,160,96)
-          styleMask:NSTitledWindowMask backing:NSBackingStoreBuffered defer:NO];
-        window.title = @"Metal presentation check";
+        const bool parentDrawable = getenv("RIOT_PRESENTATION_PARENT") != nullptr;
+        NSWindow* window = [[PresentationCheckWindow alloc] initWithContentRect:NSMakeRect(50,50,160,96)
+          styleMask:(parentDrawable ? NSBorderlessWindowMask : NSTitledWindowMask) backing:NSBackingStoreBuffered defer:parentDrawable];
+        window.title = parentDrawable ? @"Presentation (TM) Client" : @"Metal presentation check";
         window.contentView = view;
         [window makeKeyAndOrderFront:nil];
         pump(app);
+        if (parentDrawable) {
+            void *borrowed = [[(CALayerContext*)[layer _context] subwindow] sharedCGLWindow];
+            verifyPresentation(borrowed != nullptr, "full-window game layer borrows managed parent drawable");
+        }
         id<MTLCommandQueue> queue = [device newCommandQueue];
         const unsigned frameCount = captureTest ? 130u : getenv("RIOT_PRESENTATION_STRESS") ? 120u : 10u;
         for (unsigned frame = 0; frame < frameCount; ++frame) {
@@ -66,6 +85,7 @@ int main() {
                 verifyPresentation(flag != nullptr, "request second bounded capture");
                 fclose(flag);
             }
+            layer.displaySyncEnabled = (frame % 3) != 1;
             @autoreleasepool {
                 id<CAMetalDrawable> drawable = [layer nextDrawable];
                 verifyPresentation(drawable != nil, "drawable after late window/context attachment");
@@ -82,6 +102,23 @@ int main() {
                 [commands commit];
                 [commands waitUntilCompleted];
                 pump(app);
+                GLint interval = -1;
+                CGLGetParameter([(CALayerContext*)[layer _context] glContext], kCGLCPSwapInterval, &interval);
+                verifyPresentation(interval == (layer.displaySyncEnabled ? 1 : 0), "Metal VSync reaches window swap interval");
+                if (parentDrawable) {
+                    void *borrowed = [[(CALayerContext*)[layer _context] subwindow] sharedCGLWindow];
+                    verifyPresentation(borrowed != nullptr, "parent drawable remains borrowed");
+                    if (frame == 3 && getenv("RIOT_PRESENTATION_RESIZE")) {
+                        CALayerContext* context = (CALayerContext*)[layer _context];
+                        CGRect original = [view frame];
+                        [context setFrame:CGRectMake(0,0,original.size.width / 2,original.size.height)];
+                        [context render]; [context flush];
+                        verifyPresentation([[context subwindow] sharedCGLWindow] == nullptr, "partial view falls back to child drawable");
+                        [context setFrame:original];
+                        [context render]; [context flush];
+                        verifyPresentation([[context subwindow] sharedCGLWindow] != nullptr, "restored view borrows parent drawable again");
+                    }
+                }
             }
         }
         CGLContextObj previous = CGLGetCurrentContext();
