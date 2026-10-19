@@ -178,6 +178,37 @@ Riot Client also confirmed the no-decoration hint and identical compositor frame
 and client dimensions (1536×864), instead of the previous 28-pixel titlebar.
 This validates the Riot Client window, not every LeagueClientUx or game mode.
 
+### NSOpenPanel Open/Cancel (issue #85)
+
+`python3 tools/build-riot-openpanel-check.py` builds
+`build/riot-openpanel-check`. Install the patched AppKit first, with clients and
+the game closed. The probe opens its own directory chooser in a fresh `/tmp`
+folder containing one subfolder and needs no Riot/League client:
+
+```sh
+P=/Volumes/SystemRoot/path/to/darling-lol/build/riot-openpanel-check
+E="env DYLD_LIBRARY_PATH=/Users/me/RuntimeLibraries DYLD_FRAMEWORK_PATH=/Users/me/RuntimeFrameworks"
+for m in cancel open-selected open-none; do darling shell $E $P --auto $m; done
+darling shell $E $P --interactive
+```
+
+Each `--auto` mode waits 1.5 s, then clicks the panel's own Cancel or Open
+button (selecting the subfolder first for `open-selected`), and checks that
+`runModal` returned, the result code and URL, and that the panel is gone. A
+15 s watchdog on a separate thread reports a hang. Expected, one line per mode:
+
+```
+OPENPANEL_CHECK mode=cancel result=PASS code=0 ...
+OPENPANEL_CHECK mode=open-selected result=PASS code=1 url=/tmp/openpanel-check.XXXXXX/subfolder ...
+OPENPANEL_CHECK mode=open-none result=PASS code=1 url=/tmp/openpanel-check.XXXXXX ...
+```
+
+A failure prints `result=FAIL ... problems=...` (`HANG` when `runModal` never
+returned) and exits non-zero. `--interactive` shows the panel for manual clicks
+and prints `OPENPANEL_CHECK mode=interactive result=RETURNED code=... url=...`
+once it closes. As with the other probes, check the printed line rather than
+only the launcher exit status.
+
 ### Presentation publisher handoff
 
 With clients closed, run `build/riot-client-resize-check --handoff` through Darling with the normal runtime overrides. This creates an owned window and two fixture frame slots. The live software owner first supplies a 1280×720 main frame, then switches to a 262×131 popup; another slot supplies the resized main frame without the software flag. The test samples its own window beyond the original frame extent and checks generation colors across growth and shrinkage. The old selector reports black at the 1600×900 sample; the correction passes all four sizes. Repeat with `RCLOL_XSHM=0` and with `DARLING_XSHM_LIBRARY` pointing to the normal transport to cover both paths. The fixtures remove their own frame slots on exit; they do not read client pixels or send input.
