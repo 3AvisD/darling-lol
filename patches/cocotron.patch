@@ -5031,7 +5031,7 @@ index 0000000..31fa646
 +
 +#endif
 diff --git a/AppKit/X11.backend/X11Window.h b/AppKit/X11.backend/X11Window.h
-index bfe3839a..48cfac4c 100644
+index bfe3839a..bc592711 100644
 --- a/AppKit/X11.backend/X11Window.h
 +++ b/AppKit/X11.backend/X11Window.h
 @@ -26,7 +26,7 @@
@@ -5043,7 +5043,7 @@ index bfe3839a..48cfac4c 100644
  
  @interface X11Window : CGWindow {
      int _level; // TODO: care about this value
-@@ -47,8 +47,32 @@
+@@ -47,8 +47,33 @@
      BOOL _mapped;
      CGPoint _lastMotionPos;
      BOOL _isModal;
@@ -5053,6 +5053,7 @@ index bfe3839a..48cfac4c 100644
 +    BOOL _hasAlpha; // created with the 32-bit ARGB visual
 +    BOOL _wasMapped; // the visual is settled at the first map
      BOOL _hasShadow;
++    id _layerDrawableOwner;
 +    NSTimer *_remoteFrameTimer;
 +    Window _remoteFrameWindow;
 +    GC _remoteFrameGC;
@@ -5076,19 +5077,22 @@ index bfe3839a..48cfac4c 100644
  
  @public
      XIC _xic;
-@@ -60,9 +84,9 @@
+@@ -60,9 +85,12 @@
  - (Visual *) visual;
  - (Drawable) drawable;
  - (NSPoint) transformPoint: (NSPoint) pos;
 -- (O2Rect) transformFrame: (O2Rect) frame;
  
  - (Window) windowHandle;
++- (void *) layerDrawableFor: (id) owner;
++- (void) acquireLayerDrawable: (id) owner;
++- (void) releaseLayerDrawable: (id) owner;
 +- (BOOL) handleRemoteFrameExpose: (Window) window;
  
  - (void) frameChanged;
  - (void) setLastKnownCursorPosition: (CGPoint) point;
 diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
-index f4925b66..e458d96f 100644
+index f4925b6..b565b91 100644
 --- a/AppKit/X11.backend/X11Window.m
 +++ b/AppKit/X11.backend/X11Window.m
 @@ -18,11 +18,14 @@
@@ -5455,7 +5459,7 @@ index f4925b66..e458d96f 100644
  }
  
  - (void) dealloc {
-@@ -279,24 +498,30 @@ static NSData *makeWindowIcon() {
+@@ -279,24 +498,59 @@ static NSData *makeWindowIcon() {
      return _styleMask;
  }
  
@@ -5492,6 +5496,35 @@ index f4925b66..e458d96f 100644
      }
 +    return NO;
 +}
++
++/* Keep the game on one opaque managed surface. Mutter's VRR frame clock
++ * follows that surface's repaint events, not an independently swapped child.
++ * _VARIABLE_REFRESH also advertises eligibility to X11 drivers that use it. */
++- (void) updateLayerPresentationHints: (BOOL) fullscreen {
++    if (!X11IsLeagueGameWindow(_display, _window, _delegate)) return;
++    unsigned long adaptive = fullscreen && _layerDrawableOwner != nil;
++    unsigned long bypass = fullscreen && !_layerDrawableOwner ? 2 : 0;
++    XChangeProperty(_display, _window, XInternAtom(_display, "_VARIABLE_REFRESH", False),
++                    XA_CARDINAL, 32, PropModeReplace, (unsigned char *)&adaptive, 1);
++    XChangeProperty(_display, _window, XInternAtom(_display, "_NET_WM_BYPASS_COMPOSITOR", False),
++                    XA_CARDINAL, 32, PropModeReplace, (unsigned char *)&bypass, 1);
++}
++
++- (void *) layerDrawableFor: (id) owner {
++    return (!_layerDrawableOwner || _layerDrawableOwner == owner) && !_hasAlpha && X11IsLeagueGameWindow(_display, _window, _delegate) ? _cglWindow : NULL;
++}
++
++- (void) acquireLayerDrawable: (id) owner {
++    if (_layerDrawableOwner && _layerDrawableOwner != owner) return;
++    _layerDrawableOwner = owner;
++    [self updateLayerPresentationHints: _fullscreenRequested];
++}
++
++- (void) releaseLayerDrawable: (id) owner {
++    if (_layerDrawableOwner != owner) return;
++    _layerDrawableOwner = nil;
++    [self updateLayerPresentationHints: _fullscreenRequested];
++}
  
 +- (void) requestFullscreen: (BOOL) fullscreen force: (BOOL) force {
 +    if (fullscreen) {
@@ -5502,7 +5535,7 @@ index f4925b66..e458d96f 100644
      if (!_mapped) {
          long states[2];
          int states_cnt = 0;
-@@ -304,7 +529,7 @@ static NSData *makeWindowIcon() {
+@@ -304,7 +558,7 @@ static NSData *makeWindowIcon() {
              states[states_cnt++] =
                      (long) XInternAtom(_display, "_NET_WM_STATE_MODAL", False);
          }
@@ -5511,7 +5544,7 @@ index f4925b66..e458d96f 100644
              states[states_cnt++] = (long) XInternAtom(
                      _display, "_NET_WM_STATE_FULLSCREEN", False);
          }
-@@ -312,14 +537,13 @@ static NSData *makeWindowIcon() {
+@@ -312,14 +566,13 @@ static NSData *makeWindowIcon() {
                          XInternAtom(_display, "_NET_WM_STATE", False), XA_ATOM,
                          32, PropModeReplace, (const unsigned char *) states,
                          states_cnt);
@@ -5528,11 +5561,12 @@ index f4925b66..e458d96f 100644
          event.data.l[1] =
                  (long) XInternAtom(_display, "_NET_WM_STATE_FULLSCREEN", False);
          event.data.l[3] = 1;
-@@ -327,6 +551,47 @@ static NSData *makeWindowIcon() {
+@@ -327,6 +580,48 @@ static NSData *makeWindowIcon() {
                     SubstructureNotifyMask | SubstructureRedirectMask,
                     (XEvent *) &event);
      }
 +    _fullscreenRequested = fullscreen;
++    [self updateLayerPresentationHints: fullscreen];
 +    XFlush(_display);
 +}
 +
@@ -5576,7 +5610,7 @@ index f4925b66..e458d96f 100644
  }
  
  - (void) setStyleMask: (NSUInteger) mask {
-@@ -338,7 +603,6 @@ static NSData *makeWindowIcon() {
+@@ -338,7 +633,6 @@ static NSData *makeWindowIcon() {
  }
  
  + (void) removeDecorationForWindow: (Window) w onDisplay: (Display *) dpy {
@@ -5584,7 +5618,7 @@ index f4925b66..e458d96f 100644
      struct {
          unsigned long flags;
          unsigned long functions;
-@@ -356,11 +620,25 @@ static NSData *makeWindowIcon() {
+@@ -356,11 +650,25 @@ static NSData *makeWindowIcon() {
  
  - (void) ensureMapped {
      if (!_mapped) {
@@ -5610,7 +5644,7 @@ index f4925b66..e458d96f 100644
  - (void) showWindowWithoutActivation {
      [self ensureMapped];
  }
-@@ -377,15 +655,27 @@ static NSData *makeWindowIcon() {
+@@ -377,15 +685,27 @@ static NSData *makeWindowIcon() {
  - (void) syncDelegateProperties {
      long mask = KeyPressMask | KeyReleaseMask | ExposureMask |
                  StructureNotifyMask | EnterWindowMask | LeaveWindowMask |
@@ -5643,7 +5677,7 @@ index f4925b66..e458d96f 100644
      // TODO: background color
  }
  
-@@ -393,6 +683,28 @@ static NSData *makeWindowIcon() {
+@@ -393,6 +713,28 @@ static NSData *makeWindowIcon() {
      // This is essentially dealloc; we release our contexts
      // and windows, but unlike dealloc, this method can be called
      // several times, so set everything to nil/NULL/0.
@@ -5672,7 +5706,7 @@ index f4925b66..e458d96f 100644
      [_context release];
      _context = nil;
  
-@@ -421,6 +733,392 @@ static NSData *makeWindowIcon() {
+@@ -421,6 +763,392 @@ static NSData *makeWindowIcon() {
      }
  }
  
@@ -6065,7 +6099,7 @@ index f4925b66..e458d96f 100644
  - (Window) windowHandle {
      return _window;
  }
-@@ -470,14 +1168,32 @@ static NSData *makeWindowIcon() {
+@@ -470,14 +1198,32 @@ static NSData *makeWindowIcon() {
      const char *text = [title cString];
      XStringListToTextProperty((char **) &text, 1, &prop);
      XSetWMName(_display, _window, &prop);
@@ -6099,7 +6133,7 @@ index f4925b66..e458d96f 100644
  }
  
  - (void) setHasShadow: (BOOL) value {
-@@ -488,6 +1204,25 @@ static NSData *makeWindowIcon() {
+@@ -488,6 +1234,25 @@ static NSData *makeWindowIcon() {
      _level = value;
  }
  
@@ -6125,7 +6159,7 @@ index f4925b66..e458d96f 100644
  - (void) setOpaque: (BOOL) value {
      _isOpaque = value;
  }
-@@ -518,7 +1253,7 @@ static NSData *makeWindowIcon() {
+@@ -518,7 +1283,7 @@ static NSData *makeWindowIcon() {
  
  - (void) placeAboveWindow: (NSInteger) otherNumber {
      X11Window *other = [X11Window windowWithWindowNumber: otherNumber];
@@ -6134,7 +6168,7 @@ index f4925b66..e458d96f 100644
  
      if (!other) {
          XRaiseWindow(_display, _window);
-@@ -530,7 +1265,7 @@ static NSData *makeWindowIcon() {
+@@ -530,7 +1295,7 @@ static NSData *makeWindowIcon() {
  
  - (void) placeBelowWindow: (NSInteger) otherNumber {
      X11Window *other = [X11Window windowWithWindowNumber: otherNumber];
@@ -6143,7 +6177,7 @@ index f4925b66..e458d96f 100644
  
      if (!other) {
          XLowerWindow(_display, _window);
-@@ -541,8 +1276,23 @@ static NSData *makeWindowIcon() {
+@@ -541,8 +1306,23 @@ static NSData *makeWindowIcon() {
  }
  
  - (void) makeKey {
@@ -6168,7 +6202,7 @@ index f4925b66..e458d96f 100644
  }
  
  - (void) makeMain {
-@@ -559,7 +1309,29 @@ static NSData *makeWindowIcon() {
+@@ -559,7 +1339,29 @@ static NSData *makeWindowIcon() {
      XRaiseWindow(_display, _window);
  }
  
@@ -6198,7 +6232,7 @@ index f4925b66..e458d96f 100644
      Atom wmState = XInternAtom(_display, "_NET_WM_STATE", FALSE);
      Atom hiddenState = XInternAtom(_display, "_NET_WM_STATE_HIDDEN", FALSE);
  
-@@ -593,8 +1365,10 @@ static NSData *makeWindowIcon() {
+@@ -593,8 +1395,10 @@ static NSData *makeWindowIcon() {
      if (_cglContext == NULL) {
          CGLError error;
  
@@ -6211,10 +6245,12 @@ index f4925b66..e458d96f 100644
              NSLog(@"CGLCreateContext failed at %s %d with error %d", __FILE__,
                    __LINE__, error);
  
-@@ -615,6 +1389,12 @@ static NSData *makeWindowIcon() {
+@@ -615,6 +1419,14 @@ static NSData *makeWindowIcon() {
  }
  
  - (void) openGLFlushBuffer {
++    // QuartzCore owns presentation while a full-window game layer borrows it.
++    if (_layerDrawableOwner) return;
 +    /* A remote compositor surface owns this drawable while it is present.
 +     * Swapping the local Onyx surface would erase it until the next timer
 +     * tick. Keep local presentation for windows without a usable remote frame. */
@@ -6224,7 +6260,7 @@ index f4925b66..e458d96f 100644
      CGLError error;
  
      CGLContextObj prevContext = CGLGetCurrentContext();
-@@ -652,7 +1432,7 @@ static NSData *makeWindowIcon() {
+@@ -652,7 +1464,7 @@ static NSData *makeWindowIcon() {
  }
  
  - (O2Rect) frame {
@@ -6233,7 +6269,7 @@ index f4925b66..e458d96f 100644
  }
  
  static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
-@@ -666,6 +1446,7 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
+@@ -666,6 +1478,7 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
  }
  
  - (void) frameChanged {
@@ -6241,7 +6277,7 @@ index f4925b66..e458d96f 100644
      XErrorHandler previousHandler = XSetErrorHandler(ignoreBadWindow);
      @try {
          Window root, parent;
-@@ -710,19 +1491,13 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
+@@ -710,19 +1523,13 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
      [_deviceDictionary addEntriesFromDictionary: entries];
  }
  
@@ -9629,13 +9665,13 @@ index 5dcac115..5de4f03f 100644
 +
  @end
 diff --git a/QuartzCore/CALayerContext.m b/QuartzCore/CALayerContext.m
-index 5dce8c5..3a7f937 100644
 --- a/QuartzCore/CALayerContext.m
 +++ b/QuartzCore/CALayerContext.m
-@@ -1,47 +1,77 @@
+@@ -1,47 +1,89 @@
  #import <Foundation/NSString.h>
 +#import <Foundation/NSMutableArray.h>
  #import <QuartzCore/CALayer.h>
++#import <QuartzCore/CAMetalLayer.h>
  #import <QuartzCore/CALayerContext.h>
  #import <QuartzCore/CARenderer.h>
  #import "CALayerInternal.h"
@@ -9655,6 +9691,17 @@ index 5dce8c5..3a7f937 100644
 +    for (CALayer *child in layer.sublayers)
 +        if (hasMetalLayer(child))return YES;
 +    return NO;
++}
++
++static GLint metalSwapInterval(CALayer *layer) {
++    GLint interval = -1;
++    if ([[layer class] isSubclassOfClass: [CAMetalLayerInternal class]])
++        interval = [(CAMetalLayer *)layer displaySyncEnabled] ? 1 : 0;
++    for (CALayer *child in layer.sublayers) {
++        GLint childInterval = metalSwapInterval(child);
++        if (childInterval > interval) interval = childInterval;
++    }
++    return interval;
 +}
 +
 +/* The X11 transport presents Chromium's flattened full-window surface.
@@ -9700,10 +9747,11 @@ index 5dce8c5..3a7f937 100644
 -        kCGLNoError)
 -        NSLog(@"CGLCreateContext failed with %d in %s %d", error, __FILE__,
 -              __LINE__);
+-
 +    self = [super init];
 +    if (self == nil)
 +        return nil;
- 
++
 +    _deleteTextureIds = [[NSMutableArray alloc] init];
      _frame = rect;
 -
@@ -9722,14 +9770,15 @@ index 5dce8c5..3a7f937 100644
 +    [_deleteTextureIds release];
      [_renderer release];
      CGLReleaseContext(_glContext);
+-    CGLDestroyWindow(_cglWindow);
 +    CGLReleasePixelFormat(_pixelFormat);
-     CGLDestroyWindow(_cglWindow);
++    if (_ownsCglWindow) CGLDestroyWindow(_cglWindow);
      [_subwindow release];
 -    [_layer release];
      [super dealloc];
  }
  
-@@ -51,12 +81,22 @@
+@@ -51,12 +93,22 @@
  }
  
  - (void) setLayer: (CALayer *) layer {
@@ -9752,12 +9801,18 @@ index 5dce8c5..3a7f937 100644
  }
  
  - (void) setSubwindow: (CGSubWindow*) subwindow
-@@ -68,16 +108,50 @@
+@@ -64,20 +116,55 @@
+     CGSubWindow* oldSubwindow = _subwindow;
+ 
+     if (_cglWindow) {
+-        CGLDestroyWindow(_cglWindow);
++        if (_ownsCglWindow) CGLDestroyWindow(_cglWindow);
      }
  
      _subwindow = [subwindow retain];
 -    _cglWindow = CGLGetWindow([_subwindow nativeWindow]);
 +    _cglWindow = NULL;
++    _ownsCglWindow = NO;
 +    if (_subwindow != nil) {
 +        if (_glContext == NULL) {
 +            CGLPixelFormatAttribute attributes[] = { 0 };
@@ -9776,7 +9831,7 @@ index 5dce8c5..3a7f937 100644
 +            }
 +        }
 +        if (_glContext != NULL)
-+            _cglWindow = CGLGetWindow([_subwindow nativeWindow]);
++            [self updateDrawable];
 +    }
  
      [_subwindow show];
@@ -9804,7 +9859,7 @@ index 5dce8c5..3a7f937 100644
  }
  
  - (void) assignTextureIdsToLayerTree: (CALayer *) layer {
-@@ -93,8 +167,27 @@
+@@ -93,8 +180,43 @@
          [self assignTextureIdsToLayerTree: child];
  }
  
@@ -9822,6 +9877,22 @@ index 5dce8c5..3a7f937 100644
 +        [self prepareMetalLayers: child];
 +}
 +
++- (void) updateDrawable {
++    if (!_subwindow || !_glContext) return;
++    [_subwindow setAllowsParentDrawable: hasMetalLayer(_layer)];
++    void *shared = [_subwindow sharedCGLWindow];
++    if (shared && shared == _cglWindow && !_ownsCglWindow) return;
++    if (!shared && _cglWindow && _ownsCglWindow) return;
++    CGLContextObj previous = CGLGetCurrentContext();
++    if (previous == _glContext) CGLSetCurrentContext(NULL);
++    if (_ownsCglWindow) CGLDestroyWindow(_cglWindow);
++    _cglWindow = shared ? shared : CGLGetWindow([_subwindow nativeWindow]);
++    _ownsCglWindow = !shared && _cglWindow != NULL;
++    // Update CGL's surface binding even when another context was current.
++    CGLContextMakeCurrentAndAttachToWindow(_glContext, _cglWindow);
++    if (previous != _glContext) CGLSetCurrentContext(previous);
++}
++
  - (void) renderLayer: (CALayer *) layer {
 +    CFTimeInterval renderLayerStart = CACurrentMediaTime();
      CGLContextMakeCurrentAndAttachToWindow(_glContext, _cglWindow);
@@ -9832,28 +9903,31 @@ index 5dce8c5..3a7f937 100644
  
      glEnable(GL_DEPTH_TEST);
      glShadeModel(GL_SMOOTH);
-@@ -118,27 +211,62 @@
+@@ -118,27 +240,63 @@
  
      [_deleteTextureIds removeAllObjects];
  
 +    CFTimeInterval assignStart = CACurrentMediaTime();
 +    darlingQCTiming("renderLayerSetup", assignStart - renderLayerStart);
      [self assignTextureIdsToLayerTree: layer];
-+    darlingQCTiming("assignTextureIds", CACurrentMediaTime() - assignStart);
- 
+-
 -    // this is where the Metal layer renders to an internal texture for us to use
 -    if ([[layer class] isSubclassOfClass: [CAMetalLayerInternal class]]) {
 -        CAMetalLayerInternal* mtl = (CAMetalLayerInternal*)layer;
 -        [mtl prepareRender];
 -    }
+-
++    darlingQCTiming("assignTextureIds", CACurrentMediaTime() - assignStart);
++
 +    [self prepareMetalLayers: layer];
- 
++
 +    CFTimeInterval rendererStart = CACurrentMediaTime();
      [_renderer render];
 +    darlingQCTiming("rendererRender", CACurrentMediaTime() - rendererStart);
  }
  
  - (void) render {
++    [self updateDrawable];
 +    if (_cglWindow == NULL || _layer == nil)
 +        return;
 +    if(skipLocalRender(_layer, _frame.size))return;
@@ -9900,7 +9974,7 @@ index 5dce8c5..3a7f937 100644
  }
  
  - (void) startTimerIfNeeded {
-@@ -147,7 +275,7 @@
+@@ -147,7 +305,7 @@
                                                     target: self
                                                   selector: @selector(timer:)
                                                   userInfo: nil
@@ -9909,14 +9983,25 @@ index 5dce8c5..3a7f937 100644
  }
  
  - (void) deleteTextureId: (NSNumber *) textureId {
-@@ -155,7 +283,9 @@
+@@ -155,7 +313,20 @@
  }
  
  - (void) flush {
 -    CGLFlushDrawable(_glContext);
 +    if(skipLocalRender(_layer, _frame.size))return;
-+    if (_glContext != NULL && _cglWindow != NULL)
++    if (_glContext != NULL && _cglWindow != NULL) {
++        CGLContextObj previous = CGLGetCurrentContext();
++        // EGL applies the interval to the current draw surface, so attach this
++        // window before setting it (including after late window attachment).
++        if (CGLContextMakeCurrentAndAttachToWindow(_glContext, _cglWindow) != kCGLNoError)
++            return;
++        GLint interval = metalSwapInterval(_layer);
++        if (interval >= 0)
++            CGLSetParameter(_glContext, kCGLCPSwapInterval, &interval);
 +        CGLFlushDrawable(_glContext);
++        if (previous != _glContext)
++            CGLSetCurrentContext(previous);
++    }
  }
  
  @end
@@ -11242,10 +11327,14 @@ index 49b03483..5ebbf535 100644
  - (void) display;
  - (void) displayIfNeeded;
 diff --git a/QuartzCore/include/QuartzCore/CALayerContext.h b/QuartzCore/include/QuartzCore/CALayerContext.h
-index e4b0c342..d61c37ba 100644
+index e4b0c342..69b39250 100644
 --- a/QuartzCore/include/QuartzCore/CALayerContext.h
 +++ b/QuartzCore/include/QuartzCore/CALayerContext.h
-@@ -20,6 +20,7 @@
+@@ -17,9 +17,11 @@
+     NSTimer *_timer;
+     CGSubWindow* _subwindow;
+     void* _cglWindow;
++    BOOL _ownsCglWindow;
  }
  
  @property(readonly) CGLContextObj glContext;
@@ -11510,3 +11599,124 @@ index 53bacc46..3c6adfb7 100644
  - (void) beginSheetForDirectory: (NSString *) path
                             file: (NSString *) name
                   modalForWindow: (NSWindow *) docWindow
+diff --git a/CoreGraphics/CGSubWindow.m b/CoreGraphics/CGSubWindow.m
+index 008ccd74..6692deb5 100644
+--- a/CoreGraphics/CGSubWindow.m
++++ b/CoreGraphics/CGSubWindow.m
+@@ -8,6 +8,10 @@
+     return NULL;
+ }
+ 
++// Backends may lend an existing EGL surface for full-window layer rendering.
++- (void *) sharedCGLWindow { return NULL; }
++- (void) setAllowsParentDrawable: (BOOL) allowed {}
++
+ - (void) show {
+     O2InvalidAbstractInvocation();
+ }
+diff --git a/CoreGraphics/include/CoreGraphics/CGSubWindow.h b/CoreGraphics/include/CoreGraphics/CGSubWindow.h
+index de7a3496..79ee0d31 100644
+--- a/CoreGraphics/include/CoreGraphics/CGSubWindow.h
++++ b/CoreGraphics/include/CoreGraphics/CGSubWindow.h
+@@ -6,6 +6,9 @@
+ @interface CGSubWindow : NSObject
+ 
+ - (void *) nativeWindow;
++// Borrowed surface; the subwindow/backend retains ownership.
++- (void *) sharedCGLWindow;
++- (void) setAllowsParentDrawable: (BOOL) allowed;
+ 
+ - (void) show;
+ - (void) hide;
+diff --git a/AppKit/X11.backend/X11SubWindow.m b/AppKit/X11.backend/X11SubWindow.m
+index 738ab457..6596dab5 100644
+--- a/AppKit/X11.backend/X11SubWindow.m
++++ b/AppKit/X11.backend/X11SubWindow.m
+@@ -1,6 +1,7 @@
+ #import "X11SubWindow.h"
+ #import "X11Display.h"
+ #import "X11Window.h"
++#import <AppKit/NSWindow.h>
+ 
+ @implementation X11SubWindow
+ 
+@@ -15,8 +16,9 @@
+ }
+ 
+ - (id) initWithParentWindow: (X11Window *) parent frame: (CGRect) frame {
+-    _parent = parent;
++    _parent = [parent retain];
+     frame = [self convertFrame: frame];
++    _drawableFrame = frame;
+ 
+     _display = [(X11Display *) [NSDisplay currentDisplay] display];
+ 
+@@ -31,7 +33,9 @@
+ }
+ 
+ - (void) dealloc {
++    if (_usingParentDrawable) [_parent releaseLayerDrawable: self];
+     XDestroyWindow(_display, _window);
++    [_parent release];
+     [super dealloc];
+ }
+ 
+@@ -39,16 +43,41 @@
+     return (void *) _window;
+ }
+ 
++- (void) setAllowsParentDrawable: (BOOL) allowed {
++    _allowsParentDrawable = allowed;
++}
++
++- (void *) sharedCGLWindow {
++    // Only a full-window borderless game view may draw into the managed parent.
++    // Other views keep independent child drawables and their own coordinates.
++    CGRect parentFrame = [_parent frame];
++    BOOL coversParent = _allowsParentDrawable && _visible && !([_parent styleMask] & NSTitledWindowMask) &&
++        CGRectEqualToRect(_drawableFrame, CGRectMake(0, 0, parentFrame.size.width, parentFrame.size.height));
++    void *surface = coversParent ? [_parent layerDrawableFor: self] : NULL;
++    BOOL usingParent = surface != NULL;
++    if (usingParent != _usingParentDrawable) {
++        if (usingParent) [_parent acquireLayerDrawable: self];
++        else [_parent releaseLayerDrawable: self];
++        _usingParentDrawable = usingParent;
++    }
++    if (_visible && !usingParent) XMapWindow(_display, _window);
++    else XUnmapWindow(_display, _window);
++    return surface;
++}
++
+ - (void) show {
+-    XMapWindow(_display, _window);
++    _visible = YES;
++    [self sharedCGLWindow];
+ }
+ 
+ - (void) hide {
+-    XUnmapWindow(_display, _window);
++    _visible = NO;
++    [self sharedCGLWindow];
+ }
+ 
+ - (void) setFrame: (CGRect) frame {
+     frame = [self convertFrame: frame];
++    _drawableFrame = frame;
+ 
+     XMoveResizeWindow(_display, _window, frame.origin.x, frame.origin.y,
+                       frame.size.width, frame.size.height);
+diff --git a/AppKit/X11.backend/X11SubWindow.h b/AppKit/X11.backend/X11SubWindow.h
+index 65b63a3e..e5b913b1 100644
+--- a/AppKit/X11.backend/X11SubWindow.h
++++ b/AppKit/X11.backend/X11SubWindow.h
+@@ -7,6 +7,10 @@
+     X11Window *_parent;
+     Display *_display;
+     Window _window;
++    CGRect _drawableFrame;
++    BOOL _visible;
++    BOOL _allowsParentDrawable;
++    BOOL _usingParentDrawable;
+ }
+ 
+ - initWithParentWindow: (X11Window *) parent frame: (CGRect) frame;
