@@ -17,7 +17,10 @@ static NSString *tempDir, *subDir;
 static const char *mode;
 static BOOL interactive;
 static BOOL panelVisibleAtTrigger;
-static NSString *triggerNote = @"";
+/* Plain C storage: an autoreleased NSString kept here would be freed by the
+ * modal loop's pools before the result is reported (and the watchdog thread
+ * reads it too). */
+static char triggerNote[160] = "";
 static const double kTriggerDelay = 1.5, kWatchdog = 15.0;
 
 static NSButton *findButton(NSView *view, SEL action) {
@@ -39,20 +42,20 @@ static NSOutlineView *findOutline(NSView *view) {
     return nil;
 }
 
-static void press(SEL action, NSString *name) {
+static void press(SEL action, const char *name) {
     NSButton *button = findButton([panel contentView], action);
     if (button) {
-        triggerNote = [NSString stringWithFormat:@"%@ via button", name];
+        snprintf(triggerNote, sizeof triggerNote, "%s via button", name);
         [button performClick:nil];
     } else {
-        triggerNote = [NSString stringWithFormat:@"%@ via direct action (button not found)", name];
+        snprintf(triggerNote, sizeof triggerNote, "%s via direct action (button not found)", name);
         [panel performSelector:action withObject:nil];
     }
 }
 
 static void selectSubfolder(void) {
     NSOutlineView *outline = findOutline([panel contentView]);
-    if (!outline) { triggerNote = @"no outline view, subfolder row not found"; return; }
+    if (!outline) { snprintf(triggerNote, sizeof triggerNote, "no outline view, subfolder row not found"); return; }
     [outline reloadData];
     for (NSInteger row = 0; row < [outline numberOfRows]; row++) {
         id item = [outline itemAtRow:row];
@@ -62,7 +65,7 @@ static void selectSubfolder(void) {
             return;
         }
     }
-    triggerNote = @"subfolder row not found";
+    snprintf(triggerNote, sizeof triggerNote, "subfolder row not found");
 }
 
 @interface Trigger : NSObject
@@ -75,10 +78,10 @@ static void selectSubfolder(void) {
     done = YES;
     panelVisibleAtTrigger = [panel isVisible];
     if (!strcmp(mode, "cancel")) {
-        press(@selector(_cancel:), @"cancel");
+        press(@selector(_cancel:), "cancel");
     } else {
         if (!strcmp(mode, "open-selected")) selectSubfolder();
-        press(@selector(_selectFile:), @"open");
+        press(@selector(_selectFile:), "open");
     }
 }
 @end
@@ -104,7 +107,7 @@ int main(int argc, char **argv) {
         [[NSFileManager defaultManager] createDirectoryAtPath:subDir
             withIntermediateDirectories:YES attributes:nil error:NULL];
 
-        panel = [NSOpenPanel openPanel];
+        panel = [[NSOpenPanel openPanel] retain];
         [panel setCanChooseDirectories:YES];
         [panel setCanChooseFiles:NO];
         [panel setAllowsMultipleSelection:NO];
@@ -116,7 +119,7 @@ int main(int argc, char **argv) {
                            dispatch_get_global_queue(0, 0), ^{
                 printf("OPENPANEL_CHECK mode=%s result=FAIL problems=HANG "
                        "trigger=\"%s\" visible_at_trigger=%d\n",
-                       mode, [triggerNote UTF8String], panelVisibleAtTrigger);
+                       mode, triggerNote, panelVisibleAtTrigger);
                 fflush(stdout);
                 _exit(3);
             });
@@ -153,11 +156,12 @@ int main(int argc, char **argv) {
             [problems addObject:@"code_not_cancel"];
         }
         if (visible) [problems addObject:@"still_visible"];
-        if ([triggerNote hasSuffix:@"not found"]) [problems addObject:triggerNote];
+        if (strstr(triggerNote, "not found") && !strstr(triggerNote, "button not found"))
+            [problems addObject:@"subfolder_row_not_found"];
         BOOL pass = [problems count] == 0;
         printf("OPENPANEL_CHECK mode=%s result=%s code=%ld url=%s expected_url=%s visible=%d trigger=\"%s\"%s%s\n",
                mode, pass ? "PASS" : "FAIL", (long)code, [shown UTF8String],
-               wantOpen ? [wantPath UTF8String] : "-", visible, [triggerNote UTF8String],
+               wantOpen ? [wantPath UTF8String] : "-", visible, triggerNote,
                pass ? "" : " problems=",
                pass ? "" : [[problems componentsJoinedByString:@","] UTF8String]);
         fflush(stdout);
