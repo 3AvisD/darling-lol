@@ -48,8 +48,34 @@ int main(void) {
     XEvent map={0};map.type=KeymapNotify;[display postXEvent:&map];expectModifier(0x37,0);
     key(display,KeyPress,66,0);expectModifier(0x39,NSAlphaShiftKeyMask);
     key(display,KeyRelease,66,LockMask);expectModifier(0x39,NSAlphaShiftKeyMask);
+    // GNOME overview: Super press delivered, release swallowed, no focus change.
+    // The next event's server state lacks Mod4, so Command must be released first.
+    key(display,KeyPress,133,LockMask);expectModifier(0x37,NSAlphaShiftKeyMask|NSCommandKeyMask);
+    NSUInteger before=[events count];
+    key(display,KeyPress,50,LockMask);
+    assert([events count]==before+2);
+    NSEvent *released=[events objectAtIndex:before];
+    assert([released keyCode]==0x37 && [released modifierFlags]==NSAlphaShiftKeyMask);
+    expectModifier(0x38,NSAlphaShiftKeyMask|NSShiftKeyMask);
+    // A modifier that is still held stays held.
+    key(display,KeyPress,133,LockMask|ShiftMask);expectModifier(0x37,NSAlphaShiftKeyMask|NSShiftKeyMask|NSCommandKeyMask);
+    before=[events count];
+    key(display,KeyRelease,50,LockMask|ShiftMask|Mod4Mask);
+    assert([events count]==before+1);
+    expectModifier(0x38,NSAlphaShiftKeyMask|NSCommandKeyMask);
+    // Right Alt is Mod1 (Option) on US layouts and Mod5 (AltGr) elsewhere; the
+    // backend reads the server map, so take whichever it reported and check it
+    // is still held, and reported once, when Command goes up.
+    key(display,KeyPress,108,LockMask|Mod4Mask);
+    NSUInteger rightAlt=[[events lastObject] modifierFlags]&~(NSUInteger)(NSAlphaShiftKeyMask|NSCommandKeyMask);
+    assert(rightAlt==NSAlternateKeyMask || rightAlt==NSFunctionKeyMask);
+    unsigned int rightAltMask=rightAlt==NSAlternateKeyMask ? Mod1Mask : Mod5Mask;
+    before=[events count];
+    key(display,KeyRelease,133,LockMask|Mod4Mask|rightAltMask);
+    assert([events count]==before+1);
+    expectModifier(0x37,NSAlphaShiftKeyMask|rightAlt);
     method_setImplementation(method,original);
-    puts("PASS Super=Command, Alt=Option, both Command keys, post-transition flags, focus-loss release, missed-release reconciliation, Caps Lock");
+    puts("PASS Super=Command, Alt=Option, both Command keys, post-transition flags, focus-loss release, missed-release reconciliation, Caps Lock, swallowed Super release, layout-mapped Right Alt");
     [events release];
  }
  return 0;
