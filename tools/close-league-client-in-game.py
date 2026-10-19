@@ -160,7 +160,9 @@ def close_decision(state, closes, last_close, now):
         return None
     if closes >= MAX_CLOSES:
         return 'limit'
-    if now - last_close < COOLDOWN_SECONDS:
+    # last_close is None until the first close: monotonic time counts from boot,
+    # so a 0.0 start would block closes for the first COOLDOWN_SECONDS of uptime.
+    if last_close is not None and now - last_close < COOLDOWN_SECONDS:
         return None
     return 'close'
 
@@ -189,7 +191,7 @@ def supervise(proc_root=Path('/proc'), prefix=None, once=False, dry_run=False, o
           'opt out with RCLOL_CLOSE_CLIENT_IN_GAME=0' % prefix, file=out, flush=True)
     in_game = False
     closes = 0
-    last_close = 0.0
+    last_close = None
     limit_reported = False
     seen = False
     idle_since = None
@@ -203,7 +205,7 @@ def supervise(proc_root=Path('/proc'), prefix=None, once=False, dry_run=False, o
             if state['game'] and not in_game:
                 in_game = True
                 closes = 0
-                last_close = 0.0
+                last_close = None
                 limit_reported = False
                 print('close-league-client-in-game: a match started', file=out, flush=True)
             elif not state['game'] and in_game:
