@@ -38,7 +38,7 @@ class CompatibilityChecks(unittest.TestCase):
         patch = patch_text.split(marker, 1)[1].split('\ndiff --git ', 1)[0]
         with tempfile.TemporaryDirectory() as folder:
             target = Path(folder) / path
-            target.parent.mkdir(parents=True)
+            target.parent.mkdir(parents=True, exist_ok=True)
             if original is not None:
                 target.write_bytes(original)
             subprocess.run(['patch', '--silent', '-p1', '-d', folder], input=marker + patch + ("" if patch.endswith("\n") else "\n"),
