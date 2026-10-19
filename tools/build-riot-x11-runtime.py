@@ -59,3 +59,12 @@ subprocess.run(['clang', '-target', 'x86_64-apple-macosx11.0', '-fuse-ld=lld',
     '-nostdlib', '-isysroot', sdk, str(probe), '-lSystem', '-lobjc', '-framework', 'AppKit',
     '-framework', 'Foundation', '-framework', 'CoreGraphics',
     '-o', str(project / 'build/riot-window-decorations-check')], check=True)
+
+# Match native AppKit's local event monitor dispatch semantics.
+probe = project / 'build/riot-event-monitors-check.o'
+subprocess.run(['clang', *flags['C_DEFINES'], *flags['C_INCLUDES'], *flags['C_FLAGS'],
+    '-O3', '-march=native', '-mtune=generic', '-Wno-macro-redefined', '-c',
+    str(project / 'tools/riot-event-monitors-check.m'), '-o', str(probe)], check=True)
+subprocess.run(['clang', '-target', 'x86_64-apple-macosx11.0', '-fuse-ld=lld',
+    '-nostdlib', '-isysroot', sdk, str(probe), '-lSystem', '-lobjc', '-framework', 'AppKit',
+    '-framework', 'Foundation', '-o', str(project / 'build/riot-event-monitors-check')], check=True)

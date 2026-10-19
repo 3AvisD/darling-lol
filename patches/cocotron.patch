@@ -126,7 +126,7 @@ index d543e329..e320a3af 100644
  {
      return [NSMethodSignature signatureWithObjCTypes: "v@:"];
 diff --git a/AppKit/NSApplication.m b/AppKit/NSApplication.m
-index 8e7508e2..6fc86b32 100644
+index 8e7508e2..5abc49b7 100644
 --- a/AppKit/NSApplication.m
 +++ b/AppKit/NSApplication.m
 @@ -17,6 +17,9 @@ COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
@@ -239,10 +239,14 @@ index 8e7508e2..6fc86b32 100644
  
      do {
          pool = [NSAutoreleasePool new];
-@@ -716,6 +744,12 @@ NSApplication *NSApp = nil;
+@@ -716,6 +744,16 @@ NSApplication *NSApp = nil;
  }
  
  - (void) sendEvent: (NSEvent *) event {
++    extern NSEvent *_NSApplyLocalEventMonitors(NSEvent *);
++    event = _NSApplyLocalEventMonitors(event);
++    if (event == nil)
++        return;
 +    static int inputTrace = -1;
 +    if (inputTrace < 0) inputTrace = getenv("RCLOL_INPUT_TRACE") != NULL;
 +    if (inputTrace && ([event type] == NSKeyDown || [event type] == NSLeftMouseDown))
@@ -252,7 +256,7 @@ index 8e7508e2..6fc86b32 100644
      if ([event type] == NSKeyDown) {
          unsigned modifierFlags = [event modifierFlags];
  
-@@ -742,6 +776,61 @@ NSApplication *NSApp = nil;
+@@ -742,6 +780,61 @@ NSApplication *NSApp = nil;
      do {
          NSAutoreleasePool *pool = [NSAutoreleasePool new];
  
@@ -648,10 +652,49 @@ index cacd8999..9422d869 100644
      NSInvalidAbstractInvocation();
      return nil;
 diff --git a/AppKit/NSEvent.subproj/NSEvent.m b/AppKit/NSEvent.subproj/NSEvent.m
-index d0bad986..d0b1b4aa 100644
+index d0bad986..fecfa9f8 100644
 --- a/AppKit/NSEvent.subproj/NSEvent.m
 +++ b/AppKit/NSEvent.subproj/NSEvent.m
-@@ -40,6 +40,10 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+@@ -29,6 +29,38 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ #import <Foundation/NSDate.h>
+ #import <Foundation/NSException.h>
+ #import <Foundation/NSRaise.h>
++#import <Foundation/NSArray.h>
++
++@interface _NSLocalEventMonitor : NSObject {
++@public
++    NSEventMask _mask;
++    NSEvent * (^_handler)(NSEvent *);
++}
++@end
++
++@implementation _NSLocalEventMonitor
++- (void) dealloc {
++    [_handler release];
++    [super dealloc];
++}
++@end
++
++static NSMutableArray *_NSLocalEventMonitors;
++
++/* Snapshot the registrations: changes made by a handler affect subsequent
++ * dispatches, not the event already in flight. Handlers may also enter a nested
++ * event loop, which takes its own snapshot. */
++NSEvent *_NSApplyLocalEventMonitors(NSEvent *event) {
++    NSArray *monitors = [[_NSLocalEventMonitors copy] autorelease];
++    for (_NSLocalEventMonitor *monitor in [monitors reverseObjectEnumerator]) {
++        if (event == nil)
++            break;
++        NSUInteger type = [event type];
++        if (type < sizeof(NSEventMask) * 8 && (monitor->_mask & ((NSEventMask)1 << type)))
++            event = monitor->_handler(event);
++    }
++    return event;
++}
+ 
+ @implementation NSEvent
+ 
+@@ -40,6 +72,10 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
      return [[NSDisplay currentDisplay] currentModifierFlags];
  }
  
@@ -662,6 +705,34 @@ index d0bad986..d0b1b4aa 100644
  - (instancetype) initWithType: (NSEventType) type
                       location: (NSPoint) location
                  modifierFlags: (NSEventModifierFlags) modifierFlags
+@@ -350,14 +386,23 @@ static NSTimer *_periodicTimer = nil;
+ }
+ 
+ + (id) addLocalMonitorForEventsMatchingMask: (NSEventMask) mask
+-                                    handler: (NSEvent * (^)(NSEvent *event)) block
++                                     handler: (NSEvent * (^)(NSEvent *event)) block
+ {
+-    NSUnimplementedMethod();
+-    return nil;
++    if (block == nil)
++        return nil;
++    if (_NSLocalEventMonitors == nil)
++        _NSLocalEventMonitors = [NSMutableArray new];
++    _NSLocalEventMonitor *monitor = [[_NSLocalEventMonitor alloc] init];
++    monitor->_mask = mask;
++    monitor->_handler = [block copy];
++    [_NSLocalEventMonitors addObject: monitor];
++    return [monitor autorelease];
+ }
+ 
+ + (void) removeMonitor: (id) eventMonitor {
+-    NSUnimplementedMethod();
++    if ([_NSLocalEventMonitors indexOfObjectIdenticalTo: eventMonitor] != NSNotFound) {
++        [_NSLocalEventMonitors removeObjectIdenticalTo: eventMonitor];
++    }
+ }
+ 
+ @end
 diff --git a/AppKit/NSEvent.subproj/NSEvent_mouse.m b/AppKit/NSEvent.subproj/NSEvent_mouse.m
 index 31c65aac..f7d55ec0 100644
 --- a/AppKit/NSEvent.subproj/NSEvent_mouse.m
@@ -6184,7 +6255,7 @@ index 8860a087..a897e2ce 100644
  - (NSArray *) orderedWindowNumbers;
  
 diff --git a/AppKit/include/AppKit/NSEvent.h b/AppKit/include/AppKit/NSEvent.h
-index 0677f2e7..d16080f4 100644
+index 0677f2e7..b6daef18 100644
 --- a/AppKit/include/AppKit/NSEvent.h
 +++ b/AppKit/include/AppKit/NSEvent.h
 @@ -83,6 +83,8 @@ typedef NS_ENUM(NSUInteger, NSEventType) {
@@ -6196,11 +6267,14 @@ index 0677f2e7..d16080f4 100644
  
      NSAppKitSystem = 100,
  
-@@ -212,6 +214,7 @@ enum { NSApplicationActivated = 0, NSApplicationDeactivated = 1 };
+@@ -212,6 +214,10 @@ enum { NSApplicationActivated = 0, NSApplicationDeactivated = 1 };
  
  + (NSPoint) mouseLocation;
  + (NSEventModifierFlags) modifierFlags;
 ++ (NSUInteger) pressedMouseButtons;
+++ (id) addLocalMonitorForEventsMatchingMask: (NSEventMask) mask
++                                  handler: (NSEvent * (^)(NSEvent *event)) block;
+++ (void) removeMonitor: (id) eventMonitor;
  
  - (instancetype) initWithType: (NSEventType) type
                       location: (NSPoint) location
