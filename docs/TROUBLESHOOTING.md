@@ -192,6 +192,31 @@ observation, without waiting for a match:
 python3 tools/close-league-client-in-game.py --once --dry-run
 ```
 
+### Riot reports NO INTERNET FOUND while the host is online
+
+Older base runtimes ship Google DNS servers (`8.8.8.8` and `8.8.4.4`), which
+some mobile and managed networks block. The base resolver now links to the
+host's `/etc/resolv.conf` through `/Volumes/SystemRoot`, including when the host
+file is a symlink into `/run` for systemd-resolved or NetworkManager. File and
+symlink replacements remain visible without copying the resolver on launch.
+
+Exit Riot and League, then run `./scripts/update.sh` to rebuild and install both
+the base link and the host symlink handling correction. Existing prefix DNS
+overrides in `$DPREFIX/private/etc/resolv.conf` (normally
+`~/.darling/private/etc/resolv.conf`) remain in effect; remove a previous manual
+override with Darling stopped if you want to follow the host instead. A custom
+prefix `/etc` directory can also shadow the base `/etc -> private/etc` link.
+
+Check resolution inside the guest with:
+
+```sh
+darling shell curl --noproxy '*' https://clientconfig.rpg.riotgames.com/
+```
+
+An HTTP response establishes that resolution succeeded even if that endpoint
+rejects the request. This change follows the host resolver configuration;
+already-running clients may cache DNS settings until restarted.
+
 ### Downloads repeatedly fail with an IPv6 CONNECT_TO error
 
 The bundled downloader was observed retrying CDN chunks with:
