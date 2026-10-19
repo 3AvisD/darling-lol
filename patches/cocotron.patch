@@ -5092,6 +5092,7 @@ index bfe3839a..bc592711 100644
  - (void) frameChanged;
  - (void) setLastKnownCursorPosition: (CGPoint) point;
 diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
+index f4925b6..b565b91 100644
 --- a/AppKit/X11.backend/X11Window.m
 +++ b/AppKit/X11.backend/X11Window.m
 @@ -18,11 +18,14 @@
@@ -5109,134 +5110,10 @@ diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
  #import <Foundation/NSBundle.h>
  #import <Foundation/NSException.h>
  #import <Foundation/NSMutableData.h>
-@@ -38,130 +41,40 @@
+@@ -38,6 +41,110 @@
  #import "X11Window.h"
  #import <X11/Xatom.h>
  #import <X11/Xutil.h>
--
--@implementation X11Window
--
--+ (Visual *) visual {
--    static Visual *ret = NULL;
--
--    if (!ret) {
--        int visuals_matched, i;
--        XVisualInfo match = {0};
--        Display *dpy = [(X11Display *) [NSDisplay currentDisplay] display];
--
--        XVisualInfo *info = XGetVisualInfo(dpy, 0, &match, &visuals_matched);
--
--        for (i = 0; i < visuals_matched; i++) {
--            if (info[i].depth == 32 && (info[i].red_mask == 0xff0000 &&
--                                        info[i].green_mask == 0x00ff00 &&
--                                        info[i].blue_mask == 0x0000ff)) {
--                ret = info[i].visual;
--            }
--        }
--        XFree(info);
--        if (!ret)
--            ret = DefaultVisual(dpy, DefaultScreen(dpy));
--    }
--
--    return ret;
--}
--
--static NSData *makeWindowIcon() {
--    static NSMutableData *res;
--
--    if (res != nil)
--        return res;
--
--    // Figure out the path.
--    NSBundle *bundle = [NSBundle mainBundle];
--    NSString *name = [bundle objectForInfoDictionaryKey: @"CFBundleIconFile"];
--    if (name == nil || [name length] == 0)
--        return nil;
--    NSString *path = [bundle pathForImageResource: name];
--    if (path == nil) {
--        NSLog(@"Cannot find an icon file named %@", name);
--        return nil;
--    }
--    NSURL *url = [NSURL fileURLWithPath: path];
--
--    O2ImageSource *imageSource = [O2ImageSource newImageSourceWithURL: url
--                                                              options: nil];
--    if (imageSource == nil) {
--        NSLog(@"Cannot parse the icon");
--        return nil;
--    }
--
--    res = [[NSMutableData alloc] initWithCapacity: 32 * 32 * 4 + 2];
--    O2ColorSpace *colorSpace = O2ColorSpaceCreateDeviceRGB();
--
--    // Go over the images, turning them into the required format
--    // and appending them to res.
--    for (NSUInteger i = 0; i < [imageSource count]; i++) {
--
--        O2Image *image = [imageSource createImageAtIndex: i options: nil];
--        NSUInteger width = O2ImageGetWidth(image);
--        NSUInteger height = O2ImageGetHeight(image);
--
--        // Render the image in ARGB.
--        O2BitmapContext *context = (O2BitmapContext *) O2BitmapContextCreate(
--                NULL, width, height, 8, width * 4, colorSpace,
--                kO2ImageAlphaPremultipliedFirst | kO2BitmapByteOrder32Host);
--
--        [context drawImage: image inRect: O2RectMake(0, 0, width, height)];
--        int *imageData = O2BitmapContextGetData(context);
--
--        // Convert to the format accepted by Xlib.
--        NSMutableData *data =
--                [NSMutableData dataWithLength: width * height * sizeof(long)];
--        long *dataPtr = (long *) [data mutableBytes];
--        int count = width * height;
--        for (int i = 0; i < count; i++) {
--            dataPtr[i] = imageData[i];
--        }
--
--        struct {
--            long w, h;
--        } size = {width, height};
--        [res appendBytes: &size length: sizeof(size)];
--        [res appendData: data];
--
--        [context release];
--        [image release];
--    }
--
--    [colorSpace release];
--    [imageSource release];
--
--    return res;
--}
--
--- (void) setWindowIcon {
--
--    NSData *data = makeWindowIcon();
--
--    if (data == nil)
--        return;
--
--    XChangeProperty(
--            _display, _window, XInternAtom(_display, "_NET_WM_ICON", False),
--            XInternAtom(_display, "CARDINAL", False), 32, PropModeReplace,
--            [data bytes], [data length] / sizeof(long));
--}
--
--- (instancetype) initWithDelegate: (NSWindow *) delegate {
--    _delegate = delegate;
--    _level = [delegate level];
--    _styleMask = [delegate styleMask];
--    _backingType = (CGSBackingStoreType)[delegate backingType];
--    _deviceDictionary = [NSMutableDictionary new];
--
--    X11Display* x11disp = (X11Display *) [NSDisplay currentDisplay];
--    _display = [x11disp display];
--
--    _frame = [self transformFrame: [delegate frame]];
--    BOOL isPanel = [delegate isKindOfClass: [NSPanel class]];
--    if (isPanel && _styleMask & NSDocModalWindowMask)
--        _styleMask = NSBorderlessWindowMask;
 +#import <X11/extensions/shape.h>
 +#include <fcntl.h>
 +#include <stdint.h>
@@ -5271,16 +5148,19 @@ diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
 +    if (visualInfo != NULL)
 +        return visualInfo;
 +
-     // TODO: get rid of these glX calls
-     GLint att[] = {GLX_RGBA,
-                    GLX_DOUBLEBUFFER,
-@@ -175,36 +88,252 @@
-                    4,
-                    None};
- 
--    int screen = DefaultScreen(_display);
--
--    if ((_visualInfo = glXChooseVisual(_display, screen, att)) == NULL) {
++    // TODO: get rid of these glX calls
++    GLint att[] = {GLX_RGBA,
++                   GLX_DOUBLEBUFFER,
++                   GLX_RED_SIZE,
++                   4,
++                   GLX_GREEN_SIZE,
++                   4,
++                   GLX_BLUE_SIZE,
++                   4,
++                   GLX_DEPTH_SIZE,
++                   4,
++                   None};
++
 +    int screen = DefaultScreen(display);
 +
 +    // Rendering goes through EGL. NVIDIA's glXChooseVisual can return a GLX-only visual that every
@@ -5295,16 +5175,8 @@ diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
 +        visualInfo = NULL;
 +    }
 +    if (visualInfo == NULL && (visualInfo = glXChooseVisual(display, screen, att)) == NULL) {
-         NSLog(@"glXChooseVisual failed at %s %d", __FILE__, __LINE__);
-     }
--
--    Colormap cmap =
--            XCreateColormap(_display, RootWindow(_display, _visualInfo->screen),
--                            _visualInfo->visual, AllocNone);
--
--    if (cmap < 0) {
--        NSLog(@"XCreateColormap failed");
--        [self release];
++        NSLog(@"glXChooseVisual failed at %s %d", __FILE__, __LINE__);
++    }
 +    return visualInfo;
 +}
 +
@@ -5346,145 +5218,56 @@ diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
 +    }
 +    return found;
 +}
-+
-+@implementation X11Window
-+
-++ (Visual *) visual {
-+    static Visual *ret = NULL;
-+
-+    if (!ret) {
-+        int visuals_matched, i;
-+        XVisualInfo match = {0};
-+        Display *dpy = [(X11Display *) [NSDisplay currentDisplay] display];
-+
-+        XVisualInfo *info = XGetVisualInfo(dpy, 0, &match, &visuals_matched);
-+
-+        for (i = 0; i < visuals_matched; i++) {
-+            if (info[i].depth == 32 && (info[i].red_mask == 0xff0000 &&
-+                                        info[i].green_mask == 0x00ff00 &&
-+                                        info[i].blue_mask == 0x0000ff)) {
-+                ret = info[i].visual;
-+            }
-+        }
-+        XFree(info);
-+        if (!ret)
-+            ret = DefaultVisual(dpy, DefaultScreen(dpy));
-+    }
-+
-+    return ret;
-+}
-+
-+static NSData *makeWindowIcon() {
-+    static NSMutableData *res;
-+
-+    if (res != nil)
-+        return res;
-+
-+    // Figure out the path.
-+    NSBundle *bundle = [NSBundle mainBundle];
-+    NSString *name = [bundle objectForInfoDictionaryKey: @"CFBundleIconFile"];
-+    if (name == nil || [name length] == 0)
-         return nil;
--    }
-+    NSString *path = [bundle pathForImageResource: name];
-+    if (path == nil) {
-+        NSLog(@"Cannot find an icon file named %@", name);
-+        return nil;
-+    }
-+    NSURL *url = [NSURL fileURLWithPath: path];
-+
-+    O2ImageSource *imageSource = [O2ImageSource newImageSourceWithURL: url
-+                                                              options: nil];
-+    if (imageSource == nil) {
-+        NSLog(@"Cannot parse the icon");
-+        return nil;
-+    }
-+
-+    res = [[NSMutableData alloc] initWithCapacity: 32 * 32 * 4 + 2];
-+    O2ColorSpace *colorSpace = O2ColorSpaceCreateDeviceRGB();
-+
-+    // Go over the images, turning them into the required format
-+    // and appending them to res.
-+    for (NSUInteger i = 0; i < [imageSource count]; i++) {
-+
-+        O2Image *image = [imageSource createImageAtIndex: i options: nil];
-+        NSUInteger width = O2ImageGetWidth(image);
-+        NSUInteger height = O2ImageGetHeight(image);
-+
-+        // Render the image in ARGB.
-+        O2BitmapContext *context = (O2BitmapContext *) O2BitmapContextCreate(
-+                NULL, width, height, 8, width * 4, colorSpace,
-+                kO2ImageAlphaPremultipliedFirst | kO2BitmapByteOrder32Host);
-+
-+        [context drawImage: image inRect: O2RectMake(0, 0, width, height)];
-+        int *imageData = O2BitmapContextGetData(context);
-+
-+        // Convert to the format accepted by Xlib.
-+        NSMutableData *data =
-+                [NSMutableData dataWithLength: width * height * sizeof(long)];
-+        long *dataPtr = (long *) [data mutableBytes];
-+        int count = width * height;
-+        for (int i = 0; i < count; i++) {
-+            dataPtr[i] = imageData[i];
-+        }
-+
-+        struct {
-+            long w, h;
-+        } size = {width, height};
-+        [res appendBytes: &size length: sizeof(size)];
-+        [res appendData: data];
-+
-+        [context release];
-+        [image release];
-+    }
-+
-+    [colorSpace release];
-+    [imageSource release];
-+
-+    return res;
-+}
-+
-+- (void) setWindowIcon {
-+
-+    NSData *data = makeWindowIcon();
-+
-+    if (data == nil)
-+        return;
-+
-+    XChangeProperty(
-+            _display, _window, XInternAtom(_display, "_NET_WM_ICON", False),
-+            XInternAtom(_display, "CARDINAL", False), 32, PropModeReplace,
-+            [data bytes], [data length] / sizeof(long));
-+}
-+
-+- (instancetype) initWithDelegate: (NSWindow *) delegate {
-+    _delegate = delegate;
-+    _level = [delegate level];
-+    _styleMask = [delegate styleMask];
-+    _backingType = (CGSBackingStoreType)[delegate backingType];
-+    _deviceDictionary = [NSMutableDictionary new];
-+
-+    X11Display* x11disp = (X11Display *) [NSDisplay currentDisplay];
-+    _display = [x11disp display];
-+
+ 
+ @implementation X11Window
+ 
+@@ -158,53 +265,75 @@ static NSData *makeWindowIcon() {
+     X11Display* x11disp = (X11Display *) [NSDisplay currentDisplay];
+     _display = [x11disp display];
+ 
+-    _frame = [self transformFrame: [delegate frame]];
 +    _frame = [x11disp rootRectForFrame: [delegate frame]];
-+    BOOL isPanel = [delegate isKindOfClass: [NSPanel class]];
-+    if (isPanel && _styleMask & NSDocModalWindowMask)
-+        _styleMask = NSBorderlessWindowMask;
-+
+     BOOL isPanel = [delegate isKindOfClass: [NSPanel class]];
+     if (isPanel && _styleMask & NSDocModalWindowMask)
+         _styleMask = NSBorderlessWindowMask;
+-    // TODO: get rid of these glX calls
+-    GLint att[] = {GLX_RGBA,
+-                   GLX_DOUBLEBUFFER,
+-                   GLX_RED_SIZE,
+-                   4,
+-                   GLX_GREEN_SIZE,
+-                   4,
+-                   GLX_BLUE_SIZE,
+-                   4,
+-                   GLX_DEPTH_SIZE,
+-                   4,
+-                   None};
+ 
+-    int screen = DefaultScreen(_display);
 +    _hasAlpha = [self wantsAlphaVisual];
 +    [self createXWindow];
-+
+ 
+-    if ((_visualInfo = glXChooseVisual(_display, screen, att)) == NULL) {
+-        NSLog(@"glXChooseVisual failed at %s %d", __FILE__, __LINE__);
+-    }
 +    /* Chromium windows consume cross-process CA frames. League's native Metal window owns its
 +     * drawable; a same-size client surface must never be raised above that drawable. */
 +    if (!X11IsLeagueGameWindow(_display, None, delegate))
 +        _remoteFrameTimer = [[NSTimer scheduledTimerWithTimeInterval: 1.0 / 60.0
 +            target: self selector: @selector(presentRemoteCAFrame:)
 +            userInfo: nil repeats: YES] retain];
-+
+ 
+-    Colormap cmap =
+-            XCreateColormap(_display, RootWindow(_display, _visualInfo->screen),
+-                            _visualInfo->visual, AllocNone);
 +    return self;
 +}
-+
+ 
+-    if (cmap < 0) {
+-        NSLog(@"XCreateColormap failed");
+-        [self release];
+-        return nil;
+-    }
 +- (void) createXWindow {
 +    NSWindow *delegate = _delegate;
 +    X11Display* x11disp = (X11Display *) [NSDisplay currentDisplay];
@@ -5551,7 +5334,7 @@ diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
  
      [self syncDelegateProperties];
  
-@@ -217,7 +346,20 @@
+@@ -217,7 +346,20 @@ static NSData *makeWindowIcon() {
                              .res_class = (char *) name};
      XSetClassHint(_display, _window, &classHint);
  
@@ -5573,7 +5356,7 @@ diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
  
      _isModal = [delegate isSheet] || [NSApp modalWindow] == delegate;
      // FIXME: There should be no need for this.
-@@ -254,19 +396,96 @@
+@@ -254,19 +396,96 @@ static NSData *makeWindowIcon() {
          XNFocusWindow, _window,
          NULL);
  
@@ -5590,10 +5373,9 @@ diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
      [self setStyleMaskInternal: _styleMask force: YES];
  
      [self setWindowIcon];
--
--    return self;
 +}
-+
+ 
+-    return self;
 +// Only when the background can show through (a pattern image may): League's game window is
 +// non-opaque on an opaque background, and a 32-bit parent costs Xwayland a copy of its GL child.
 +- (BOOL) isTranslucent {
@@ -5677,10 +5459,26 @@ diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
  }
  
  - (void) dealloc {
-@@ -279,7 +498,106 @@
+@@ -279,24 +498,59 @@ static NSData *makeWindowIcon() {
      return _styleMask;
  }
  
+-- (void) setStyleMaskInternal: (NSUInteger) mask force: (BOOL) force {
+-    if (force || (mask & NSWindowStyleMaskResizable) !=
+-                         (_styleMask & NSWindowStyleMaskResizable)) {
+-        XSizeHints *sh = XAllocSizeHints();
+-        if (mask & NSWindowStyleMaskResizable) {
+-            // Make resizable
+-            sh->flags = 0;
+-        } else {
+-            // Make non-resizable
+-            sh->flags = PMinSize | PMaxSize;
+-            sh->min_width = sh->max_width = _frame.size.width;
+-            sh->min_height = sh->max_height = _frame.size.height;
+-        }
+-
+-        XSetWMSizeHints(_display, _window, sh, XA_WM_NORMAL_HINTS);
+-        XFree(sh);
 +/* A borderless application covering a monitor needs EWMH fullscreen so the
 + * compositor places it above desktop panels. Compare full monitor bounds,
 + * never the work area, and leave unmanaged menus/popups alone. */
@@ -5695,7 +5493,7 @@ diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
 +        if (!NSIsEmptyRect([screen frame]) &&
 +            NSEqualRects([display rootRectForFrame: [screen frame]], frame))
 +            return YES;
-+    }
+     }
 +    return NO;
 +}
 +
@@ -5727,48 +5525,52 @@ diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
 +    _layerDrawableOwner = nil;
 +    [self updateLayerPresentationHints: _fullscreenRequested];
 +}
-+
+ 
 +- (void) requestFullscreen: (BOOL) fullscreen force: (BOOL) force {
 +    if (fullscreen) {
 +        unsigned long bypass = 2;
 +        XChangeProperty(_display, _window, XInternAtom(_display,"_NET_WM_BYPASS_COMPOSITOR",False),
 +                        XA_CARDINAL,32,PropModeReplace,(unsigned char *)&bypass,1);
 +    }
-+    if (!_mapped) {
-+        long states[2];
-+        int states_cnt = 0;
-+        if (_isModal) {
-+            states[states_cnt++] =
-+                    (long) XInternAtom(_display, "_NET_WM_STATE_MODAL", False);
-+        }
+     if (!_mapped) {
+         long states[2];
+         int states_cnt = 0;
+@@ -304,7 +558,7 @@ static NSData *makeWindowIcon() {
+             states[states_cnt++] =
+                     (long) XInternAtom(_display, "_NET_WM_STATE_MODAL", False);
+         }
+-        if (mask & NSWindowStyleMaskFullScreen) {
 +        if (fullscreen) {
-+            states[states_cnt++] = (long) XInternAtom(
-+                    _display, "_NET_WM_STATE_FULLSCREEN", False);
-+        }
-+        XChangeProperty(_display, _window,
-+                        XInternAtom(_display, "_NET_WM_STATE", False), XA_ATOM,
-+                        32, PropModeReplace, (const unsigned char *) states,
-+                        states_cnt);
+             states[states_cnt++] = (long) XInternAtom(
+                     _display, "_NET_WM_STATE_FULLSCREEN", False);
+         }
+@@ -312,14 +566,13 @@ static NSData *makeWindowIcon() {
+                         XInternAtom(_display, "_NET_WM_STATE", False), XA_ATOM,
+                         32, PropModeReplace, (const unsigned char *) states,
+                         states_cnt);
+-    } else if (force || ((mask & NSWindowStyleMaskFullScreen) !=
+-                         (_styleMask & NSWindowStyleMaskFullScreen))) {
 +    } else if (force || fullscreen != _fullscreenRequested) {
-+        XClientMessageEvent event = {0};
-+        event.type = ClientMessage;
-+        event.window = _window;
-+        event.message_type = XInternAtom(_display, "_NET_WM_STATE", False);
-+        event.format = 32;
+         XClientMessageEvent event = {0};
+         event.type = ClientMessage;
+         event.window = _window;
+         event.message_type = XInternAtom(_display, "_NET_WM_STATE", False);
+         event.format = 32;
+-        event.data.l[0] = (mask & NSWindowStyleMaskFullScreen) ? 1 : 2;
 +        event.data.l[0] = fullscreen ? 1 : 0; /* EWMH ADD / REMOVE, not TOGGLE */
-+        event.data.l[1] =
-+                (long) XInternAtom(_display, "_NET_WM_STATE_FULLSCREEN", False);
-+        event.data.l[3] = 1;
-+        XSendEvent(_display, DefaultRootWindow(_display), False,
-+                   SubstructureNotifyMask | SubstructureRedirectMask,
-+                   (XEvent *) &event);
-+    }
+         event.data.l[1] =
+                 (long) XInternAtom(_display, "_NET_WM_STATE_FULLSCREEN", False);
+         event.data.l[3] = 1;
+@@ -327,6 +580,48 @@ static NSData *makeWindowIcon() {
+                    SubstructureNotifyMask | SubstructureRedirectMask,
+                    (XEvent *) &event);
+     }
 +    _fullscreenRequested = fullscreen;
 +    [self updateLayerPresentationHints: fullscreen];
 +    XFlush(_display);
 +}
 +
- - (void) setStyleMaskInternal: (NSUInteger) mask force: (BOOL) force {
++- (void) setStyleMaskInternal: (NSUInteger) mask force: (BOOL) force {
 +    // Cocoa chrome may change after the native window already exists. A hidden,
 +    // transparent titlebar is client-drawn chrome, even with the titled bit set.
 +    // NSWindowTitleHidden is 1; this SDK exposes titleVisibility as NSInteger.
@@ -5781,17 +5583,13 @@ diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
 +        XDeleteProperty(_display, _window,
 +                        XInternAtom(_display, "_MOTIF_WM_HINTS", False));
 +    }
-     if (force || (mask & NSWindowStyleMaskResizable) !=
-                          (_styleMask & NSWindowStyleMaskResizable)) {
-         XSizeHints *sh = XAllocSizeHints();
-@@ -287,46 +605,23 @@
-             // Make resizable
-             sh->flags = 0;
-         } else {
--            // Make non-resizable
--            sh->flags = PMinSize | PMaxSize;
--            sh->min_width = sh->max_width = _frame.size.width;
--            sh->min_height = sh->max_height = _frame.size.height;
++    if (force || (mask & NSWindowStyleMaskResizable) !=
++                         (_styleMask & NSWindowStyleMaskResizable)) {
++        XSizeHints *sh = XAllocSizeHints();
++        if (mask & NSWindowStyleMaskResizable) {
++            // Make resizable
++            sh->flags = 0;
++        } else {
 +            if (X11IsLeagueGameWindow(_display, _window, _delegate)) {
 +                // A fixed-size window cannot be made EWMH fullscreen by Mutter,
 +                // and a stale minimum would block switching to a smaller mode.
@@ -5802,47 +5600,17 @@ diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
 +                sh->min_width = sh->max_width = _frame.size.width;
 +                sh->min_height = sh->max_height = _frame.size.height;
 +            }
-         }
- 
-         XSetWMSizeHints(_display, _window, sh, XA_WM_NORMAL_HINTS);
-         XFree(sh);
-     }
- 
--    if (!_mapped) {
--        long states[2];
--        int states_cnt = 0;
--        if (_isModal) {
--            states[states_cnt++] =
--                    (long) XInternAtom(_display, "_NET_WM_STATE_MODAL", False);
--        }
--        if (mask & NSWindowStyleMaskFullScreen) {
--            states[states_cnt++] = (long) XInternAtom(
--                    _display, "_NET_WM_STATE_FULLSCREEN", False);
--        }
--        XChangeProperty(_display, _window,
--                        XInternAtom(_display, "_NET_WM_STATE", False), XA_ATOM,
--                        32, PropModeReplace, (const unsigned char *) states,
--                        states_cnt);
--    } else if (force || ((mask & NSWindowStyleMaskFullScreen) !=
--                         (_styleMask & NSWindowStyleMaskFullScreen))) {
--        XClientMessageEvent event = {0};
--        event.type = ClientMessage;
--        event.window = _window;
--        event.message_type = XInternAtom(_display, "_NET_WM_STATE", False);
--        event.format = 32;
--        event.data.l[0] = (mask & NSWindowStyleMaskFullScreen) ? 1 : 2;
--        event.data.l[1] =
--                (long) XInternAtom(_display, "_NET_WM_STATE_FULLSCREEN", False);
--        event.data.l[3] = 1;
--        XSendEvent(_display, DefaultRootWindow(_display), False,
--                   SubstructureNotifyMask | SubstructureRedirectMask,
--                   (XEvent *) &event);
--    }
++        }
++
++        XSetWMSizeHints(_display, _window, sh, XA_WM_NORMAL_HINTS);
++        XFree(sh);
++    }
++
 +    [self requestFullscreen:[self wantsFullscreenWithStyleMask:mask rootFrame:_frame] force:force];
  }
  
  - (void) setStyleMask: (NSUInteger) mask {
-@@ -338,7 +633,6 @@
+@@ -338,7 +633,6 @@ static NSData *makeWindowIcon() {
  }
  
  + (void) removeDecorationForWindow: (Window) w onDisplay: (Display *) dpy {
@@ -5850,7 +5618,7 @@ diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
      struct {
          unsigned long flags;
          unsigned long functions;
-@@ -356,9 +650,23 @@
+@@ -356,11 +650,25 @@ static NSData *makeWindowIcon() {
  
  - (void) ensureMapped {
      if (!_mapped) {
@@ -5861,21 +5629,22 @@ diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
          XMapWindow(_display, _window);
 +        _wasMapped = YES;
          _mapped = YES;
--    }
 +        _remoteFrameTargetRefresh = 0;
-+    }
-+}
-+
+     }
+ }
+ 
 +/* darling-lol: only map for a window AppKit considers visible. NSWindow sets _isVisible before
 + * ordering, so ordered windows still map; a hidden one (like the client's splash) must not be
 + * revived by a later restack or makeKey. */
 +- (void) ensureMappedIfVisible {
 +    if (_delegate == nil || [_delegate isVisible])
 +        [self ensureMapped];
- }
- 
++}
++
  - (void) showWindowWithoutActivation {
-@@ -377,14 +685,26 @@
+     [self ensureMapped];
+ }
+@@ -377,15 +685,27 @@ static NSData *makeWindowIcon() {
  - (void) syncDelegateProperties {
      long mask = KeyPressMask | KeyReleaseMask | ExposureMask |
                  StructureNotifyMask | EnterWindowMask | LeaveWindowMask |
@@ -5891,7 +5660,7 @@ diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
 +    /* Motion also restores a cursor hidden while typing. App-level motion
 +     * delivery is still filtered by acceptsMouseMovedEvents in X11Display. */
      XSelectInput(_display, _window, mask);
-+
+ 
 +    /* Mouse-transparent windows must not steal crossing events from the
 +     * view below them. Filtering dispatched events leaves X11 hit testing
 +     * unchanged and can repeatedly hide/recreate tooltip windows. */
@@ -5904,10 +5673,11 @@ diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
 +                              0, 0, None, ShapeSet);
 +        XFlush(_display);
 +    }
- 
++
      // TODO: background color
  }
-@@ -393,6 +713,28 @@
+ 
+@@ -393,6 +713,28 @@ static NSData *makeWindowIcon() {
      // This is essentially dealloc; we release our contexts
      // and windows, but unlike dealloc, this method can be called
      // several times, so set everything to nil/NULL/0.
@@ -5936,12 +5706,10 @@ diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
      [_context release];
      _context = nil;
  
-@@ -419,6 +761,392 @@
-         XDestroyWindow(_display, _window);
-         _window = 0;
+@@ -421,6 +763,392 @@ static NSData *makeWindowIcon() {
      }
-+}
-+
+ }
+ 
 +- (void) setRemoteFrameTimerSlow: (BOOL) slow {
 +    if (_remoteFrameTimerSlow == slow) return;
 +    _remoteFrameTimerSlow = slow;
@@ -6326,10 +6094,12 @@ diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
 +    _remoteFrameValid = NO;
 +    [self presentRemoteCAFrame: nil];
 +    return YES;
- }
- 
++}
++
  - (Window) windowHandle {
-@@ -470,14 +1198,32 @@
+     return _window;
+ }
+@@ -470,14 +1198,32 @@ static NSData *makeWindowIcon() {
      const char *text = [title cString];
      XStringListToTextProperty((char **) &text, 1, &prop);
      XSetWMName(_display, _window, &prop);
@@ -6363,12 +6133,10 @@ diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
  }
  
  - (void) setHasShadow: (BOOL) value {
-@@ -486,6 +1232,25 @@
- 
- - (void) setLevel: (int) value {
+@@ -488,6 +1234,25 @@ static NSData *makeWindowIcon() {
      _level = value;
-+}
-+
+ }
+ 
 +/* NSApplication's attention timer calls this for requestUserAttention:. The
 + * CGWindow base class raises an abstract-invocation exception, which aborted
 + * the whole LeagueClientUx process. Ask the window manager to mark the window
@@ -6386,10 +6154,12 @@ diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
 +               SubstructureNotifyMask | SubstructureRedirectMask,
 +               (XEvent *) &event);
 +    XFlush(_display);
- }
- 
++}
++
  - (void) setOpaque: (BOOL) value {
-@@ -518,7 +1283,7 @@
+     _isOpaque = value;
+ }
+@@ -518,7 +1283,7 @@ static NSData *makeWindowIcon() {
  
  - (void) placeAboveWindow: (NSInteger) otherNumber {
      X11Window *other = [X11Window windowWithWindowNumber: otherNumber];
@@ -6398,7 +6168,7 @@ diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
  
      if (!other) {
          XRaiseWindow(_display, _window);
-@@ -530,7 +1295,7 @@
+@@ -530,7 +1295,7 @@ static NSData *makeWindowIcon() {
  
  - (void) placeBelowWindow: (NSInteger) otherNumber {
      X11Window *other = [X11Window windowWithWindowNumber: otherNumber];
@@ -6407,7 +6177,7 @@ diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
  
      if (!other) {
          XLowerWindow(_display, _window);
-@@ -541,8 +1306,23 @@
+@@ -541,8 +1306,23 @@ static NSData *makeWindowIcon() {
  }
  
  - (void) makeKey {
@@ -6432,7 +6202,7 @@ diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
  }
  
  - (void) makeMain {
-@@ -559,7 +1339,29 @@
+@@ -559,7 +1339,29 @@ static NSData *makeWindowIcon() {
      XRaiseWindow(_display, _window);
  }
  
@@ -6462,7 +6232,7 @@ diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
      Atom wmState = XInternAtom(_display, "_NET_WM_STATE", FALSE);
      Atom hiddenState = XInternAtom(_display, "_NET_WM_STATE_HIDDEN", FALSE);
  
-@@ -593,8 +1395,10 @@
+@@ -593,8 +1395,10 @@ static NSData *makeWindowIcon() {
      if (_cglContext == NULL) {
          CGLError error;
  
@@ -6475,7 +6245,7 @@ diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
              NSLog(@"CGLCreateContext failed at %s %d with error %d", __FILE__,
                    __LINE__, error);
  
-@@ -615,6 +1419,14 @@
+@@ -615,6 +1419,14 @@ static NSData *makeWindowIcon() {
  }
  
  - (void) openGLFlushBuffer {
@@ -6490,7 +6260,7 @@ diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
      CGLError error;
  
      CGLContextObj prevContext = CGLGetCurrentContext();
-@@ -652,7 +1464,7 @@
+@@ -652,7 +1464,7 @@ static NSData *makeWindowIcon() {
  }
  
  - (O2Rect) frame {
@@ -6499,7 +6269,7 @@ diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
  }
  
  static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
-@@ -666,6 +1478,7 @@
+@@ -666,6 +1478,7 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
  }
  
  - (void) frameChanged {
@@ -6507,7 +6277,7 @@ diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
      XErrorHandler previousHandler = XSetErrorHandler(ignoreBadWindow);
      @try {
          Window root, parent;
-@@ -710,19 +1523,13 @@
+@@ -710,19 +1523,13 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
      [_deviceDictionary addEntriesFromDictionary: entries];
  }
  
