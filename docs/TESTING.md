@@ -533,3 +533,37 @@ launch, window placement, click alignment and edge panning before rollout.
 
 After installing the tested X11 and CoreGraphics binaries locally, the user
 reported that everything was working (2026-10-16). Fullscreen policy was unchanged.
+
+## VRR presentation regression (#46)
+
+```sh
+python3 -m unittest discover -s tests -p 'test_x11_vrr.py'
+```
+
+The host fixtures exercise the patched eligibility, X11 property updates and
+EGL surface ownership transitions. They cover hidden/titled/partial views,
+multiple views, parent recreation, child fallback and current-context handling.
+
+Build `build-riot-coregraphics-runtime.py`, `build-riot-x11-runtime.py` and
+`build-riot-metal-presentation.py` together. Stage all three updated frameworks
+(CoreGraphics, AppKit's X11 backend, QuartzCore) when testing isolated binaries.
+Run `riot-metal-presentation-check` with `RIOT_PRESENTATION_PARENT=1` to create
+an owned borderless game-like window. It verifies the parent drawable is
+borrowed. Add `RIOT_PRESENTATION_RESIZE=1` to verify fallback to a child at
+half width and borrowing the parent again when restored. Add
+`RIOT_PRESENTATION_NESTED=1` for nested layers.
+The default probe still exercises the independent child-window path.
+
+For physical VRR validation, enable adaptive sync in the monitor and desktop,
+then manually test fullscreen and borderless League with a frame cap inside
+the monitor's VRR range (for example 157 FPS on a 165 Hz display), with VSync
+off. Check the monitor's live refresh display as well as the game FPS counter.
+Also test leaving fullscreen, restoring it, resizing, and alt-tab. Report GPU,
+driver, compositor and session type. A stable FPS counter or the X11 property
+alone does not prove that the monitor is using variable refresh.
+
+Local native validation on 2026-10-19 passed all three modes (child, parent
+with resize, nested parent with resize), including Vulkan-to-GL pixel readback
+and ten presentations per mode, using staged frameworks in a private prefix.
+Physical VRR and in-game performance on the reporter's Mutter setup remain
+unverified.
