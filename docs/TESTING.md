@@ -90,6 +90,19 @@ append-only output and tightening an existing public log to mode 0600. The
 runner test uses a fake `darling` executable to verify loopback fixtures and
 private-prefix-only shutdown/cleanup.
 
+With the pinned Darling sources available, run the host resolver regression:
+
+```sh
+python3 -m unittest discover -s tests -p 'test_host_dns.py' -v
+```
+
+It compiles the actual patched vchroot implementation in its Linux test mode
+and reads temporary resolver files through absolute and relative host symlinks.
+It checks atomic file replacement, symlink retargeting, guest DNS overrides and
+guest absolute-link scope. A CMake fixture verifies that both install modes
+replace an older Google resolver file with the host link. No Darling session or
+DNS traffic is started.
+
 ## CoreText font-list and AppKit resize regressions
 
 After preparing the source and configuring the runtime tools:
