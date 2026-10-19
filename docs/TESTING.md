@@ -567,3 +567,42 @@ with resize, nested parent with resize), including Vulkan-to-GL pixel readback
 and ten presentations per mode, using staged frameworks in a private prefix.
 Physical VRR and in-game performance on the reporter's Mutter setup remain
 unverified.
+
+## Metal VSync regression (#46)
+
+```sh
+python3 -m unittest discover -s tests -p 'test_metal_vsync.py'
+```
+
+These host checks compile the patched layer-tree policy, flush body and CGL
+swap methods against inert fixtures. They cover nested layers, VSync toggles,
+shared-window requests, independent contexts, late attachment and failed
+context/interval changes. They do not measure physical display refresh.
+
+For manual validation after updating with the clients closed, compare the
+same scene with in-game VSync on and off. With VSync on, presentation should
+follow the display/compositor cadence; with it off, the game's frame cap
+should continue to work. Record monitor refresh, compositor, X11/Xwayland,
+GPU/driver and window mode. The window presentation probe above checks the
+API wiring; an in-game/compositor timing comparison remains necessary.
+
+## Combined VSync and VRR testing
+
+The `test/vsync-vrr` branch combines PRs #81 and #88, resolving their shared
+compositor-patch and presentation-probe changes. The probe toggles
+`displaySyncEnabled` and checks the CGL interval in child, parent and nested
+parent modes; the parent modes also support resize fallback/restoration.
+All three native modes passed locally in a private prefix, together with ten
+host regression checks and validation of all 31 component patches.
+
+After closing the game and both clients:
+
+```sh
+git fetch origin
+git switch --track origin/test/vsync-vrr
+./scripts/update.sh
+```
+
+Test VSync with desktop VRR disabled, then test VRR with VSync off and a cap
+inside the monitor's adaptive range. Finally test both enabled. Report game
+FPS and the monitor's live refresh reading separately.
