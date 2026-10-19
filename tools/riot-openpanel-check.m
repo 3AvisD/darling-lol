@@ -7,6 +7,7 @@
  */
 #import <AppKit/AppKit.h>
 #include <dispatch/dispatch.h>
+#include <objc/runtime.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53,19 +54,49 @@ static void press(SEL action, const char *name) {
     }
 }
 
-static void selectSubfolder(void) {
+static char selectNote[320] = "";
+static BOOL selectionOK = YES;
+
+static NSString *urlPath(id item) {
+    NSString *path = [item isKindOfClass:[NSURL class]] ? [item path] : nil;
+    while ([path length] > 1 && [path hasSuffix:@"/"])
+        path = [path substringToIndex:[path length] - 1];
+    return path;
+}
+
+/* The panel's tree is rooted at "/" and is not navigated to the directory
+ * being shown, so expand each component of subDir from the root, then select
+ * its row. Records diagnostics in selectNote. */
+static BOOL selectSubfolder(void) {
     NSOutlineView *outline = findOutline([panel contentView]);
-    if (!outline) { snprintf(triggerNote, sizeof triggerNote, "no outline view, subfolder row not found"); return; }
+    if (!outline) { snprintf(selectNote, sizeof selectNote, "no_outline_view"); return NO; }
     [outline reloadData];
-    for (NSInteger row = 0; row < [outline numberOfRows]; row++) {
-        id item = [outline itemAtRow:row];
-        NSString *path = [item isKindOfClass:[NSURL class]] ? [item path] : [item description];
-        if ([path isEqualToString:subDir]) {
-            [outline selectRowIndexes:[NSIndexSet indexSetWithIndex:row] byExtendingSelection:NO];
-            return;
+    NSString *prefix = @"";
+    NSInteger found = -1;
+    for (NSString *part in [subDir pathComponents]) {
+        if ([part isEqualToString:@"/"]) continue;
+        prefix = [prefix stringByAppendingFormat:@"/%@", part];
+        found = -1;
+        for (NSInteger row = 0; row < [outline numberOfRows]; row++) {
+            if ([urlPath([outline itemAtRow:row]) isEqualToString:prefix]) { found = row; break; }
         }
+        if (found < 0) {
+            snprintf(selectNote, sizeof selectNote, "row_not_found at=%s rows=%ld",
+                     [prefix UTF8String], (long)[outline numberOfRows]);
+            return NO;
+        }
+        if (![prefix isEqualToString:subDir]) [outline expandItem:[outline itemAtRow:found]];
     }
-    snprintf(triggerNote, sizeof triggerNote, "subfolder row not found");
+    [outline selectRowIndexes:[NSIndexSet indexSetWithIndex:found] byExtendingSelection:NO];
+    NSIndexSet *sel = [outline selectedRowIndexes];
+    NSInteger selRow = [sel firstIndex] == NSNotFound ? -1 : (NSInteger)[sel firstIndex];
+    id item = selRow >= 0 ? [outline itemAtRow:selRow] : nil;
+    NSString *itemPath = urlPath(item);
+    snprintf(selectNote, sizeof selectNote,
+             "target_row=%ld selected_count=%lu selected_row=%ld item_class=%s item_path=%s",
+             (long)found, (unsigned long)[sel count], (long)selRow,
+             item ? class_getName([item class]) : "nil", itemPath ? [itemPath UTF8String] : "(nil)");
+    return selRow == found;
 }
 
 @interface Trigger : NSObject
@@ -80,7 +111,7 @@ static void selectSubfolder(void) {
     if (!strcmp(mode, "cancel")) {
         press(@selector(_cancel:), "cancel");
     } else {
-        if (!strcmp(mode, "open-selected")) selectSubfolder();
+        if (!strcmp(mode, "open-selected")) selectionOK = selectSubfolder();
         press(@selector(_selectFile:), "open");
     }
 }
@@ -156,12 +187,12 @@ int main(int argc, char **argv) {
             [problems addObject:@"code_not_cancel"];
         }
         if (visible) [problems addObject:@"still_visible"];
-        if (strstr(triggerNote, "not found") && !strstr(triggerNote, "button not found"))
-            [problems addObject:@"subfolder_row_not_found"];
+        if (!selectionOK) [problems addObject:@"selection_failed"];
         BOOL pass = [problems count] == 0;
-        printf("OPENPANEL_CHECK mode=%s result=%s code=%ld url=%s expected_url=%s visible=%d trigger=\"%s\"%s%s\n",
+        printf("OPENPANEL_CHECK mode=%s result=%s code=%ld url=%s expected_url=%s visible=%d trigger=\"%s\"%s%s%s%s%s\n",
                mode, pass ? "PASS" : "FAIL", (long)code, [shown UTF8String],
                wantOpen ? [wantPath UTF8String] : "-", visible, triggerNote,
+               selectNote[0] ? " selection=\"" : "", selectNote, selectNote[0] ? "\"" : "",
                pass ? "" : " problems=",
                pass ? "" : [[problems componentsJoinedByString:@","] UTF8String]);
         fflush(stdout);
