@@ -215,6 +215,13 @@ the host's `/usr/share/fonts`, which the FHS environment replaces. Fonts in your
 user font directories remain available. This also prevents an icon-only user
 font inventory from becoming the only fallback for ordinary text.
 
+The FHS environment selects the packaged fontconfig configuration and clears
+inherited `FONTCONFIG_PATH` and `FONTCONFIG_SYSROOT` overrides. Clearing the
+sysroot prevents it from redirecting the packaged configuration and font paths.
+Custom XDG font/configuration directories and legacy
+`~/.fonts` remain supported, including paths with spaces. The host configuration
+and user font files are not modified.
+
 To check font availability without starting Darling or Riot:
 
 ```sh
