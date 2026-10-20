@@ -19,6 +19,8 @@
         fontDirectories = darlingFonts;
         includes = [
           "${pkgs.fontconfig.out}/etc/fonts/conf.d"
+          # makeFontsConf adds XDG font directories, but neither it nor
+          # conf.d/50-user.conf adds the legacy ~/.fonts directory.
           (pkgs.writeText "darling-user-fonts.conf" ''
             <fontconfig>
               <dir>~/.fonts</dir>

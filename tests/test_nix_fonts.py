@@ -88,9 +88,9 @@ class NixFontsConfigTest(unittest.TestCase):
 
                 self.assertNotIn("FONTCONFIG_SYSROOT", resulting_env)
                 self.assertNotIn("FONTCONFIG_PATH", resulting_env)
-                self.assertTrue(
-                    resulting_env.get("FONTCONFIG_FILE", "").startswith("/nix/store/"),
-                    f"Unexpected FONTCONFIG_FILE: {resulting_env.get('FONTCONFIG_FILE')}",
+                self.assertEqual(
+                    resulting_env.get("FONTCONFIG_FILE"),
+                    "/nix/store/mock-darlingFontsConf",
                 )
                 self.assertEqual(resulting_env.get("XDG_DATA_HOME"), "/tmp/mock-xdg data with spaces")
                 self.assertEqual(resulting_env.get("XDG_CONFIG_HOME"), "/tmp/mock-xdg config with spaces")

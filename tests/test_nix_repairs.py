@@ -454,7 +454,8 @@ class SessionTests(unittest.TestCase):
             self.assertIn('terminal', result.stderr.lower())
             self.assertFalse((root / 'build').exists())
         self.assertIn('Terminal=true', (ROOT / 'flake.nix').read_text())
-        self.assertIn('checks.${system}', (ROOT / 'flake.nix').read_text())
+        self.assertIn('packaging = pkgs.runCommand "darling-lol-packaging-tests"',
+                      (ROOT / 'flake.nix').read_text())
 
     def test_rootless_update_refuses_live_marker_without_build_or_stop(self):
         with tempfile.TemporaryDirectory(prefix='nix-update-idle-') as directory:
