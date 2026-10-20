@@ -376,7 +376,7 @@ It prints each thread-local access that calls its thunk without the descriptor i
 
 ## Base install refuses to continue while Darling is not running
 
-`sudo cmake --install` prints `Darling currently running for <user>, shutting it down...` several times and then `Darling launchd PID … remains alive after shutdown`. A guest launchd outlived its darlingserver, so `darling shutdown` sees no container to stop. `python3 build/runtime/tools/ensure-darling-runtime.py` stops such a launchd (your own, only when no darlingserver runs); `scripts/run.sh` and `scripts/install-runtime.sh` run it too.
+`sudo cmake --install` prints `Darling currently running for <user>, shutting it down...` several times and then `Darling launchd PID … remains alive after shutdown`. A guest launchd outlived its darlingserver, so `darling shutdown` sees no container to stop. Automatic cleanup by process name is disabled because guest names and UIDs do not prove prefix ownership (killing by name risks terminating an active launchd from an unrelated prefix or session). If setup is blocked, shut down the original Darling session from its own namespace (`darling shutdown`), or inspect the leftover PID under `/proc/<PID>` before terminating it manually.
 
 ## Lower fight FPS than Windows
 
