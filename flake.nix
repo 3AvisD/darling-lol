@@ -1,5 +1,5 @@
 {
-  description = "Darling League of Legends - experimental macOS LoL runner on Linux via Darling";
+  description = "Unofficial Darling League of Legends - experimental macOS LoL runner on Linux via Darling";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
@@ -229,12 +229,12 @@
           cat << 'DESKTOP_EOF' > $out/share/applications/darling-lol.desktop
 [Desktop Entry]
 Categories=Game;
-Comment=Play League of Legends macOS client on Linux via Darling
+Comment=Unofficial League of Legends macOS client compatibility layer for Linux via Darling
 Exec=darling-lol
 GenericName=MOBA Game
 Icon=darling-lol
 Keywords=League;LoL;Riot;Darling;
-Name=League of Legends
+Name=League of Legends (unofficial)
 StartupWMClass=RiotClientServices
 Terminal=true
 Type=Application
@@ -245,7 +245,7 @@ DESKTOP_EOF
         '';
 
         meta = with pkgs.lib; {
-          description = "Tooling and patches to run macOS League of Legends on Linux with Darling";
+          description = "Unofficial tooling and patches to run macOS League of Legends on Linux with Darling";
           homepage = "https://github.com/lucannez64/darling-lol";
           license = licenses.gpl3Only;
           platforms = [ "x86_64-linux" ];
