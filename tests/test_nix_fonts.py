@@ -9,6 +9,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 def extract_fhs_profile(flake_text: str) -> str:
+    """Extract the FHS shell profile, substituting inert paths for Nix values."""
     match = re.search(r"profile\s*=\s*''(.*?)'';", flake_text, re.DOTALL)
     if not match:
         raise ValueError("Could not find profile in flake.nix")
@@ -19,7 +20,10 @@ def extract_fhs_profile(flake_text: str) -> str:
     return profile_script
 
 class NixFontsConfigTest(unittest.TestCase):
+    """Check packaged font configuration and isolation from host overrides."""
+
     def test_flake_font_configuration(self):
+        """Require bundled text fonts, user font support, and ordered sanitization."""
         flake_text = (REPO_ROOT / "flake.nix").read_text(encoding="utf-8")
 
         # Flake must bundle both font families in darlingFontsConf
@@ -41,6 +45,7 @@ class NixFontsConfigTest(unittest.TestCase):
         self.assertLess(unset_pos, export_pos, "unset must happen before export FONTCONFIG_FILE")
 
     def test_fhs_profile_hostile_environment_sanitization(self):
+        """Clear hostile fontconfig overrides while preserving user XDG settings."""
         flake_text = (REPO_ROOT / "flake.nix").read_text(encoding="utf-8")
         profile_script = extract_fhs_profile(flake_text)
 
