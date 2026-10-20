@@ -440,6 +440,7 @@ class SessionTests(unittest.TestCase):
             self.assertFalse((root / 'other-prefix').exists())
 
     def test_first_run_eof_is_actionable_and_desktop_requests_terminal(self):
+        """Report missing terminal input without setup and package a terminal launcher."""
         with tempfile.TemporaryDirectory(prefix='nix-session-test-') as directory:
             root = Path(directory)
             (root / 'scripts').mkdir()
