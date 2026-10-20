@@ -149,4 +149,7 @@ This project is an unofficial compatibility effort and is not affiliated with, e
 sponsored by Riot Games. No game client, game assets, or account data are distributed in this
 repository.
 
+See [compliance and terminology guidance](docs/COMPLIANCE.md) for the project's scope and
+review expectations.
+
 

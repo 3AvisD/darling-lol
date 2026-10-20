@@ -11,3 +11,5 @@ Some compatibility tools refer to public API names and constants of the user's i
 League of Legends and Riot Games are trademarks or registered trademarks of Riot Games, Inc.
 This project is an unofficial compatibility effort and is not affiliated with, endorsed by, or
 sponsored by Riot Games.
+
+See [compliance and terminology guidance](docs/COMPLIANCE.md) for scope and review expectations.
