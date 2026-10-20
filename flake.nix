@@ -17,7 +17,14 @@
       darlingFonts = [ pkgs.liberation_ttf pkgs.dejavu_fonts ];
       darlingFontsConf = pkgs.makeFontsConf {
         fontDirectories = darlingFonts;
-        includes = [ "${pkgs.fontconfig.out}/etc/fonts/conf.d" ];
+        includes = [
+          "${pkgs.fontconfig.out}/etc/fonts/conf.d"
+          (pkgs.writeText "darling-user-fonts.conf" ''
+            <fontconfig>
+              <dir>~/.fonts</dir>
+            </fontconfig>
+          '')
+        ];
       };
 
       # Python environment with dependencies required by tooling
@@ -163,8 +170,8 @@
           export DPREFIX="''${DPREFIX:-$HOME/.darling}"
           export LC_ALL=C.UTF-8
           export LANG=C.UTF-8
+          unset FONTCONFIG_PATH FONTCONFIG_SYSROOT
           export FONTCONFIG_FILE=${darlingFontsConf}
-          export FONTCONFIG_PATH=${pkgs.fontconfig.out}/etc/fonts
           export DARLING_RUNNER_DIR=${darlingRunner}/bin
           export PATH="$DARLING_RUNNER_DIR:/usr/local/bin:''${PATH:-}"
           export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/share/pkgconfig:/usr/lib/pkgconfig:/usr/lib64/pkgconfig:/usr/share/pkgconfig:''${PKG_CONFIG_PATH:-}"
@@ -267,10 +274,10 @@ DESKTOP_EOF
         fonts = pkgs.runCommand "darling-lol-font-tests" {
           nativeBuildInputs = [ pkgs.fontconfig ];
         } ''
-          export HOME="$TMPDIR/home" XDG_CONFIG_HOME="$TMPDIR/config"
-          export XDG_DATA_HOME="$TMPDIR/data" XDG_CACHE_HOME="$TMPDIR/cache"
+          export HOME="$TMPDIR/home with spaces" XDG_CONFIG_HOME="$TMPDIR/config with spaces"
+          export XDG_DATA_HOME="$TMPDIR/data with spaces" XDG_CACHE_HOME="$TMPDIR/cache with spaces"
+          unset FONTCONFIG_PATH FONTCONFIG_SYSROOT
           export FONTCONFIG_FILE=${darlingFontsConf}
-          export FONTCONFIG_PATH=${pkgs.fontconfig.out}/etc/fonts
           mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME"
           # Check real font selection with no host or user text fonts available.
           check_font() {
@@ -294,6 +301,23 @@ DESKTOP_EOF
           cp -R ${pkgs.font-awesome}/share/fonts "$XDG_DATA_HOME/fonts"
           fc-list --format '%{file}\n' | grep -F "$XDG_DATA_HOME/fonts/"
           check_aliases
+
+          # Retain custom XDG and legacy fonts as well as user alias rules.
+          chmod u+w "$XDG_DATA_HOME/fonts"
+          mkdir -p "$HOME/.fonts" "$XDG_CONFIG_HOME/fontconfig"
+          cp ${pkgs.liberation_ttf}/share/fonts/truetype/LiberationSans-Regular.ttf "$XDG_DATA_HOME/fonts/user-text.ttf"
+          cp ${pkgs.liberation_ttf}/share/fonts/truetype/LiberationSerif-Regular.ttf "$HOME/.fonts/legacy-text.ttf"
+          fc-list --format '%{file}\n' | grep -Fx "$XDG_DATA_HOME/fonts/user-text.ttf"
+          fc-list --format '%{file}\n' | grep -Fx "$HOME/.fonts/legacy-text.ttf"
+          cat > "$XDG_CONFIG_HOME/fontconfig/fonts.conf" <<'USERCONF_EOF'
+          <fontconfig>
+            <alias>
+              <family>DarlingCompatibilityAlias</family>
+              <prefer><family>Liberation Serif</family></prefer>
+            </alias>
+          </fontconfig>
+          USERCONF_EOF
+          check_font DarlingCompatibilityAlias 'Liberation Serif'
           touch "$out"
         '';
 
