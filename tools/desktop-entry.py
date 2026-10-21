@@ -8,14 +8,84 @@ from pathlib import Path
 PROJECT_ROOT = Path("@PROJECT_ROOT@")
 HOST_HOME = Path("@HOST_HOME@")
 
+# Marks a launcher entry created by this project.  Previous versions pointed
+# Exec at this checkout's desktop-run.sh, so an entry without that marker
+# belongs to someone else and is left alone.
+LEGACY_RUN_SCRIPT = "scripts/desktop-run.sh"
 
-def remove_legacy_entry(path: Path) -> None:
-    """Remove a previous launcher entry only when this project created it."""
+# Distinctive fragments of the artwork the previous helper wrote.
+LEGACY_SVG_MARKERS = ('id="goldGrad"', 'M172 108 L242 108')
+
+# Characters that force Exec quoting, per the Desktop Entry specification.
+EXEC_RESERVED = set(' \t\n"\'\\><~|&;$*?#()`')
+
+
+def escape_string(value: str) -> str:
+    """Escape a value of Desktop Entry type ``string``."""
+    return (value.replace("\\", "\\\\").replace("\t", "\\t")
+            .replace("\n", "\\n").replace("\r", "\\r"))
+
+
+def quote_exec_argument(value: str) -> str:
+    """Escape and quote one Exec argument as the specification requires."""
+    escaped = value.replace("%", "%%")
+    if not any(char in EXEC_RESERVED for char in escaped):
+        return escaped
+    escaped = "".join("\\" + char if char in '"`$\\' else char for char in escaped)
+    return f'"{escaped}"'
+
+
+def legacy_entry_owned(path: Path) -> bool:
+    """Return True when a launcher entry was created by this project."""
+    marker = str(PROJECT_ROOT / LEGACY_RUN_SCRIPT)
     try:
-        if path.exists() and "desktop-run.sh" in path.read_text(errors="ignore"):
-            path.unlink()
+        text = path.read_text(errors="ignore")
     except OSError:
+        # A dangling symlink still counts when it points at this checkout.
+        try:
+            text = os.readlink(path)
+        except OSError:
+            return False
+    return marker in text or marker.replace("%", "%%") in text
+
+
+def remove_legacy_entry(path: Path) -> bool:
+    """Remove a previous launcher entry only when this project created it."""
+    if not (path.is_symlink() or path.exists()):
+        return False
+    if not legacy_entry_owned(path):
+        return False
+    try:
+        path.unlink()
+    except OSError:
+        return False
+    return True
+
+
+def legacy_svg_owned(path: Path) -> bool:
+    """Return True when an icon is the artwork the previous helper wrote."""
+    try:
+        text = path.read_text(errors="ignore")
+    except OSError:
+        return False
+    return all(marker in text for marker in LEGACY_SVG_MARKERS)
+
+
+def shortcut_directories() -> list[Path]:
+    """Return the desktop directories that hold launcher shortcuts."""
+    directories: list[Path] = []
+    try:
+        result = subprocess.run(["xdg-user-dir", "DESKTOP"], capture_output=True, text=True, check=False)
+        if result.returncode == 0 and result.stdout.strip():
+            path = Path(result.stdout.strip())
+            if path.is_dir():
+                directories.append(path)
+    except Exception:
         pass
+    for candidate in [HOST_HOME / "Desktop"]:
+        if candidate.is_dir() and candidate not in directories:
+            directories.append(candidate)
+    return directories
 
 
 def main():
@@ -35,32 +105,42 @@ def main():
 
     # Install the project's original icon under a neutral name.  Do not extract
     # or install an icon from the game/client installation.
-    svg_target = scalable_dir / "darling-launcher.svg"
-    png_target = png_dir / "darling-launcher.png"
-    shutil.copyfile(source_svg, svg_target)
-    shutil.copyfile(source_png, png_target)
-    shutil.copyfile(source_svg, icons_base / "darling-launcher.svg")
-    shutil.copyfile(source_png, icons_base / "darling-launcher.png")
+    shutil.copyfile(source_svg, scalable_dir / "darling-launcher.svg")
+    shutil.copyfile(source_png, png_dir / "darling-launcher.png")
 
-    # Remove artifacts created by older versions of this helper.
-    remove_legacy_entry(apps_base / "league-of-legends.desktop")
-    for legacy_icon in (
-        icons_base / "league-of-legends.svg",
-        icons_base / "league-of-legends.png",
-        scalable_dir / "league-of-legends.svg",
-        icons_base / "hicolor/512x512/apps/league-of-legends.png",
-    ):
-        try:
-            if legacy_icon.exists():
-                legacy_icon.unlink()
-        except OSError:
-            pass
+    # Remove artifacts created by older versions of this helper.  Only files
+    # proven to be ours are deleted: an entry that pointed at this checkout's
+    # desktop-run.sh, and the SVG with the old artwork.  The old PNG was
+    # extracted from the client and cannot be verified, so it is removed only
+    # when one of those proofs succeeded.
+    owned = remove_legacy_entry(apps_base / "league-of-legends.desktop")
+    desktop_dirs = shortcut_directories()
+    for directory in desktop_dirs:
+        owned = remove_legacy_entry(directory / "league-of-legends.desktop") or owned
+    legacy_svgs = (scalable_dir / "league-of-legends.svg", icons_base / "league-of-legends.svg")
+    if any(legacy_svg_owned(path) for path in legacy_svgs):
+        owned = True
 
-    # Create the desktop entry.  Keep StartupWMClass: it is the client's real
-    # window class and is required for the compositor to match the window.
-    run_script = PROJECT_ROOT / "scripts/desktop-run.sh"
-    exec_path = str(run_script).replace("%", "%%")
-    exec_cmd = f'"{exec_path}"' if " " in exec_path else exec_path
+    if owned:
+        for legacy_icon in (
+            *legacy_svgs,
+            icons_base / "league-of-legends.png",
+            icons_base / "hicolor/512x512/apps/league-of-legends.png",
+        ):
+            try:
+                legacy_icon.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    # Create the desktop entry.  Keep StartupWMClass: Darling's AppKit sets
+    # WM_CLASS from -[NSProcessInfo processName], which is the basename of
+    # argv[0], and the launcher starts .../RiotClientServices.  It is an
+    # interoperability identifier, not a user-visible name.
+    # Terminal stays false here because this entry runs desktop-run.sh, which
+    # saves session output in build/desktop-launch.log; the packaged entry runs
+    # the session directly and therefore needs a terminal.
+    exec_cmd = quote_exec_argument(str(PROJECT_ROOT / LEGACY_RUN_SCRIPT))
+    project_path = escape_string(str(PROJECT_ROOT))
     desktop_content = f"""[Desktop Entry]
 Version=1.0
 Type=Application
@@ -68,12 +148,12 @@ Name=Darling Launcher
 GenericName=Game
 Comment=Unofficial launcher for the macOS game client via Darling
 Exec={exec_cmd}
-Path={PROJECT_ROOT}
+Path={project_path}
 Icon=darling-launcher
 Terminal=false
-Categories=Game;ActionGame;StrategyGame;
-Keywords=darling;launcher;compatibility;
-StartupWMClass=Riot Client
+Categories=Game;
+Keywords=Darling;Launcher;Compatibility;
+StartupWMClass=RiotClientServices
 StartupNotify=false
 """
 
@@ -82,22 +162,8 @@ StartupNotify=false
     os.chmod(desktop_file, 0o755)
     print(f"Created application launcher: {desktop_file}")
 
-    target_desktop_dirs = []
-    try:
-        res = subprocess.run(["xdg-user-dir", "DESKTOP"], capture_output=True, text=True, check=False)
-        if res.returncode == 0 and res.stdout.strip():
-            d = Path(res.stdout.strip())
-            if d.is_dir() and d not in target_desktop_dirs:
-                target_desktop_dirs.append(d)
-    except Exception:
-        pass
-    for cand in [HOST_HOME / "Desktop"]:
-        if cand.is_dir() and cand not in target_desktop_dirs:
-            target_desktop_dirs.append(cand)
-
-    for ddir in target_desktop_dirs:
-        remove_legacy_entry(ddir / "league-of-legends.desktop")
-        desktop_shortcut = ddir / "darling-launcher.desktop"
+    for directory in desktop_dirs:
+        desktop_shortcut = directory / "darling-launcher.desktop"
         desktop_shortcut.write_text(desktop_content)
         os.chmod(desktop_shortcut, 0o755)
         gio = shutil.which("gio")
