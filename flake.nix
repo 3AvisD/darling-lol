@@ -339,6 +339,10 @@ DESKTOP_EOF
           grep -q '^Name=Darling Launcher$' ${darlingLol}/share/applications/darling-launcher.desktop
           grep -q '^Icon=darling-launcher$' ${darlingLol}/share/applications/darling-launcher.desktop
           grep -q '^Keywords=Darling;Launcher;Compatibility;$' ${darlingLol}/share/applications/darling-launcher.desktop
+          grep -q '^Categories=Game;$' ${darlingLol}/share/applications/darling-launcher.desktop
+          # Darling derives WM_CLASS from argv[0], so the window class is the
+          # client executable name; this is an interoperability identifier.
+          grep -q '^StartupWMClass=RiotClientServices$' ${darlingLol}/share/applications/darling-launcher.desktop
           ! grep -qiE '^(Name|Comment|GenericName|Keywords)=.*(League|LoL|Riot|Vanguard|anti-cheat)' ${darlingLol}/share/applications/darling-launcher.desktop
           test -x ${darlingLol}/bin/darling-launcher
           touch "$out"
