@@ -109,6 +109,14 @@ First installation and future Riot updates can still encounter compatibility gap
 
 For another region, set `RCLOL_REGION` and `RCLOL_LOCALE` before launch. For example `RCLOL_REGION=NA RCLOL_LOCALE=en_US ./scripts/run.sh`. Linux display selection follows `$DISPLAY`; the legacy launcher fallback is `:1`.
 
+If you want to keep the client open during matches, opt in to hiding its window instead of closing it:
+
+```sh
+RCLOL_HIDE_CLIENT_IN_GAME=1 ./scripts/run.sh
+```
+
+The helper detects the match, hides the `LeagueClientUx`/`Riot Client` X11 windows, and restores them when the game ends. It does not close the client, patch CEF or touch the game window. It is off by default, requires X11/Xwayland, and `RCLOL_CLOSE_CLIENT_IN_GAME=1` takes precedence. See [troubleshooting](docs/TROUBLESHOOTING.md#keep-the-client-open-but-hide-it-during-a-match) for the measured CPU effect and caveats.
+
 ## Testing
 
 Start with standalone regression checks, then play a match manually. See [testing](docs/TESTING.md). Do not attach a debugger, query client APIs, inject diagnostic hooks or automate client/game input. This project ships no client-side automation, inspection or profiling helpers.
