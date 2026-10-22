@@ -9,6 +9,12 @@ if [ "${RCLOL_CORE_DUMPS:-0}" != 1 ]; then
 fi
 runner_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$runner_dir/runtime-paths.sh"
+# Opt-in partial recovery: if Darling is alive but a previous client tree is
+# windowless, stop only that client/CEF tree and reuse the runtime. Never
+# touches the game, darlingserver or the runtime sockets.
+if [ "${RCLOL_RECOVER_STALE_CLIENT:-0}" = 1 ]; then
+ python3 "$runner_dir/recover-stale-client.py"
+fi
 if [ "${RCLOL_RECOVER_HIDDEN_CLIENT:-0}" = 1 ]; then
  python3 "$runner_dir/recover-hidden-riot-client.py"
 fi
