@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location(
@@ -216,6 +216,24 @@ class HideClientInGameTests(unittest.TestCase):
             'RCLOL_CLOSE_CLIENT_IN_GAME': '1',
         }):
             self.assertEqual(hide_in_game.main([]), 0)
+
+    def test_master_tricks_switch_enables_hide(self):
+        class FakeX11:
+            def close(self):
+                pass
+
+        watcher = Mock()
+        with patch.dict(os.environ, {
+            'RCLOL_CLIENT_IN_GAME_TRICKS': '1',
+            'RCLOL_HIDE_CLIENT_IN_GAME': '',
+            'RCLOL_CLOSE_CLIENT_IN_GAME': '',
+        }), patch.object(hide_in_game, 'target_prefix',
+                         return_value=self.prefix), \
+             patch.object(hide_in_game, 'X11', return_value=FakeX11()), \
+             patch.object(hide_in_game, 'Watcher', return_value=watcher):
+            self.assertEqual(hide_in_game.main([]), 0)
+        watcher.run.assert_called_once_with()
+        watcher.restore.assert_called_once_with()
 
 
 if __name__ == '__main__':

@@ -78,12 +78,17 @@ opts in to Hyprland-only recovery of a default-prefix Riot session with no
 visible window; it is off by default. See [troubleshooting](TROUBLESHOOTING.md#riot-exits-and-league-reports-that-it-lost-its-connection)
 for the observed failures, recovery guards and NSURLSession limitations.
 
-`RCLOL_HIDE_CLIENT_IN_GAME=1` opts in to hiding the managed `LeagueClientUx`
-and `Riot Client` X11 windows while a match runs, then showing them when the
-game process ends. It keeps the client open and is mutually exclusive with
-`RCLOL_CLOSE_CLIENT_IN_GAME=1` (close takes precedence). It is off by default,
-requires X11/Xwayland, and does not patch client binaries, CEF or the game. See
-[the troubleshooting measurement](TROUBLESHOOTING.md#keep-the-client-open-but-hide-it-during-a-match)
+`RCLOL_CLIENT_IN_GAME_TRICKS=1` opts in to automatic client handling during a
+match. It reads `lol-user-experience` from the installed client's
+`LCULocalPreferences.yaml`: with `potatoModeEnabled: true`, it closes the client
+UI when `closeLeagueClientDuringGame: true`, otherwise it hides the managed
+`LeagueClientUx`/`Riot Client` X11 windows and restores them when the game
+ends. With client optimizations disabled or preferences unreadable it does
+nothing. The low-level `RCLOL_CLOSE_CLIENT_IN_GAME=1` and
+`RCLOL_HIDE_CLIENT_IN_GAME=1` switches remain available when the automatic
+switch is not set. The feature is off by default, requires X11/Xwayland, and
+does not patch client binaries, CEF or the game. See
+[the troubleshooting measurement](TROUBLESHOOTING.md#automatic-client-handling-during-a-match)
 for the measured CPU effect and limitations.
 
 `RCLOL_FILTER_HOST_ENV=1` opts in to removing host desktop-session variables before

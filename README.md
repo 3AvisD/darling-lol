@@ -109,13 +109,21 @@ First installation and future Riot updates can still encounter compatibility gap
 
 For another region, set `RCLOL_REGION` and `RCLOL_LOCALE` before launch. For example `RCLOL_REGION=NA RCLOL_LOCALE=en_US ./scripts/run.sh`. Linux display selection follows `$DISPLAY`; the legacy launcher fallback is `:1`.
 
-If you want to keep the client open during matches, opt in to hiding its window instead of closing it:
+For automatic client handling during a match, opt in with one switch:
 
 ```sh
-RCLOL_HIDE_CLIENT_IN_GAME=1 ./scripts/run.sh
+RCLOL_CLIENT_IN_GAME_TRICKS=1 ./scripts/run.sh
 ```
 
-The helper detects the match, hides the `LeagueClientUx`/`Riot Client` X11 windows, and restores them when the game ends. It does not close the client, patch CEF or touch the game window. It is off by default, requires X11/Xwayland, and `RCLOL_CLOSE_CLIENT_IN_GAME=1` takes precedence. See [troubleshooting](docs/TROUBLESHOOTING.md#keep-the-client-open-but-hide-it-during-a-match) for the measured CPU effect and caveats.
+It reads `lol-user-experience` from the installed League client's
+`LCULocalPreferences.yaml`. When `potatoModeEnabled` is true, it closes the
+client UI if `closeLeagueClientDuringGame` is true; otherwise it hides the
+`LeagueClientUx`/`Riot Client` X11 windows and restores them when the game
+ends. With client optimizations disabled or unreadable preferences it does
+nothing. The `RCLOL_CLOSE_CLIENT_IN_GAME` and `RCLOL_HIDE_CLIENT_IN_GAME`
+low-level switches remain available when the automatic switch is not set. See
+[troubleshooting](docs/TROUBLESHOOTING.md#automatic-client-handling-during-a-match)
+for the measured effect and caveats.
 
 ## Testing
 
