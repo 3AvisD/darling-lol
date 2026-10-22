@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Opt-in: hide the League client UI while a match is running.
 
-`RCLOL_HIDE_CLIENT_IN_GAME=1` is an alternative to closing the client UI with
-`RCLOL_CLOSE_CLIENT_IN_GAME=1`. It hides the managed X11 windows for
-`LeagueClientUx` and `Riot Client`, and shows them again when the game process
-exits. The Riot client, League backend, CEF helpers and game keep running.
+The launcher's `RCLOL_CLIENT_IN_GAME_TRICKS=1` mode selects this helper when
+the client's own close-during-game preference is false. The low-level
+`RCLOL_HIDE_CLIENT_IN_GAME=1` switch remains available for direct launches. It
+hides the managed X11 windows for `LeagueClientUx` and `Riot Client`, and shows
+them again when the game process exits. The Riot client, League backend, CEF
+helpers and game keep running.
 
 This is launcher/window management only. It does not patch client binaries,
 CEF, anti-cheat or DRM, and it never hides the game window. It is off by
@@ -332,13 +334,14 @@ def main(argv=None):
                         help='one game observation and exit (no window changes)')
     args = parser.parse_args(argv)
 
-    if not args.once and os.environ.get('RCLOL_CLOSE_CLIENT_IN_GAME') == '1':
+    tricks = os.environ.get('RCLOL_CLIENT_IN_GAME_TRICKS') == '1'
+    if not args.once and not tricks and os.environ.get('RCLOL_CLOSE_CLIENT_IN_GAME') == '1':
         print('hide-league-client-in-game: ignored; RCLOL_CLOSE_CLIENT_IN_GAME=1 takes precedence',
               file=sys.stderr, flush=True)
         return 0
-    if not args.once and os.environ.get('RCLOL_HIDE_CLIENT_IN_GAME') != '1':
-        print('hide-league-client-in-game: disabled; set RCLOL_HIDE_CLIENT_IN_GAME=1',
-              flush=True)
+    if not args.once and not tricks and os.environ.get('RCLOL_HIDE_CLIENT_IN_GAME') != '1':
+        print('hide-league-client-in-game: disabled; set RCLOL_HIDE_CLIENT_IN_GAME=1 or '
+              'RCLOL_CLIENT_IN_GAME_TRICKS=1', flush=True)
         return 0
     prefix = target_prefix()
     if prefix is None:

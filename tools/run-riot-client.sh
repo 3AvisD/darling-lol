@@ -12,23 +12,30 @@ runner_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 if [ "${RCLOL_RECOVER_HIDDEN_CLIENT:-0}" = 1 ]; then
  python3 "$runner_dir/recover-hidden-riot-client.py"
 fi
-# Opt-in: close the League client UI while a match runs. It keeps the CPU for the game
-# and leaves the client the backend starts when the match ends as the only CEF instance;
-# a second instance on the same profile never paints its window, which is the black
-# window seen with Riot's own "Close client during game" option. Off by default.
-if [ "${RCLOL_CLOSE_CLIENT_IN_GAME:-0}" = 1 ]; then
+# Opt-in automatic client-in-game handling. This single switch reads the
+# client's own lol-user-experience preferences: close the UI when the user
+# selected "close client during game", otherwise hide the client windows.
+# It does nothing unless potatoModeEnabled (client optimizations) is true.
+if [ "${RCLOL_CLIENT_IN_GAME_TRICKS:-0}" = 1 ]; then
+ pref="$prefix_dir/Applications/League of Legends.app/Contents/LoL/Config/LCULocalPreferences.yaml"
+ mode=$(python3 "$runner_dir/client-in-game-tricks.py" "$pref" 2>/dev/null || echo none)
+ case "$mode" in
+  close)
+   echo 'client-in-game-tricks: closeLeagueClientDuringGame=true -> close helper' >&2
+   python3 "$runner_dir/close-league-client-in-game.py" --detach &
+   ;;
+  hide)
+   echo 'client-in-game-tricks: closeLeagueClientDuringGame=false -> hide helper' >&2
+   python3 "$runner_dir/hide-league-client-in-game.py" --detach &
+   ;;
+  *)
+   echo 'client-in-game-tricks: no action (client optimizations disabled or preferences unreadable)' >&2
+   ;;
+ esac
+elif [ "${RCLOL_CLOSE_CLIENT_IN_GAME:-0}" = 1 ]; then
  python3 "$runner_dir/close-league-client-in-game.py" --detach &
-fi
-# Opt-in alternative for users who keep the client open during a match: hide
-# the managed client windows instead of closing the UI. It never touches the
-# League backend, the Riot client or the game window; it restores the window
-# when the game process ends. Close and hide are mutually exclusive.
-if [ "${RCLOL_HIDE_CLIENT_IN_GAME:-0}" = 1 ]; then
- if [ "${RCLOL_CLOSE_CLIENT_IN_GAME:-0}" = 1 ]; then
-  echo 'RCLOL_HIDE_CLIENT_IN_GAME ignored: RCLOL_CLOSE_CLIENT_IN_GAME=1 takes precedence' >&2
- else
-  python3 "$runner_dir/hide-league-client-in-game.py" --detach &
- fi
+elif [ "${RCLOL_HIDE_CLIENT_IN_GAME:-0}" = 1 ]; then
+ python3 "$runner_dir/hide-league-client-in-game.py" --detach &
 fi
 # The bundled downloader rejects IPv6 CONNECT_TO addresses. Only Riot CDN
 # AAAA lookups are suppressed; set this to 0 to retain the upstream resolver.
