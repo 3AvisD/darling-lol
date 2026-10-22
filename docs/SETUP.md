@@ -86,6 +86,15 @@ launchd/mldr, sockets and `.init.pid`; if X11/Xwayland cannot be inspected it
 does nothing. See
 [troubleshooting](TROUBLESHOOTING.md#client-remains-running-without-a-window).
 
+`RCLOL_CLEAN_STALE_HELPERS=1` runs a preflight before the match helper starts.
+It removes `close-league-client-in-game.py` and
+`hide-league-client-in-game.py` processes of this prefix whose parent is
+`init`/`systemd`, which means the launcher that started them has exited. A
+helper of a live launcher, another prefix, the game, Riot/League/CEF and
+`darlingserver` are preserved. It fails closed when a command line,
+environment, stat entry or parent cannot be read. See
+[troubleshooting](TROUBLESHOOTING.md#multiple-client-in-game-helpers).
+
 `RCLOL_FILTER_HOST_ENV=1` opts in to removing host desktop-session variables before
 the guest starts: `WAYLAND_DISPLAY`, `XDG_SESSION_*`, `XDG_CURRENT_DESKTOP`,
 GNOME/KDE/GDM, systemd, SSH agent, terminal, toolkit (`QT_*`, `GTK_*`, `GDK_*`),

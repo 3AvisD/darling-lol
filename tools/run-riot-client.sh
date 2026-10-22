@@ -18,6 +18,13 @@ fi
 if [ "${RCLOL_RECOVER_HIDDEN_CLIENT:-0}" = 1 ]; then
  python3 "$runner_dir/recover-hidden-riot-client.py"
 fi
+# Opt-in cleanup of helpers left by an earlier launcher. This runs before the
+# current helper is started. It removes only helpers of this prefix whose
+# parent is init/systemd, so a helper of a live launcher is not touched.
+if [ "${RCLOL_CLEAN_STALE_HELPERS:-0}" = 1 ]; then
+ python3 "$runner_dir/clean-stale-helpers.py" --prefix "$prefix_dir" ||
+  echo 'clean-stale-helpers: cleanup failed; continuing' >&2
+fi
 # Opt-in: close the League client UI while a match runs. It keeps the CPU for the game
 # and leaves the client the backend starts when the match ends as the only CEF instance;
 # a second instance on the same profile never paints its window, which is the black
