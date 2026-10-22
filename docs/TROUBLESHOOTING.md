@@ -158,6 +158,30 @@ managed client window is visible. With X11/Xwayland unavailable it fails closed.
 This saves the Darling bootstrap but not the Riot Client/CEF startup itself. If
 no window appears afterward, use a full runtime shutdown/restart.
 
+### Multiple client-in-game helpers
+
+The close/hide helper is a long-lived watcher. If an earlier launcher exits
+while it remains, the next launch can start another copy; list them with:
+
+```sh
+pgrep -af 'close-league-client-in-game.py|hide-league-client-in-game.py'
+```
+
+To remove the orphaned copies before the next helper starts:
+
+```sh
+RCLOL_CLEAN_STALE_HELPERS=1 ./scripts/run.sh
+```
+
+Only helpers of the current prefix whose parent is `init`/`systemd` are
+terminated. Helpers whose launcher is still alive, other prefixes, the game,
+Riot/League/CEF, `darlingserver` and the runtime are never touched. A dry run
+is available from the configured tools directory:
+
+```sh
+RCLOL_CLEAN_STALE_HELPERS=1 python3 build/runtime/tools/clean-stale-helpers.py --dry-run
+```
+
 ### Client window stays black after a match
 
 The League client keeps its Chromium/CEF UI (`LeagueClientUx` and its helpers)

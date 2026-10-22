@@ -117,6 +117,18 @@ RCLOL_RECOVER_STALE_CLIENT=1 ./scripts/run.sh
 
 It stops only a windowless Riot/League/CEF tree, preserves `darlingserver`, launchd/mldr, sockets and `.init.pid`, and then starts the product normally. It does nothing while a game or managed client window is present and fails closed when it cannot inspect X11. See [troubleshooting](docs/TROUBLESHOOTING.md#client-remains-running-without-a-window).
 
+If repeated launches leave several `close-league-client-in-game.py` watchers,
+opt in to removing the orphaned ones before the new helper starts:
+
+```sh
+RCLOL_CLEAN_STALE_HELPERS=1 ./scripts/run.sh
+```
+
+It only removes helpers of this prefix whose parent is `init`/`systemd` (the
+launcher that started them has exited). A helper of a live launcher, another
+prefix, the game, Riot/League/CEF, `darlingserver` and the runtime are never
+touched. See [troubleshooting](docs/TROUBLESHOOTING.md#multiple-client-in-game-helpers).
+
 ## Testing
 
 Start with standalone regression checks, then play a match manually. See [testing](docs/TESTING.md). Do not attach a debugger, query client APIs, inject diagnostic hooks or automate client/game input. This project ships no client-side automation, inspection or profiling helpers.
