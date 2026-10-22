@@ -199,6 +199,24 @@ class HideClientInGameTests(unittest.TestCase):
         watcher.restore()
         self.assertEqual(shown, [0xabc])
 
+    def test_log_failure_does_not_discard_an_unmapped_window(self):
+        class BrokenOutput:
+            def write(self, _text):
+                raise BrokenPipeError
+
+            def flush(self):
+                pass
+
+        watcher = hide_in_game.Watcher(
+            self.prefix, FakeX11(),
+            window_source=lambda _prefix, _cache: [0xabc],
+            state_source=lambda _prefix: True,
+            sleep=lambda _seconds: None,
+            out=BrokenOutput(),
+        )
+        watcher._hide_new()
+        self.assertEqual(watcher.hidden, {0xabc})
+
     def test_hides_then_shows_on_match_end(self):
         states = iter([True, True, False])
         x11 = FakeX11()

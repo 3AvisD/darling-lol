@@ -299,11 +299,17 @@ class Watcher:
             self.hidden.add(window)
             try:
                 self.x11.unmap(window)
-                print(f'hide-league-client-in-game: hidden 0x{window:x}', file=self.out, flush=True)
             except Exception as error:
                 self.hidden.discard(window)
                 print(f'hide-league-client-in-game: cannot hide 0x{window:x}: {error}',
                       file=sys.stderr, flush=True)
+                continue
+            try:
+                print(f'hide-league-client-in-game: hidden 0x{window:x}',
+                      file=self.out, flush=True)
+            except Exception:
+                # Logging must not lose a successfully unmapped window.
+                pass
 
     def run(self, max_steps=None):
         steps = 0
