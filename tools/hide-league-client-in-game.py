@@ -129,7 +129,8 @@ def xprop_value(window, prop):
 
 
 def window_class(window):
-    return xprop_value(window, 'WM_CLASS').lower()
+    value = xprop_value(window, 'WM_CLASS').lower()
+    return value if '=' in value else ''
 
 
 def window_pid(window):
@@ -295,11 +296,12 @@ class Watcher:
         for window in windows:
             if window in self.hidden:
                 continue
+            self.hidden.add(window)
             try:
                 self.x11.unmap(window)
-                self.hidden.add(window)
                 print(f'hide-league-client-in-game: hidden 0x{window:x}', file=self.out, flush=True)
             except Exception as error:
+                self.hidden.discard(window)
                 print(f'hide-league-client-in-game: cannot hide 0x{window:x}: {error}',
                       file=sys.stderr, flush=True)
 
@@ -372,8 +374,10 @@ def main(argv=None):
 
     for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(signum, stop)
+    optout = ('RCLOL_CLIENT_IN_GAME_TRICKS=0' if tricks
+              else 'RCLOL_HIDE_CLIENT_IN_GAME=0')
     print('hide-league-client-in-game: watching %s for a running match; '
-          'opt out with RCLOL_HIDE_CLIENT_IN_GAME=0' % prefix, flush=True)
+          'opt out with %s' % (prefix, optout), flush=True)
     try:
         watcher.run()
     except KeyboardInterrupt:

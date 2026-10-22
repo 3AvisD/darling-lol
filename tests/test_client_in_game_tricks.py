@@ -51,11 +51,29 @@ class ClientInGameTricksTests(unittest.TestCase):
 
     def test_last_duplicate_value_wins_and_quotes_are_accepted(self):
         self.path.write_text(
-            'potatoModeEnabled: false\n'
-            'closeLeagueClientDuringGame: false\n'
-            'potatoModeEnabled: "true"\n'
-            'closeLeagueClientDuringGame: "true"\n')
+            'lol-user-experience:\n'
+            '    data:\n'
+            '        potatoModeEnabled: false\n'
+            '        closeLeagueClientDuringGame: false\n'
+            '        potatoModeEnabled: "true"\n'
+            '        closeLeagueClientDuringGame: "true"\n')
         self.assertEqual(tricks.mode(self.path), 'close')
+
+    def test_keys_outside_the_named_section_are_ignored(self):
+        self.path.write_text(
+            'lol-user-experience:\n'
+            '    data:\n'
+            '        potatoModeEnabled: true\n'
+            'other-section:\n'
+            '    potatoModeEnabled: true\n'
+            '    closeLeagueClientDuringGame: true\n')
+        self.assertEqual(tricks.mode(self.path), 'hide')
+
+    def test_second_read_failure_fails_closed(self):
+        self.write(True, False)
+        text = self.path.read_text()
+        with patch.object(Path, 'read_text', side_effect=[text, OSError()]):
+            self.assertEqual(tricks.mode(self.path), 'none')
 
     def test_main_prints_mode(self):
         self.write(True, False)

@@ -7,32 +7,45 @@ The public launcher switch is RCLOL_CLIENT_IN_GAME_TRICKS=1. It reads
 - potatoModeEnabled must be true (client optimizations enabled);
 - closeLeagueClientDuringGame true  -> close the client UI while a match runs;
 - closeLeagueClientDuringGame false -> hide the client windows instead;
-- missing/unreadable preferences     -> no action (none).
+- missing preferences or an unreadable file -> no action (none).
 
-This helper only selects a mode. It does not change preferences or files.
+Only the named `lol-user-experience` section is considered, so identical keys
+in another section cannot select a helper. This helper only selects a mode; it
+does not change preferences or files.
 """
 
-import re
 import sys
 from pathlib import Path
 
+SECTION = 'lol-user-experience'
 CLOSE_KEY = 'closeLeagueClientDuringGame'
 OPTIMIZATION_KEY = 'potatoModeEnabled'
 TRUE_VALUES = {'true', 'yes', '1'}
 FALSE_VALUES = {'false', 'no', '0'}
 
 
-def read_bool(path, key):
-    """Return True/False for the last value, or None when absent/unreadable."""
-    try:
-        lines = Path(path).read_text().splitlines()
-    except (OSError, UnicodeError):
-        return None
+def read_bool(path, key, section=SECTION):
+    """Return True/False for the last key in section, or None when absent.
+
+    OSError/UnicodeError is raised for an unreadable file so callers can fail
+    closed instead of treating a read race as a missing preference.
+    """
+    lines = Path(path).read_text().splitlines()
+    in_section = False
     value = None
     for line in lines:
-        match = re.match(r'^\s*' + re.escape(key) + r':\s*(\S+)', line)
-        if match:
-            value = match.group(1).strip('"\'').lower()
+        stripped = line.strip()
+        if not stripped or stripped.startswith('#'):
+            continue
+        if not line.startswith((' ', '\t')):
+            if stripped == section + ':':
+                in_section = True
+            elif in_section:
+                break
+            continue
+        if not in_section or not stripped.startswith(key + ':'):
+            continue
+        value = stripped.split(':', 1)[1].strip().strip('"\'').lower()
     if value in TRUE_VALUES:
         return True
     if value in FALSE_VALUES:
@@ -41,9 +54,17 @@ def read_bool(path, key):
 
 
 def mode(path):
-    if read_bool(path, OPTIMIZATION_KEY) is not True:
+    try:
+        optimization = read_bool(path, OPTIMIZATION_KEY)
+    except (OSError, UnicodeError):
         return 'none'
-    return 'close' if read_bool(path, CLOSE_KEY) is True else 'hide'
+    if optimization is not True:
+        return 'none'
+    try:
+        close = read_bool(path, CLOSE_KEY)
+    except (OSError, UnicodeError):
+        return 'none'
+    return 'close' if close is True else 'hide'
 
 
 def main(argv=None):
