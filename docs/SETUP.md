@@ -78,6 +78,14 @@ opts in to Hyprland-only recovery of a default-prefix Riot session with no
 visible window; it is off by default. See [troubleshooting](TROUBLESHOOTING.md#riot-exits-and-league-reports-that-it-lost-its-connection)
 for the observed failures, recovery guards and NSURLSession limitations.
 
+`RCLOL_HIDE_CLIENT_IN_GAME=1` opts in to hiding the managed `LeagueClientUx`
+and `Riot Client` X11 windows while a match runs, then showing them when the
+game process ends. It keeps the client open and is mutually exclusive with
+`RCLOL_CLOSE_CLIENT_IN_GAME=1` (close takes precedence). It is off by default,
+requires X11/Xwayland, and does not patch client binaries, CEF or the game. See
+[the troubleshooting measurement](TROUBLESHOOTING.md#keep-the-client-open-but-hide-it-during-a-match)
+for the measured CPU effect and limitations.
+
 `RCLOL_FILTER_HOST_ENV=1` opts in to removing host desktop-session variables before
 the guest starts: `WAYLAND_DISPLAY`, `XDG_SESSION_*`, `XDG_CURRENT_DESKTOP`,
 GNOME/KDE/GDM, systemd, SSH agent, terminal, toolkit (`QT_*`, `GTK_*`, `GDK_*`),

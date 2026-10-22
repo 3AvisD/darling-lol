@@ -192,6 +192,55 @@ observation, without waiting for a match:
 python3 tools/close-league-client-in-game.py --once --dry-run
 ```
 
+### Keep the client open but hide it during a match
+
+`LeagueClientUx` can consume a noticeable amount of CPU while the client stays
+open during a match. An opt-in alternative to closing it hides the managed
+client window instead:
+
+```sh
+RCLOL_HIDE_CLIENT_IN_GAME=1 ./scripts/run.sh
+```
+
+The launcher detects when a match starts, unmaps the `LeagueClientUx` and
+`Riot Client` X11 windows, and maps them again when the game process ends. The
+client is not closed, the League backend and Riot client keep running, and the
+game window is never hidden. `RCLOL_CLOSE_CLIENT_IN_GAME=1` takes precedence
+when both flags are set.
+
+The helper is off by default and window-management only: it does not patch
+client binaries, CEF, anti-cheat or DRM. It attributes the game to this prefix
+through the loader's `__mldr_sockpath`, and fails closed when ownership, proc
+state, environment or window information cannot be read. It requires an X11 or
+Xwayland desktop; on a native Wayland window manager without Xwayland it cannot
+find the windows.
+
+On a CPU-bound host the effect appears after CEF has been hidden for a few
+seconds. In a local 30-second test on an i5-3470 with a Radeon RX 550, hiding
+`LeagueClientUx` reduced the summed CPU of the matched client/CEF processes from
+120.7% to 93.4% (about 23%, or 27 percentage points, of one core); showing the
+window returned it to 119.9%. This is not a universal FPS or percentage claim:
+a game that is GPU-bound, a client with no active UI work, or a different
+desktop may show less benefit. The hidden window can also need a moment to
+repaint after it is shown.
+
+`RCLOL_CLOSE_CLIENT_IN_GAME=1` remains the more aggressive option when in-client
+chat during the match is not needed. Configure one of the two, not both:
+
+```sh
+# Keep the client open, hide its windows while playing
+RCLOL_HIDE_CLIENT_IN_GAME=1 ./scripts/run.sh
+
+# Or close the client UI while playing
+RCLOL_CLOSE_CLIENT_IN_GAME=1 ./scripts/run.sh
+```
+
+Diagnose the match detector without changing any window:
+
+```sh
+python3 tools/hide-league-client-in-game.py --once
+```
+
 ### Riot reports NO INTERNET FOUND while the host is online
 
 Older base runtimes ship Google DNS servers (`8.8.8.8` and `8.8.4.4`), which
