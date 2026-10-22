@@ -78,6 +78,14 @@ opts in to Hyprland-only recovery of a default-prefix Riot session with no
 visible window; it is off by default. See [troubleshooting](TROUBLESHOOTING.md#riot-exits-and-league-reports-that-it-lost-its-connection)
 for the observed failures, recovery guards and NSURLSession limitations.
 
+`RCLOL_RECOVER_STALE_CLIENT=1` opts in to partial runtime recovery before
+launch. If `darlingserver` is alive, no game is running, no managed client
+window is visible and stale Riot/League/CEF processes remain, the launcher stops
+only that client tree and reuses the runtime. It preserves `darlingserver`,
+launchd/mldr, sockets and `.init.pid`; if X11/Xwayland cannot be inspected it
+does nothing. See
+[troubleshooting](TROUBLESHOOTING.md#client-remains-running-without-a-window).
+
 `RCLOL_FILTER_HOST_ENV=1` opts in to removing host desktop-session variables before
 the guest starts: `WAYLAND_DISPLAY`, `XDG_SESSION_*`, `XDG_CURRENT_DESKTOP`,
 GNOME/KDE/GDM, systemd, SSH agent, terminal, toolkit (`QT_*`, `GTK_*`, `GDK_*`),

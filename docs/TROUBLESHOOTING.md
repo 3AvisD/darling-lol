@@ -149,6 +149,15 @@ ownership or window information cannot be read. A hidden background client or
 download is restarted when recovery is enabled. Other desktop environments are
 not supported by this helper; recovery is off by default.
 
+For a live Darling runtime with no visible client window but stale Riot/League/
+CEF processes, `RCLOL_RECOVER_STALE_CLIENT=1` performs a partial recovery before
+the next launch. It keeps `darlingserver`, launchd/mldr, sockets and `.init.pid`,
+stops only the stale client process tree, and then lets the normal launcher start
+the product again. It does nothing while a game process is running or when a
+managed client window is visible. With X11/Xwayland unavailable it fails closed.
+This saves the Darling bootstrap but not the Riot Client/CEF startup itself. If
+no window appears afterward, use a full runtime shutdown/restart.
+
 ### Client window stays black after a match
 
 The League client keeps its Chromium/CEF UI (`LeagueClientUx` and its helpers)

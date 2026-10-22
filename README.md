@@ -109,6 +109,14 @@ First installation and future Riot updates can still encounter compatibility gap
 
 For another region, set `RCLOL_REGION` and `RCLOL_LOCALE` before launch. For example `RCLOL_REGION=NA RCLOL_LOCALE=en_US ./scripts/run.sh`. Linux display selection follows `$DISPLAY`; the legacy launcher fallback is `:1`.
 
+If the game or Riot client was closed but `darlingserver` is still running, opt in to partial recovery before the next launch:
+
+```sh
+RCLOL_RECOVER_STALE_CLIENT=1 ./scripts/run.sh
+```
+
+It stops only a windowless Riot/League/CEF tree, preserves `darlingserver`, launchd/mldr, sockets and `.init.pid`, and then starts the product normally. It does nothing while a game or managed client window is present and fails closed when it cannot inspect X11. See [troubleshooting](docs/TROUBLESHOOTING.md#client-remains-running-without-a-window).
+
 ## Testing
 
 Start with standalone regression checks, then play a match manually. See [testing](docs/TESTING.md). Do not attach a debugger, query client APIs, inject diagnostic hooks or automate client/game input. This project ships no client-side automation, inspection or profiling helpers.
