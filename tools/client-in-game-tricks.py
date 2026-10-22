@@ -45,7 +45,14 @@ def read_bool(path, key, section=SECTION):
             continue
         if not in_section or not stripped.startswith(key + ':'):
             continue
-        value = stripped.split(':', 1)[1].strip().strip('"\'').lower()
+        value = stripped.split(':', 1)[1].strip()
+        if value[:1] in ('"', "'"):
+            quote = value[0]
+            end = value.find(quote, 1)
+            value = value[1:end] if end != -1 else value[1:]
+        else:
+            value = value.split('#', 1)[0].strip()
+        value = value.lower()
     if value in TRUE_VALUES:
         return True
     if value in FALSE_VALUES:

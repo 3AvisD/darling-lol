@@ -69,6 +69,14 @@ class ClientInGameTricksTests(unittest.TestCase):
             '    closeLeagueClientDuringGame: true\n')
         self.assertEqual(tricks.mode(self.path), 'hide')
 
+    def test_inline_yaml_comments_are_ignored(self):
+        self.path.write_text(
+            'lol-user-experience:\n'
+            '    data:\n'
+            '        potatoModeEnabled: true # client optimizations\n'
+            '        closeLeagueClientDuringGame: "true" # close during matches\n')
+        self.assertEqual(tricks.mode(self.path), 'close')
+
     def test_second_read_failure_fails_closed(self):
         self.write(True, False)
         text = self.path.read_text()
