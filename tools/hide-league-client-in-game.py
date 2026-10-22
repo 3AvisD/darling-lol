@@ -117,23 +117,112 @@ def xprop_root():
     return re.findall(r'0x[0-9a-fA-F]+', listing)
 
 
-def window_class(window):
+def xprop_value(window, prop):
     try:
-        prop = subprocess.check_output(
-            ['xprop', '-id', window, 'WM_CLASS'], text=True, timeout=5
+        return subprocess.check_output(
+            ['xprop', '-id', window, prop], text=True, timeout=5
         )
     except (OSError, subprocess.SubprocessError):
         return ''
-    return prop.lower()
 
 
-def target_windows():
-    """Managed client windows only; the game window is never selected."""
+def window_class(window):
+    return xprop_value(window, 'WM_CLASS').lower()
+
+
+def window_pid(window):
+    match = re.search(r'=\s*(\d+)', xprop_value(window, '_NET_WM_PID'))
+    return int(match.group(1)) if match else None
+
+
+def _socket_from_process(proc):
+    try:
+        environment = dict(
+            item.split(b'=', 1)
+            for item in (proc / 'environ').read_bytes().split(b'\0')
+            if b'=' in item
+        )
+    except (OSError, ValueError):
+        return None
+    return environment.get(SOCK_VARIABLE)
+
+
+def host_socket_for_guest(guest_pid, proc_root=Path('/proc')):
+    """Find the host process for a guest X11 PID and return its loader socket.
+
+    Darling's X11 window stores the guest PID in _NET_WM_PID, while the
+    process visible in /proc is the host loader. NSpid carries both IDs. The
+    direct /proc/<pid> case is checked too for a native process.
+    """
+    direct = proc_root / str(guest_pid)
+    if direct.exists():
+        socket = _socket_from_process(direct)
+        if socket is not None:
+            return socket
+    sockets = set()
+    try:
+        entries = list(proc_root.iterdir())
+    except OSError:
+        return None
+    for proc in entries:
+        if not proc.name.isdigit():
+            continue
+        try:
+            status = (proc / 'status').read_text()
+        except OSError:
+            continue
+        for line in status.splitlines():
+            if not line.startswith('NSpid:'):
+                continue
+            if str(guest_pid) not in line.split()[1:]:
+                continue
+            socket = _socket_from_process(proc)
+            if socket is not None:
+                sockets.add(socket)
+    return sockets.pop() if len(sockets) == 1 else None
+
+
+def window_belongs_to_prefix(window, prefix):
+    pid = window_pid(window)
+    if pid is None:
+        return False
+    socket = host_socket_for_guest(pid)
+    if socket is None:
+        return False
+    try:
+        return Path(os.fsdecode(socket)).parent.resolve() == (prefix / SOCK_NAME).parent.resolve()
+    except OSError:
+        return False
+
+
+def target_windows(prefix, class_cache=None):
+    """Managed client windows for this prefix; the game window is never selected.
+
+    WM_CLASS is cached only when non-empty. The cache is pruned when a window
+    leaves _NET_CLIENT_LIST; empty results are retried because a class can be
+    set after the window appears.
+    """
+    current = []
+    for raw in xprop_root():
+        try:
+            current.append((int(raw, 16), raw))
+        except ValueError:
+            continue
+    current_ids = {window for window, _raw in current}
+    if class_cache is not None:
+        for stale in set(class_cache) - current_ids:
+            del class_cache[stale]
     found = []
-    for window in xprop_root():
-        classes = window_class(window)
-        if any(name in classes for name in TARGET_CLASSES):
-            found.append(int(window, 16))
+    for window, raw in current:
+        classes = class_cache.get(window) if class_cache is not None else None
+        if not classes:
+            classes = window_class(raw)
+            if classes and class_cache is not None:
+                class_cache[window] = classes
+        if not classes or not any(name in classes for name in TARGET_CLASSES):
+            continue
+        if window_belongs_to_prefix(raw, prefix):
+            found.append(window)
     return sorted(set(found))
 
 
@@ -179,6 +268,7 @@ class Watcher:
         self.sleep = sleep
         self.out = out
         self.hidden = set()
+        self.class_cache = {}
         self.reported_no_window = False
 
     def _show_all(self, reason):
@@ -195,7 +285,7 @@ class Watcher:
         self.hidden.clear()
 
     def _hide_new(self):
-        windows = self.window_source()
+        windows = self.window_source(self.prefix, self.class_cache)
         if not windows and not self.hidden and not self.reported_no_window:
             print('hide-league-client-in-game: no managed client window; not hiding',
                   file=self.out, flush=True)
@@ -242,11 +332,11 @@ def main(argv=None):
                         help='one game observation and exit (no window changes)')
     args = parser.parse_args(argv)
 
-    if os.environ.get('RCLOL_CLOSE_CLIENT_IN_GAME') == '1':
+    if not args.once and os.environ.get('RCLOL_CLOSE_CLIENT_IN_GAME') == '1':
         print('hide-league-client-in-game: ignored; RCLOL_CLOSE_CLIENT_IN_GAME=1 takes precedence',
               file=sys.stderr, flush=True)
         return 0
-    if os.environ.get('RCLOL_HIDE_CLIENT_IN_GAME') != '1':
+    if not args.once and os.environ.get('RCLOL_HIDE_CLIENT_IN_GAME') != '1':
         print('hide-league-client-in-game: disabled; set RCLOL_HIDE_CLIENT_IN_GAME=1',
               flush=True)
         return 0
@@ -277,8 +367,8 @@ def main(argv=None):
     def stop(_signum, _frame):
         raise KeyboardInterrupt
 
-    signal.signal(signal.SIGTERM, stop)
-    signal.signal(signal.SIGINT, stop)
+    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(signum, stop)
     print('hide-league-client-in-game: watching %s for a running match; '
           'opt out with RCLOL_HIDE_CLIENT_IN_GAME=0' % prefix, flush=True)
     try:

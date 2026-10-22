@@ -88,6 +88,43 @@ class HideClientInGameTests(unittest.TestCase):
         with patch.object(Path, 'read_bytes', read):
             self.assertIsNone(hide_in_game.game_running(self.prefix, self.proc))
 
+    def test_unreadable_process_directory_is_unknown(self):
+        class UnreadableProc:
+            def iterdir(self):
+                raise OSError()
+
+        self.assertIsNone(hide_in_game.game_running(self.prefix, UnreadableProc()))
+
+    def test_host_socket_for_guest_uses_nspid(self):
+        host = self.proc / '999'
+        host.mkdir()
+        (host / 'status').write_text('Name:\tCrBrowserMain\nNSpid:\t999\t5877\n')
+        (host / 'environ').write_bytes(self.environment(self.prefix))
+        self.assertEqual(
+            hide_in_game.host_socket_for_guest(5877, self.proc),
+            os.fsencode(self.prefix / hide_in_game.SOCK_NAME),
+        )
+
+    def test_window_belongs_to_prefix(self):
+        socket = os.fsencode(self.prefix / hide_in_game.SOCK_NAME)
+        with patch.object(hide_in_game, 'window_pid', return_value=5877), \
+             patch.object(hide_in_game, 'host_socket_for_guest', return_value=socket):
+            self.assertTrue(hide_in_game.window_belongs_to_prefix('0x10', self.prefix))
+            self.assertFalse(hide_in_game.window_belongs_to_prefix(
+                '0x10', self.root / 'other'))
+
+    def test_once_runs_without_opt_in(self):
+        output = io.StringIO()
+        with patch.dict(os.environ, {
+            'RCLOL_HIDE_CLIENT_IN_GAME': '',
+            'RCLOL_CLOSE_CLIENT_IN_GAME': '',
+        }), patch.object(hide_in_game, 'target_prefix',
+                         return_value=self.prefix), \
+             patch.object(hide_in_game, 'game_running', return_value=True), \
+             patch.object(hide_in_game.sys, 'stdout', output):
+            self.assertEqual(hide_in_game.main(['--once']), 0)
+        self.assertIn('match=running', output.getvalue())
+
     def test_target_windows_ignores_game_class(self):
         with patch.object(hide_in_game, 'xprop_root',
                           return_value=['0x10', '0x20', '0x30']), \
@@ -96,8 +133,28 @@ class HideClientInGameTests(unittest.TestCase):
                               'wm_class(string) = "leagueclientux"',
                               'wm_class(string) = "leagueoflegends"',
                               'wm_class(string) = "riot client"',
-                          ]):
-            self.assertEqual(hide_in_game.target_windows(), [0x10, 0x30])
+                          ]), \
+             patch.object(hide_in_game, 'window_belongs_to_prefix', return_value=True):
+            self.assertEqual(hide_in_game.target_windows(self.prefix), [0x10, 0x30])
+
+    def test_target_windows_requires_this_prefix(self):
+        with patch.object(hide_in_game, 'xprop_root',
+                          return_value=['0x10', '0x20']), \
+             patch.object(hide_in_game, 'window_class',
+                          return_value='wm_class(string) = "leagueclientux"'), \
+             patch.object(hide_in_game, 'window_belongs_to_prefix',
+                          side_effect=[True, False]):
+            self.assertEqual(hide_in_game.target_windows(self.prefix), [0x10])
+
+    def test_target_windows_caches_non_empty_classes(self):
+        cache = {}
+        with patch.object(hide_in_game, 'xprop_root', return_value=['0x10']), \
+             patch.object(hide_in_game, 'window_class',
+                          return_value='wm_class(string) = "leagueclientux"') as classes, \
+             patch.object(hide_in_game, 'window_belongs_to_prefix', return_value=True):
+            self.assertEqual(hide_in_game.target_windows(self.prefix, cache), [0x10])
+            self.assertEqual(hide_in_game.target_windows(self.prefix, cache), [0x10])
+        self.assertEqual(classes.call_count, 1)
 
     def test_hides_then_shows_on_match_end(self):
         states = iter([True, True, False])
@@ -105,7 +162,7 @@ class HideClientInGameTests(unittest.TestCase):
         output = io.StringIO()
         watcher = hide_in_game.Watcher(
             self.prefix, x11,
-            window_source=lambda: [0xabc],
+            window_source=lambda _prefix, _cache: [0xabc],
             state_source=lambda _prefix: next(states),
             sleep=lambda _seconds: None,
             out=output,
@@ -123,7 +180,7 @@ class HideClientInGameTests(unittest.TestCase):
         output = io.StringIO()
         watcher = hide_in_game.Watcher(
             self.prefix, x11,
-            window_source=lambda: [0xdef],
+            window_source=lambda _prefix, _cache: [0xdef],
             state_source=lambda _prefix: next(states),
             sleep=lambda _seconds: None,
             out=output,
@@ -137,7 +194,7 @@ class HideClientInGameTests(unittest.TestCase):
         x11 = FakeX11()
         watcher = hide_in_game.Watcher(
             self.prefix, x11,
-            window_source=lambda: [0xabc],
+            window_source=lambda _prefix, _cache: [0xabc],
             state_source=lambda _prefix: False,
             sleep=lambda _seconds: None,
             out=io.StringIO(),
