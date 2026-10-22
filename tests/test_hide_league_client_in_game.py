@@ -156,6 +156,49 @@ class HideClientInGameTests(unittest.TestCase):
             self.assertEqual(hide_in_game.target_windows(self.prefix, cache), [0x10])
         self.assertEqual(classes.call_count, 1)
 
+    def test_missing_wm_class_is_not_cached_as_a_class(self):
+        with patch.object(hide_in_game, 'xprop_value',
+                          return_value='WM_CLASS:  not found.'):
+            self.assertEqual(hide_in_game.window_class('0x10'), '')
+
+    def test_unmap_failure_removes_the_window_from_hidden(self):
+        class FailingX11(FakeX11):
+            def unmap(self, window):
+                raise RuntimeError('unmap failed')
+
+        watcher = hide_in_game.Watcher(
+            self.prefix, FailingX11(),
+            window_source=lambda _prefix, _cache: [0xabc],
+            state_source=lambda _prefix: True,
+            sleep=lambda _seconds: None,
+            out=io.StringIO(),
+        )
+        watcher._hide_new()
+        self.assertEqual(watcher.hidden, set())
+
+    def test_interrupted_unmap_keeps_the_window_tracked(self):
+        shown = []
+
+        class InterruptingX11:
+            def unmap(self, window):
+                raise KeyboardInterrupt
+
+            def show(self, window):
+                shown.append(window)
+
+        watcher = hide_in_game.Watcher(
+            self.prefix, InterruptingX11(),
+            window_source=lambda _prefix, _cache: [0xabc],
+            state_source=lambda _prefix: True,
+            sleep=lambda _seconds: None,
+            out=io.StringIO(),
+        )
+        with self.assertRaises(KeyboardInterrupt):
+            watcher._hide_new()
+        self.assertEqual(watcher.hidden, {0xabc})
+        watcher.restore()
+        self.assertEqual(shown, [0xabc])
+
     def test_hides_then_shows_on_match_end(self):
         states = iter([True, True, False])
         x11 = FakeX11()
