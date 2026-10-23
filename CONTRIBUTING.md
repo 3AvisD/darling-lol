@@ -47,9 +47,10 @@ python3 scripts/validate.py
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
-The audit checks tracked source, rendered Python/shell and the pinned patch
-entries. Do not bypass it; fix the source or document the exception in the
-pull request.
+The audit checks tracked source, rendered Python/shell, pinned revision format,
+patch existence and patch parsing. It does not check patch applicability to the
+pinned revisions. Do not bypass it; fix the source or document the exception in
+the pull request.
 
 ## Pull requests
 
@@ -57,7 +58,9 @@ pull request.
 - Mention any change that touches platform identity, sandbox/AMFI probes,
   anti-cheat or account risk. Do not describe it as stealth, evasion, spoofing
   or an anti-cheat bypass.
-- If you change a patch, verify that it still applies to the pinned revision.
+- If you change a patch, run `python3 scripts/prepare.py --check-only` against
+  an existing pinned source checkout to verify that it applies to the pinned
+  revision.
 - If you change a user-facing variable, keep the old name as a deprecated alias
   for at least one release.
 
