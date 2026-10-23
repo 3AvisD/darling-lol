@@ -227,6 +227,60 @@ observation, without waiting for a match:
 python3 tools/close-league-client-in-game.py --once --dry-run
 ```
 
+### Automatic client handling during a match
+
+A single opt-in switch reads the client's own preferences and chooses the mode:
+
+```sh
+RCLOL_CLIENT_IN_GAME_TRICKS=1 ./scripts/run.sh
+```
+
+It reads `lol-user-experience` from the installed client's
+`LCULocalPreferences.yaml`:
+
+| Client preference | Launcher action |
+|---|---|
+| `potatoModeEnabled: false` or unreadable | no client-in-game helper |
+| `potatoModeEnabled: true`, close preference missing or invalid | no action |
+| `potatoModeEnabled: true`, `closeLeagueClientDuringGame: true` | close the client UI |
+| `potatoModeEnabled: true`, `closeLeagueClientDuringGame: false` | hide the client windows |
+
+The hide path unmaps the `LeagueClientUx` and `Riot Client` X11 windows and maps
+them again when the game process ends. The client is not closed, the League
+backend and Riot client keep running, and the game window is never hidden. The
+close path uses the UI-close helper described above. The hide helper exits after
+ten minutes without a client or match once it has seen one; a missing or invalid
+close preference selects no helper.
+
+The low-level `RCLOL_HIDE_CLIENT_IN_GAME=1` and
+`RCLOL_CLOSE_CLIENT_IN_GAME=1` switches remain available when the automatic
+switch is not set. All modes are off by default. The helpers are
+window-management only: they do not patch client binaries, CEF, anti-cheat or
+DRM. They attribute the game to this prefix through the loader's
+`__mldr_sockpath`, and fail closed when ownership, proc state, environment or
+window information cannot be read. The hide helper requires an X11 or Xwayland
+desktop; on a native Wayland window manager without Xwayland it cannot find the
+windows.
+
+On a CPU-bound host the hide effect appears after CEF has been hidden for a few
+seconds. In a local 30-second test on an i5-3470 with a Radeon RX 550, hiding
+`LeagueClientUx` reduced the summed CPU of the matched client/CEF processes from
+120.7% to 93.4% (about 23%, or 27 percentage points, of one core); showing the
+window returned it to 119.9%. This is not a universal FPS or percentage claim:
+a game that is GPU-bound, a client with no active UI work, or a different
+desktop may show less benefit. The hidden window can also need a moment to
+repaint after it is shown.
+
+With client optimizations enabled and close-during-game enabled, the close
+helper remains the more aggressive option when in-client chat during the match
+is not needed.
+
+Diagnose the match detector without changing any window:
+
+```sh
+python3 tools/hide-league-client-in-game.py --once
+```
+
 ### Riot reports NO INTERNET FOUND while the host is online
 
 Older base runtimes ship Google DNS servers (`8.8.8.8` and `8.8.4.4`), which
