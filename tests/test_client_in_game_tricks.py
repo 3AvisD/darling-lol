@@ -36,9 +36,12 @@ class ClientInGameTricksTests(unittest.TestCase):
         self.write(True, False)
         self.assertEqual(tricks.mode(self.path), 'hide')
 
-    def test_hide_when_close_preference_is_missing(self):
+    def test_none_when_close_preference_is_missing_or_invalid(self):
         self.write(True)
-        self.assertEqual(tricks.mode(self.path), 'hide')
+        self.assertEqual(tricks.mode(self.path), 'none')
+        for value in ('maybe', '"true', 'true#note', '"true"junk'):
+            self.write(True, value)
+            self.assertEqual(tricks.mode(self.path), 'none', value)
 
     def test_none_when_optimizations_are_off(self):
         self.write(False, True)
@@ -64,6 +67,7 @@ class ClientInGameTricksTests(unittest.TestCase):
             'lol-user-experience:\n'
             '    data:\n'
             '        potatoModeEnabled: true\n'
+            '        closeLeagueClientDuringGame: false\n'
             'other-section:\n'
             '    potatoModeEnabled: true\n'
             '    closeLeagueClientDuringGame: true\n')

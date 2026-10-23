@@ -117,11 +117,13 @@ RCLOL_CLIENT_IN_GAME_TRICKS=1 ./scripts/run.sh
 
 It reads `lol-user-experience` from the installed League client's
 `LCULocalPreferences.yaml`. When `potatoModeEnabled` is true, it closes the
-client UI if `closeLeagueClientDuringGame` is true; otherwise it hides the
-`LeagueClientUx`/`Riot Client` X11 windows and restores them when the game
-ends. With client optimizations disabled or unreadable preferences it does
-nothing. The `RCLOL_CLOSE_CLIENT_IN_GAME` and `RCLOL_HIDE_CLIENT_IN_GAME`
-low-level switches remain available when the automatic switch is not set. See
+client UI if `closeLeagueClientDuringGame` is true, and hides the
+`LeagueClientUx`/`Riot Client` X11 windows when that value is false. Missing or
+invalid preference values, disabled client optimizations and unreadable files
+select no action. The `RCLOL_CLOSE_CLIENT_IN_GAME` and
+`RCLOL_HIDE_CLIENT_IN_GAME` low-level switches remain available when the
+automatic switch is not set. The helper exits after ten minutes without a
+client or match once it has seen one. See
 [troubleshooting](docs/TROUBLESHOOTING.md#automatic-client-handling-during-a-match)
 for the measured effect and caveats.
 

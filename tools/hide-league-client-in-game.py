@@ -39,6 +39,7 @@ GAME_NAME = 'LeagueofLegends'
 SOCK_VARIABLE = b'__mldr_sockpath'
 SOCK_NAME = '.darlingserver.sock'
 POLL_SECONDS = 2.0
+IDLE_SECONDS = 600
 TARGET_CLASSES = ('leagueclientux', 'riot client')
 
 
@@ -263,35 +264,46 @@ class Watcher:
     """Hide while a match is running, restore on end, uncertainty or exit."""
 
     def __init__(self, prefix, x11, window_source=target_windows,
-                 state_source=game_running, sleep=time.sleep, out=sys.stdout):
+                 state_source=game_running, sleep=time.sleep, out=sys.stdout,
+                 clock=time.monotonic):
         self.prefix = prefix
         self.x11 = x11
         self.window_source = window_source
         self.state_source = state_source
         self.sleep = sleep
         self.out = out
+        self.clock = clock
         self.hidden = set()
         self.class_cache = {}
         self.reported_no_window = False
+        self.seen = False
+        self.idle_since = None
+
+    def _log(self, message, stream=None):
+        try:
+            print(message, file=self.out if stream is None else stream, flush=True)
+        except Exception:
+            # A closed launcher pipe must not prevent window restoration.
+            pass
 
     def _show_all(self, reason):
         if not self.hidden:
             return
-        print(f'hide-league-client-in-game: {reason}; showing the client', file=self.out, flush=True)
+        self._log(f'hide-league-client-in-game: {reason}; showing the client')
         for window in sorted(self.hidden):
             try:
                 self.x11.show(window)
-                print(f'hide-league-client-in-game: shown 0x{window:x}', file=self.out, flush=True)
             except Exception as error:
-                print(f'hide-league-client-in-game: cannot show 0x{window:x}: {error}',
-                      file=sys.stderr, flush=True)
+                self._log(f'hide-league-client-in-game: cannot show 0x{window:x}: {error}',
+                          sys.stderr)
+                continue
+            self._log(f'hide-league-client-in-game: shown 0x{window:x}')
         self.hidden.clear()
 
     def _hide_new(self):
         windows = self.window_source(self.prefix, self.class_cache)
         if not windows and not self.hidden and not self.reported_no_window:
-            print('hide-league-client-in-game: no managed client window; not hiding',
-                  file=self.out, flush=True)
+            self._log('hide-league-client-in-game: no managed client window; not hiding')
             self.reported_no_window = True
         for window in windows:
             if window in self.hidden:
@@ -301,29 +313,44 @@ class Watcher:
                 self.x11.unmap(window)
             except Exception as error:
                 self.hidden.discard(window)
-                print(f'hide-league-client-in-game: cannot hide 0x{window:x}: {error}',
-                      file=sys.stderr, flush=True)
+                self._log(f'hide-league-client-in-game: cannot hide 0x{window:x}: {error}',
+                          sys.stderr)
                 continue
-            try:
-                print(f'hide-league-client-in-game: hidden 0x{window:x}',
-                      file=self.out, flush=True)
-            except Exception:
-                # Logging must not lose a successfully unmapped window.
-                pass
+            self._log(f'hide-league-client-in-game: hidden 0x{window:x}')
+
+    def _windows_present(self):
+        try:
+            return bool(self.window_source(self.prefix, self.class_cache))
+        except Exception:
+            # Uncertainty must not turn into an automatic exit.
+            return True
 
     def run(self, max_steps=None):
         steps = 0
         while True:
+            now = self.clock()
             state = self.state_source(self.prefix)
             if state is None:
                 self._show_all('unreadable /proc state')
             elif state:
+                self.seen = True
+                self.idle_since = None
                 if not self.hidden and self.reported_no_window:
                     self.reported_no_window = False
                 self._hide_new()
             else:
                 self._show_all('the match ended')
                 self.reported_no_window = False
+                if self._windows_present():
+                    self.seen = True
+                    self.idle_since = None
+                elif self.seen:
+                    if self.idle_since is None:
+                        self.idle_since = now
+                    if now - self.idle_since >= IDLE_SECONDS:
+                        self._log('hide-league-client-in-game: no client or match for '
+                                  f'{IDLE_SECONDS}s: leaving')
+                        return 0
             steps += 1
             if max_steps is not None and steps >= max_steps:
                 return 0
