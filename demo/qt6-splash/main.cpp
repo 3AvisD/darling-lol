@@ -55,7 +55,7 @@ int main(int argc, char **argv)
     if (!QFileInfo::exists(assetDir)) {
         assetDir = QDir::currentPath() + QStringLiteral("/assets");
     }
-    QString imagePath = assetDir + QStringLiteral("/infografia-darling.svg");
+    QString imagePath = assetDir + QStringLiteral("/infographic-how-it-works.svg");
     QString screenshot;
     for (int i = 1; i < argc; ++i) {
         const QString arg = QString::fromLocal8Bit(argv[i]);
@@ -75,8 +75,8 @@ int main(int argc, char **argv)
 
     const QStringList slidePaths{
         imagePath,
-        assetDir + QStringLiteral("/infografia-suspension.svg"),
-        assetDir + QStringLiteral("/infografia-contenido-protegido.svg"),
+        assetDir + QStringLiteral("/infographic-account-risk.svg"),
+        assetDir + QStringLiteral("/infographic-protected-content.svg"),
     };
     QVector<QPixmap> slides;
     for (const QString &path : slidePaths) {
