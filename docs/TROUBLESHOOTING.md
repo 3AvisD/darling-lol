@@ -206,13 +206,16 @@ It reads `lol-user-experience` from the installed client's
 | Client preference | Launcher action |
 |---|---|
 | `potatoModeEnabled: false` or unreadable | no client-in-game helper |
+| `potatoModeEnabled: true`, close preference missing or invalid | no action |
 | `potatoModeEnabled: true`, `closeLeagueClientDuringGame: true` | close the client UI |
 | `potatoModeEnabled: true`, `closeLeagueClientDuringGame: false` | hide the client windows |
 
 The hide path unmaps the `LeagueClientUx` and `Riot Client` X11 windows and maps
 them again when the game process ends. The client is not closed, the League
 backend and Riot client keep running, and the game window is never hidden. The
-close path uses the UI-close helper described above.
+close path uses the UI-close helper described above. The hide helper exits after
+ten minutes without a client or match once it has seen one; a missing or invalid
+close preference selects no helper.
 
 The low-level `RCLOL_HIDE_CLIENT_IN_GAME=1` and
 `RCLOL_CLOSE_CLIENT_IN_GAME=1` switches remain available when the automatic

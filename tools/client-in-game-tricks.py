@@ -7,7 +7,8 @@ The public launcher switch is RCLOL_CLIENT_IN_GAME_TRICKS=1. It reads
 - potatoModeEnabled must be true (client optimizations enabled);
 - closeLeagueClientDuringGame true  -> close the client UI while a match runs;
 - closeLeagueClientDuringGame false -> hide the client windows instead;
-- missing preferences or an unreadable file -> no action (none).
+- missing or invalid closeLeagueClientDuringGame or potatoModeEnabled -> no action
+  (none).
 
 Only the named `lol-user-experience` section is considered, so identical keys
 in another section cannot select a helper. This helper only selects a mode; it
@@ -24,8 +25,39 @@ TRUE_VALUES = {'true', 'yes', '1'}
 FALSE_VALUES = {'false', 'no', '0'}
 
 
+def parse_bool(value):
+    """Return True/False/None for one YAML scalar, ignoring a trailing comment."""
+    value = value.strip()
+    if not value:
+        return None
+    if value[0] in ('"', "'"):
+        quote = value[0]
+        end = value.find(quote, 1)
+        if end == -1:
+            return None
+        scalar = value[1:end]
+        remainder = value[end + 1:]
+        if remainder and not remainder[0].isspace():
+            return None
+        remainder = remainder.strip()
+        if remainder and not remainder.startswith('#'):
+            return None
+    else:
+        scalar = value
+        for index, char in enumerate(scalar):
+            if char == '#' and (index == 0 or scalar[index - 1].isspace()):
+                scalar = scalar[:index].rstrip()
+                break
+    scalar = scalar.lower()
+    if scalar in TRUE_VALUES:
+        return True
+    if scalar in FALSE_VALUES:
+        return False
+    return None
+
+
 def read_bool(path, key, section=SECTION):
-    """Return True/False for the last key in section, or None when absent.
+    """Return True/False for the last key in section, or None when invalid.
 
     OSError/UnicodeError is raised for an unreadable file so callers can fail
     closed instead of treating a read race as a missing preference.
@@ -45,19 +77,8 @@ def read_bool(path, key, section=SECTION):
             continue
         if not in_section or not stripped.startswith(key + ':'):
             continue
-        value = stripped.split(':', 1)[1].strip()
-        if value[:1] in ('"', "'"):
-            quote = value[0]
-            end = value.find(quote, 1)
-            value = value[1:end] if end != -1 else value[1:]
-        else:
-            value = value.split('#', 1)[0].strip()
-        value = value.lower()
-    if value in TRUE_VALUES:
-        return True
-    if value in FALSE_VALUES:
-        return False
-    return None
+        value = parse_bool(stripped.split(':', 1)[1])
+    return value
 
 
 def mode(path):
@@ -71,7 +92,11 @@ def mode(path):
         close = read_bool(path, CLOSE_KEY)
     except (OSError, UnicodeError):
         return 'none'
-    return 'close' if close is True else 'hide'
+    if close is True:
+        return 'close'
+    if close is False:
+        return 'hide'
+    return 'none'
 
 
 def main(argv=None):

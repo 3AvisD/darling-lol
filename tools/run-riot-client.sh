@@ -12,31 +12,6 @@ runner_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 if [ "${RCLOL_RECOVER_HIDDEN_CLIENT:-0}" = 1 ]; then
  python3 "$runner_dir/recover-hidden-riot-client.py"
 fi
-# Opt-in automatic client-in-game handling. This single switch reads the
-# client's own lol-user-experience preferences: close the UI when the user
-# selected "close client during game", otherwise hide the client windows.
-# It does nothing unless potatoModeEnabled (client optimizations) is true.
-if [ "${RCLOL_CLIENT_IN_GAME_TRICKS:-0}" = 1 ]; then
- pref="$prefix_dir/Applications/League of Legends.app/Contents/LoL/Config/LCULocalPreferences.yaml"
- mode=$(python3 "$runner_dir/client-in-game-tricks.py" "$pref" 2>/dev/null || echo none)
- case "$mode" in
-  close)
-   echo 'client-in-game-tricks: closeLeagueClientDuringGame=true -> close helper' >&2
-   python3 "$runner_dir/close-league-client-in-game.py" --detach &
-   ;;
-  hide)
-   echo 'client-in-game-tricks: closeLeagueClientDuringGame=false -> hide helper' >&2
-   python3 "$runner_dir/hide-league-client-in-game.py" --detach &
-   ;;
-  *)
-   echo 'client-in-game-tricks: no action (client optimizations disabled or preferences unreadable)' >&2
-   ;;
- esac
-elif [ "${RCLOL_CLOSE_CLIENT_IN_GAME:-0}" = 1 ]; then
- python3 "$runner_dir/close-league-client-in-game.py" --detach &
-elif [ "${RCLOL_HIDE_CLIENT_IN_GAME:-0}" = 1 ]; then
- python3 "$runner_dir/hide-league-client-in-game.py" --detach &
-fi
 # The bundled downloader rejects IPv6 CONNECT_TO addresses. Only Riot CDN
 # AAAA lookups are suppressed; set this to 0 to retain the upstream resolver.
 export RCLOL_CDN_IPV4_ONLY="${RCLOL_CDN_IPV4_ONLY:-1}"
@@ -82,6 +57,33 @@ if [ -z "${RIOT_LAUNCHER_HOST:-}" ] && [ ! -e "$client" ]; then
   client=$shared
  else
   ln -s "../Users/Shared/Riot Games/Riot Client.app" "$client"
+ fi
+fi
+# Opt-in automatic client-in-game handling. Start the watcher only after the
+# installed-client check above: a failed installer launch must not leave a
+# helper behind. The preference selector returns no action for missing or
+# invalid close-during-game values.
+if [ -z "${RIOT_LAUNCHER_HOST:-}" ]; then
+ if [ "${RCLOL_CLIENT_IN_GAME_TRICKS:-0}" = 1 ]; then
+  pref="$prefix_dir/Applications/League of Legends.app/Contents/LoL/Config/LCULocalPreferences.yaml"
+  mode=$(python3 "$runner_dir/client-in-game-tricks.py" "$pref" 2>/dev/null || echo none)
+  case "$mode" in
+   close)
+    echo 'client-in-game-tricks: closeLeagueClientDuringGame=true -> close helper' >&2
+    python3 "$runner_dir/close-league-client-in-game.py" --detach &
+    ;;
+   hide)
+    echo 'client-in-game-tricks: closeLeagueClientDuringGame=false -> hide helper' >&2
+    python3 "$runner_dir/hide-league-client-in-game.py" --detach &
+    ;;
+   *)
+    echo 'client-in-game-tricks: no action (client optimizations disabled or preferences missing/invalid)' >&2
+    ;;
+  esac
+ elif [ "${RCLOL_CLOSE_CLIENT_IN_GAME:-0}" = 1 ]; then
+  python3 "$runner_dir/close-league-client-in-game.py" --detach &
+ elif [ "${RCLOL_HIDE_CLIENT_IN_GAME:-0}" = 1 ]; then
+  python3 "$runner_dir/hide-league-client-in-game.py" --detach &
  fi
 fi
 A=${RIOT_LAUNCHER_HOST:-"$client/Contents/MacOS/RiotClientServices"}

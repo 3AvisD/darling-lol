@@ -217,6 +217,46 @@ class HideClientInGameTests(unittest.TestCase):
         watcher._hide_new()
         self.assertEqual(watcher.hidden, {0xabc})
 
+    def test_restore_log_failure_still_shows_the_window(self):
+        class BrokenOutput:
+            def write(self, _text):
+                raise BrokenPipeError
+
+            def flush(self):
+                pass
+
+        x11 = FakeX11()
+        watcher = hide_in_game.Watcher(
+            self.prefix, x11,
+            window_source=lambda _prefix, _cache: [0xabc],
+            state_source=lambda _prefix: True,
+            sleep=lambda _seconds: None,
+            out=BrokenOutput(),
+        )
+        watcher.hidden = {0xabc}
+        watcher._show_all('test')
+        self.assertEqual(x11.shown, [0xabc])
+        self.assertEqual(watcher.hidden, set())
+
+    def test_idle_timeout_leaves_after_client_disappears(self):
+        states = iter([True, False, False])
+        windows = iter([[0xabc], [], []])
+        times = iter([0.0, 10.0, 700.0])
+        x11 = FakeX11()
+        output = io.StringIO()
+        watcher = hide_in_game.Watcher(
+            self.prefix, x11,
+            window_source=lambda _prefix, _cache: next(windows),
+            state_source=lambda _prefix: next(states),
+            sleep=lambda _seconds: None,
+            out=output,
+            clock=lambda: next(times),
+        )
+        self.assertEqual(watcher.run(max_steps=3), 0)
+        self.assertEqual(x11.unmapped, [0xabc])
+        self.assertEqual(x11.shown, [0xabc])
+        self.assertIn('no client or match', output.getvalue())
+
     def test_hides_then_shows_on_match_end(self):
         states = iter([True, True, False])
         x11 = FakeX11()
@@ -277,6 +317,11 @@ class HideClientInGameTests(unittest.TestCase):
             'RCLOL_CLOSE_CLIENT_IN_GAME': '1',
         }):
             self.assertEqual(hide_in_game.main([]), 0)
+
+    def test_helper_starts_after_the_installed_client_check(self):
+        source = (ROOT / 'tools/run-riot-client.sh').read_text()
+        self.assertLess(source.index('Riot Client is not installed in'),
+                        source.index('RCLOL_CLIENT_IN_GAME_TRICKS'))
 
     def test_master_tricks_switch_enables_hide(self):
         class FakeX11:
