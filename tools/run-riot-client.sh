@@ -9,8 +9,21 @@ if [ "${RCLOL_CORE_DUMPS:-0}" != 1 ]; then
 fi
 runner_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$runner_dir/runtime-paths.sh"
+# Opt-in partial recovery: if Darling is alive but a previous client tree is
+# windowless, stop only that client/CEF tree and reuse the runtime. Never
+# touches the game, darlingserver or the runtime sockets.
+if [ "${RCLOL_RECOVER_STALE_CLIENT:-0}" = 1 ]; then
+ python3 "$runner_dir/recover-stale-client.py"
+fi
 if [ "${RCLOL_RECOVER_HIDDEN_CLIENT:-0}" = 1 ]; then
  python3 "$runner_dir/recover-hidden-riot-client.py"
+fi
+# Opt-in cleanup of helpers left by an earlier launcher. This runs before the
+# current helper is started. It removes only helpers of this prefix whose
+# parent is init/systemd, so a helper of a live launcher is not touched.
+if [ "${RCLOL_CLEAN_STALE_HELPERS:-0}" = 1 ]; then
+ python3 "$runner_dir/clean-stale-helpers.py" --prefix "$prefix_dir" ||
+  echo 'clean-stale-helpers: cleanup failed; continuing' >&2
 fi
 # The bundled downloader rejects IPv6 CONNECT_TO addresses. Only Riot CDN
 # AAAA lookups are suppressed; set this to 0 to retain the upstream resolver.

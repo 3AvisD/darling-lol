@@ -109,6 +109,31 @@ First installation and future Riot updates can still encounter compatibility gap
 
 For another region, set `RCLOL_REGION` and `RCLOL_LOCALE` before launch. For example `RCLOL_REGION=NA RCLOL_LOCALE=en_US ./scripts/run.sh`. Linux display selection follows `$DISPLAY`; the legacy launcher fallback is `:1`.
 
+If the game or Riot client was closed but `darlingserver` is still running, opt in to partial recovery before the next launch:
+
+```sh
+RCLOL_RECOVER_STALE_CLIENT=1 ./scripts/run.sh
+```
+
+It stops only a windowless Riot/League/CEF tree at least 60 seconds old,
+preserves `darlingserver`, launchd/mldr, sockets and `.init.pid`, and then
+starts the product normally. It recognizes `LeagueClientUx`, `Riot Client` and
+`RiotClientServices` windows, does nothing while a game or managed client window
+is present, and fails closed when X11 properties cannot be read. See
+[troubleshooting](docs/TROUBLESHOOTING.md#client-remains-running-without-a-window).
+
+If repeated launches leave several `close-league-client-in-game.py` watchers,
+opt in to removing the orphaned ones before the new helper starts:
+
+```sh
+RCLOL_CLEAN_STALE_HELPERS=1 ./scripts/run.sh
+```
+
+It only removes helpers of this prefix whose parent is `init`/`systemd` (the
+launcher that started them has exited). A helper of a live launcher, another
+prefix, the game, Riot/League/CEF, `darlingserver` and the runtime are never
+touched. See [troubleshooting](docs/TROUBLESHOOTING.md#multiple-client-in-game-helpers).
+
 For automatic client handling during a match, opt in with one switch:
 
 ```sh

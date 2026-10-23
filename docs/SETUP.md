@@ -78,6 +78,24 @@ opts in to Hyprland-only recovery of a default-prefix Riot session with no
 visible window; it is off by default. See [troubleshooting](TROUBLESHOOTING.md#riot-exits-and-league-reports-that-it-lost-its-connection)
 for the observed failures, recovery guards and NSURLSession limitations.
 
+`RCLOL_RECOVER_STALE_CLIENT=1` opts in to partial runtime recovery before
+launch. If `darlingserver` is alive, no game is running, no managed client
+window is visible and stale Riot/League/CEF processes at least 60 seconds old
+remain, the launcher stops only that client tree and reuses the runtime. It
+recognizes `LeagueClientUx`, `Riot Client` and `RiotClientServices` windows and
+preserves `darlingserver`, launchd/mldr, sockets and `.init.pid`; if X11/Xwayland
+properties cannot be inspected it does nothing. See
+[troubleshooting](TROUBLESHOOTING.md#client-remains-running-without-a-window).
+
+`RCLOL_CLEAN_STALE_HELPERS=1` runs a preflight before the match helper starts.
+It removes `close-league-client-in-game.py` and
+`hide-league-client-in-game.py` processes of this prefix whose parent is
+`init`/`systemd`, which means the launcher that started them has exited. A
+helper of a live launcher, another prefix, the game, Riot/League/CEF and
+`darlingserver` are preserved. It fails closed when a command line,
+environment, stat entry or parent cannot be read. See
+[troubleshooting](TROUBLESHOOTING.md#multiple-client-in-game-helpers).
+
 `RCLOL_CLIENT_IN_GAME_TRICKS=1` opts in to automatic client handling during a
 match. It reads `lol-user-experience` from the installed client's
 `LCULocalPreferences.yaml`: with `potatoModeEnabled: true`, it closes the client
