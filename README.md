@@ -109,6 +109,24 @@ First installation and future Riot updates can still encounter compatibility gap
 
 For another region, set `RCLOL_REGION` and `RCLOL_LOCALE` before launch. For example `RCLOL_REGION=NA RCLOL_LOCALE=en_US ./scripts/run.sh`. Linux display selection follows `$DISPLAY`; the legacy launcher fallback is `:1`.
 
+For automatic client handling during a match, opt in with one switch:
+
+```sh
+RCLOL_CLIENT_IN_GAME_TRICKS=1 ./scripts/run.sh
+```
+
+It reads `lol-user-experience` from the installed League client's
+`LCULocalPreferences.yaml`. When `potatoModeEnabled` is true, it closes the
+client UI if `closeLeagueClientDuringGame` is true, and hides the
+`LeagueClientUx`/`Riot Client` X11 windows when that value is false. Missing or
+invalid preference values, disabled client optimizations and unreadable files
+select no action. The `RCLOL_CLOSE_CLIENT_IN_GAME` and
+`RCLOL_HIDE_CLIENT_IN_GAME` low-level switches remain available when the
+automatic switch is not set. The helper exits after ten minutes without a
+client or match once it has seen one. See
+[troubleshooting](docs/TROUBLESHOOTING.md#automatic-client-handling-during-a-match)
+for the measured effect and caveats.
+
 ## Testing
 
 Start with standalone regression checks, then play a match manually. See [testing](docs/TESTING.md). Do not attach a debugger, query client APIs, inject diagnostic hooks or automate client/game input. This project ships no client-side automation, inspection or profiling helpers.
