@@ -7,15 +7,17 @@ of these are true:
 - a darlingserver is running;
 - no League game process is running;
 - no managed Riot/League client window is visible;
-- one or more Riot/League client, CEF or crash-handler processes are still
-  present for this prefix.
+- one or more Riot/League client, CEF or crash-handler processes at least 60
+  seconds old are still present for this prefix.
 
 It terminates only those client processes with SIGTERM/SIGKILL. The
 darlingserver, launchd/mldr services, sockets and .init.pid stay intact so the
 next launcher run can reuse the runtime. It never patches files or the game.
 """
 
+import math
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -23,7 +25,8 @@ import time
 from pathlib import Path
 
 GAME_NAME = 'LeagueofLegends'
-WINDOW_CLASSES = ('leagueclientux', 'riot client')
+WINDOW_CLASSES = ('leagueclientux', 'riot client', 'riotclientservices')
+MIN_AGE_SECONDS = 60
 CLIENT_MARKERS = (
     '/Applications/League of Legends.app',
     '/Applications/Riot Client.app',
@@ -102,8 +105,9 @@ def game_running(proc_root=Path('/proc')):
 def visible_client_window():
     """Return True when a managed client window is present.
 
-    A missing xprop or display is treated as 'cannot prove there is no
-    window' so we do not kill a possibly working client.
+    A missing xprop/property or display is treated as 'cannot prove there is no
+    window' so we do not kill a possibly working client. xprop exits zero and
+    prints "not found" for a property the window manager did not set.
     """
     try:
         listing = subprocess.check_output(
@@ -111,56 +115,71 @@ def visible_client_window():
         )
     except (OSError, subprocess.SubprocessError):
         return True
-    for raw in listing.split():
-        if not raw.startswith('0x'):
-            continue
+    lowered = listing.lower()
+    if '_net_client_list' not in lowered or 'not found' in lowered:
+        return True
+    for raw in re.findall(r'0x[0-9a-fA-F]+', listing):
         try:
             classes = subprocess.check_output(
                 ['xprop', '-id', raw, 'WM_CLASS'], text=True, timeout=5
             ).lower()
         except (OSError, subprocess.SubprocessError):
             return True
+        if 'not found' in classes or '=' not in classes:
+            return True
         if any(name in classes for name in WINDOW_CLASSES):
             return True
     return False
 
 
+def client_identity(prefix, pid, proc_root=Path('/proc')):
+    """Start ticks of a live stale client for prefix, or None when not eligible."""
+    proc = proc_root / str(pid)
+    if process_state(proc) in ('Z', None):
+        return None
+    owner = (prefix / SOCK_NAME).parent.resolve()
+    try:
+        if proc.stat().st_uid != os.getuid():
+            return None
+        names = command_names(proc)
+        if GAME_NAME in names or any(name in RUNTIME_NAMES for name in names):
+            return None
+        text = command_text(proc)
+        if not any(marker in text for marker in CLIENT_MARKERS):
+            return None
+        environment = dict(
+            item.split(b'=', 1)
+            for item in (proc / 'environ').read_bytes().split(b'\0')
+            if b'=' in item
+        )
+        socket = environment.get(SOCK_VARIABLE)
+        if socket is None:
+            return None
+        if Path(os.fsdecode(socket)).parent.resolve() != owner:
+            return None
+        uptime = float((proc_root / 'uptime').read_text().split()[0])
+        ticks = os.sysconf('SC_CLK_TCK')
+        if not math.isfinite(uptime) or uptime < 0 or ticks <= 0:
+            return None
+        # Field 22 follows a comm field that may contain spaces/parentheses.
+        start_ticks = int((proc / 'stat').read_text().rsplit(')', 1)[1].split()[19])
+        if start_ticks < 0 or uptime - start_ticks / ticks < MIN_AGE_SECONDS:
+            return None
+        return start_ticks
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 def client_pids(prefix, proc_root=Path('/proc')):
     """Client/CEF PIDs belonging to prefix, excluding Darling and the game."""
-    owner = (prefix / SOCK_NAME).parent.resolve()
     found = []
     try:
         entries = list(proc_root.iterdir())
     except OSError:
         return []
     for proc in entries:
-        if not proc.name.isdigit() or process_state(proc) in ('Z', None):
-            continue
-        try:
-            if proc.stat().st_uid != os.getuid():
-                continue
-            names = command_names(proc)
-            if GAME_NAME in names or any(name in RUNTIME_NAMES for name in names):
-                continue
-            text = command_text(proc)
-            if not any(marker in text for marker in CLIENT_MARKERS):
-                continue
-            try:
-                env = dict(
-                    item.split(b'=', 1)
-                    for item in (proc / 'environ').read_bytes().split(b'\0')
-                    if b'=' in item
-                )
-            except OSError:
-                continue
-            socket = env.get(SOCK_VARIABLE)
-            if socket is None:
-                continue
-            if Path(os.fsdecode(socket)).parent.resolve() != owner:
-                continue
+        if proc.name.isdigit() and client_identity(prefix, proc.name, proc_root) is not None:
             found.append(int(proc.name))
-        except (OSError, ValueError):
-            continue
     return sorted(found)
 
 
@@ -175,19 +194,30 @@ def recover(prefix, proc_root=Path('/proc'), window_check=visible_client_window,
     if window_check():
         print('recover-stale-client: client window present; no action', file=out, flush=True)
         return 0
-    pids = client_pids(prefix, proc_root)
-    if not pids:
+    identities = {}
+    for pid in client_pids(prefix, proc_root):
+        start_ticks = client_identity(prefix, pid, proc_root)
+        if start_ticks is not None:
+            identities[pid] = start_ticks
+    if not identities:
         print('recover-stale-client: no stale client processes; no action', file=out, flush=True)
         return 0
+    if window_check():
+        print('recover-stale-client: client window appeared; no action', file=out, flush=True)
+        return 0
     print('recover-stale-client: stale client tree without a window; '
-          'terminating %d process(es)' % len(pids), file=out, flush=True)
-    for pid in pids:
+          'terminating %d process(es)' % len(identities), file=out, flush=True)
+    for pid, start_ticks in identities.items():
+        if client_identity(prefix, pid, proc_root) != start_ticks:
+            continue
         try:
             kill(pid, signal.SIGTERM)
         except OSError:
             pass
     sleep(4)
-    for pid in pids:
+    for pid, start_ticks in identities.items():
+        if client_identity(prefix, pid, proc_root) != start_ticks:
+            continue
         try:
             kill(pid, signal.SIGKILL)
         except OSError:
