@@ -12,16 +12,16 @@ interoperability effort; contributions must keep it in that scope.
 - Do not add DRM/anti-cheat/authentication circumvention, telemetry spoofing,
   credential handling, or gameplay automation. Changes that present the project
   as an evasion tool are out of scope.
-- Keep existing copyright, licence and attribution notices. New third-party code
-  or assets need a licence and provenance note in the pull request.
+- Keep existing copyright, license and attribution notices. New third-party code
+  or assets need a license and provenance note in the pull request.
 
-## Licence of contributions
+## License of contributions
 
 - Original integration tooling (scripts, tools, tests, docs and project artwork)
   is licensed under **GPL-3.0-only**.
-- Patches to upstream components are licensed under the licence of the upstream
-  file(s) they modify. If a patch touches files under different licences, each
-  hunk keeps the licence of its target file.
+- Patches to upstream components are licensed under the license of the upstream
+  file(s) they modify. If a patch touches files under different licenses, each
+  hunk keeps the license of its target file.
 - By submitting a contribution, you confirm that you have the right to submit it
   and agree to license it under the applicable terms above.
 
@@ -35,7 +35,7 @@ git commit -s -m "area: short description"
 
 The sign-off certifies the Developer Certificate of Origin 1.1
 (<https://developercertificate.org/>): you created the contribution or have the
-right to submit it under the project's licence, and you understand that the
+right to submit it under the project's license, and you understand that the
 contribution and its sign-off are public and may be redistributed.
 
 ## Checks

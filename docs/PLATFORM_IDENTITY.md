@@ -11,8 +11,10 @@ to bypass anti-cheat, telemetry, licensing, or platform security controls.
 
 > **Synthetic, local metadata.** These values are not Apple-issued identifiers,
 > credentials or authentication tokens. Do not use them with Apple services or
-> to impersonate real hardware. They are not sent to Riot as authentication; the
-> official client authenticates through Riot's own flow. See the
+> to impersonate real hardware. This repository does not pass them to Riot as
+> authentication data; the values are exposed to guest applications through
+> IOKit, and the official client's later handling of them is outside this
+> repository's scope. See the
 > [interoperability and compliance scope](INTEROPERABILITY.md).
 
 Preview an OpenCore `config.plist`, a flat GenSMBIOS JSON file, or an existing

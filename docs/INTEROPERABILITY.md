@@ -24,7 +24,8 @@ We keep the project on the interoperability side by distributing only:
 
 - source patches for Darling, a free-software compatibility layer;
 - original integration, build and test tooling;
-- documentation and licence notices.
+- project artwork;
+- documentation and license notices.
 
 We do **not** distribute, bundle, mirror or sublicense:
 
@@ -35,7 +36,7 @@ We do **not** distribute, bundle, mirror or sublicense:
 
 The user obtains the client from Riot and installs it through Riot's own
 installer. The project does not provide accounts, authentication, matchmaking,
-payments, telemetry or game servers, and it does not sell the game, a licence,
+payments, telemetry or game servers, and it does not sell the game, a license,
 access or priority.
 
 ## 3. Platform identity
@@ -50,8 +51,10 @@ These values are **local compatibility metadata**:
 - they are not Apple-issued identifiers, credentials or authentication tokens;
 - they are not used with Apple services and should not be used to impersonate
   real hardware;
-- they are not sent to Riot as authentication; the official client authenticates
-  through Riot's own flow.
+- this repository does not pass them to Riot as authentication data. The values
+  are exposed to guest applications through IOKit, and the official client's
+  later handling of them is outside this repository's scope. The official client
+  authenticates through Riot's own flow.
 
 See `docs/PLATFORM_IDENTITY.md` for the schema, validation rules and warnings.
 
@@ -74,7 +77,7 @@ Treat the guest as **unsandboxed**. Do not run untrusted content inside it. This
 is a local compatibility limitation, not a claim of security. See
 `docs/COMPLIANCE.md` for the project's terminology and scope guidance.
 
-## 5. Copyright and licences
+## 5. Copyright and licenses
 
 We keep the project's copyright and licensing position clear:
 
@@ -82,14 +85,14 @@ We keep the project's copyright and licensing position clear:
   distribute or commercialise them;
 - we distribute patches to free-software Darling and original tooling, not a
   copy of the game or the upstream runtime;
-- each patch keeps the licence and notices of the upstream file it modifies;
+- each patch keeps the license and notices of the upstream file it modifies;
   original tooling is GPL-3.0-only;
-- we keep the upstream licence and attribution notices in the patched files and
+- we keep the upstream license and attribution notices in the patched files and
   describe the project's licensing position in `NOTICE.md`;
-- we do not remove copyright or licence notices from patched files;
+- we do not remove copyright or license notices from patched files;
 - we review good-faith licensing and removal requests.
 
-We do not sell the game, a licence, access or priority. Donations are voluntary
+We do not sell the game, a license, access or priority. Donations are voluntary
 and support development of the free tooling; they do not purchase the game or
 any Riot service.
 
@@ -105,11 +108,12 @@ authentication, payment or integrity controls:
   game servers;
 - we do not patch Riot's client or game binaries, CEF or anti-cheat;
 - we do not automate gameplay input or provide cheats;
-- the opt-in close/hide helper only manages local client windows while a match
-  runs; it is off by default and does not change the client, CEF or anti-cheat.
+- the opt-in hide helper manages local client windows while a match runs; the
+  opt-in close helper terminates eligible League client UI processes. Both are
+  off by default and do not change client binaries, CEF or anti-cheat.
 
-The synthetic platform identity in §3 is local metadata; it is not a credential
-and is not used to authenticate.
+The synthetic platform identity in §3 is local metadata; it is not a credential.
+This repository does not pass it as Riot authentication data.
 
 ## 7. User agreements and account risk
 
@@ -155,7 +159,7 @@ For a licensing, trademark or interoperability question, contact the maintainer
 using the address in `README.md`, or open an issue in the repository. Include:
 
 - the repository URL, file or commit at issue;
-- the right or licence you assert;
+- the right or license you assert;
 - the action you request;
 - a way to contact you.
 
