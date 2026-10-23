@@ -7,9 +7,10 @@
 
 ## 1. Purpose
 
-`darling-lol` is an unofficial interoperability effort. It applies source
-patches to [Darling](https://github.com/darlinghq/darling), a free-software
-macOS compatibility layer, so that the official macOS Riot client can run on
+`darling-lol` (<https://github.com/lucannez64/darling-lol/>) is an unofficial
+interoperability effort. It applies source patches to
+[Darling](https://github.com/darlinghq/darling), a free-software macOS
+compatibility layer, so that the official macOS Riot client can run on
 x86-64 Linux. The user obtains the client from Riot and signs in through Riot's
 own client and services.
 
