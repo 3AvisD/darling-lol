@@ -80,10 +80,11 @@ for the observed failures, recovery guards and NSURLSession limitations.
 
 `RCLOL_RECOVER_STALE_CLIENT=1` opts in to partial runtime recovery before
 launch. If `darlingserver` is alive, no game is running, no managed client
-window is visible and stale Riot/League/CEF processes remain, the launcher stops
-only that client tree and reuses the runtime. It preserves `darlingserver`,
-launchd/mldr, sockets and `.init.pid`; if X11/Xwayland cannot be inspected it
-does nothing. See
+window is visible and stale Riot/League/CEF processes at least 60 seconds old
+remain, the launcher stops only that client tree and reuses the runtime. It
+recognizes `LeagueClientUx`, `Riot Client` and `RiotClientServices` windows and
+preserves `darlingserver`, launchd/mldr, sockets and `.init.pid`; if X11/Xwayland
+properties cannot be inspected it does nothing. See
 [troubleshooting](TROUBLESHOOTING.md#client-remains-running-without-a-window).
 
 `RCLOL_CLEAN_STALE_HELPERS=1` runs a preflight before the match helper starts.
