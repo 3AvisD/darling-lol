@@ -149,6 +149,41 @@ ownership or window information cannot be read. A hidden background client or
 download is restarted when recovery is enabled. Other desktop environments are
 not supported by this helper; recovery is off by default.
 
+For a live Darling runtime with no visible client window but stale Riot/League/
+CEF processes at least 60 seconds old, `RCLOL_RECOVER_STALE_CLIENT=1` performs a
+partial recovery before the next launch. It keeps `darlingserver`, launchd/mldr,
+sockets and `.init.pid`, stops only the stale client process tree, and then lets
+the normal launcher start the product again. It recognizes `LeagueClientUx`,
+`Riot Client` and `RiotClientServices` windows, does nothing while a game process
+is running or when a managed client window is visible, and fails closed when
+X11/Xwayland properties are missing or unreadable. This saves the Darling
+bootstrap but not the Riot Client/CEF startup itself. If no window appears
+afterward, use a full runtime shutdown/restart.
+
+### Multiple client-in-game helpers
+
+The close/hide helper is a long-lived watcher. If an earlier launcher exits
+while it remains, the next launch can start another copy; list them with:
+
+```sh
+pgrep -af 'close-league-client-in-game.py|hide-league-client-in-game.py'
+```
+
+To remove the orphaned copies before the next helper starts:
+
+```sh
+RCLOL_CLEAN_STALE_HELPERS=1 ./scripts/run.sh
+```
+
+Only helpers of the current prefix whose parent is `init`/`systemd` are
+terminated. Helpers whose launcher is still alive, other prefixes, the game,
+Riot/League/CEF, `darlingserver` and the runtime are never touched. A dry run
+is available from the configured tools directory:
+
+```sh
+RCLOL_CLEAN_STALE_HELPERS=1 python3 build/runtime/tools/clean-stale-helpers.py --dry-run
+```
+
 ### Client window stays black after a match
 
 The League client keeps its Chromium/CEF UI (`LeagueClientUx` and its helpers)
@@ -190,6 +225,60 @@ observation, without waiting for a match:
 
 ```sh
 python3 tools/close-league-client-in-game.py --once --dry-run
+```
+
+### Automatic client handling during a match
+
+A single opt-in switch reads the client's own preferences and chooses the mode:
+
+```sh
+RCLOL_CLIENT_IN_GAME_TRICKS=1 ./scripts/run.sh
+```
+
+It reads `lol-user-experience` from the installed client's
+`LCULocalPreferences.yaml`:
+
+| Client preference | Launcher action |
+|---|---|
+| `potatoModeEnabled: false` or unreadable | no client-in-game helper |
+| `potatoModeEnabled: true`, close preference missing or invalid | no action |
+| `potatoModeEnabled: true`, `closeLeagueClientDuringGame: true` | close the client UI |
+| `potatoModeEnabled: true`, `closeLeagueClientDuringGame: false` | hide the client windows |
+
+The hide path unmaps the `LeagueClientUx` and `Riot Client` X11 windows and maps
+them again when the game process ends. The client is not closed, the League
+backend and Riot client keep running, and the game window is never hidden. The
+close path uses the UI-close helper described above. The hide helper exits after
+ten minutes without a client or match once it has seen one; a missing or invalid
+close preference selects no helper.
+
+The low-level `RCLOL_HIDE_CLIENT_IN_GAME=1` and
+`RCLOL_CLOSE_CLIENT_IN_GAME=1` switches remain available when the automatic
+switch is not set. All modes are off by default. The helpers are
+window-management only: they do not patch client binaries, CEF, anti-cheat or
+DRM. They attribute the game to this prefix through the loader's
+`__mldr_sockpath`, and fail closed when ownership, proc state, environment or
+window information cannot be read. The hide helper requires an X11 or Xwayland
+desktop; on a native Wayland window manager without Xwayland it cannot find the
+windows.
+
+On a CPU-bound host the hide effect appears after CEF has been hidden for a few
+seconds. In a local 30-second test on an i5-3470 with a Radeon RX 550, hiding
+`LeagueClientUx` reduced the summed CPU of the matched client/CEF processes from
+120.7% to 93.4% (about 23%, or 27 percentage points, of one core); showing the
+window returned it to 119.9%. This is not a universal FPS or percentage claim:
+a game that is GPU-bound, a client with no active UI work, or a different
+desktop may show less benefit. The hidden window can also need a moment to
+repaint after it is shown.
+
+With client optimizations enabled and close-during-game enabled, the close
+helper remains the more aggressive option when in-client chat during the match
+is not needed.
+
+Diagnose the match detector without changing any window:
+
+```sh
+python3 tools/hide-league-client-in-game.py --once
 ```
 
 ### Riot reports NO INTERNET FOUND while the host is online
@@ -250,6 +339,27 @@ and passes 100 cancellations with the fix, including releasing the caller's host
 reference before callback delivery. This establishes the cancellation fix; a long
 Riot session still needs confirmation. With both clients and the game closed,
 run `./scripts/update.sh` to install it, then `sh scripts/run.sh`.
+
+## League and Riot UIs crash after clicking Play
+
+The League UX processes and then the Riot Client renderer stop with `SIGTRAP`
+a few seconds after the lobby opens. The renderer prints
+`Check failed: kr == KERN_SUCCESS. mach_make_memory_entry_64: (os/kern) resource shortage (6)`
+from `platform_shared_memory_region_mac.cc`. darlingserver backs every named
+memory entry with a memfd, and its open descriptors peak at about 1100 when the
+lobby opens. Under the rootless NixOS launcher darlingserver cannot raise its
+hard `RLIMIT_NOFILE` to `nr_open`, so it used to keep the soft limit it
+inherited. When that limit was 1024 (several Electron apps and desktop launchers
+pass it on), `memfd_create` failed with `EMFILE`.
+
+darlingserver now raises its soft limit to the inherited hard limit when it
+cannot raise the hard one. A failed named-entry creation also logs
+`MEMDIAG … failed errno=… nofile=soft/hard` to `dserver.log`, and every 1024th
+memfd logs `MEMDIAG descriptors live=…` so a leak would show as a growing `live`
+count. With a 1024 soft limit the old server reproduced the crash and logged
+`errno=24 nofile=1024/524288`. With the fix, the server reports a 524288 soft
+limit under the same launch. To check a running server, read the `Max open files`
+line of `/proc/$(pgrep -x darlingserver)/limits`.
 
 ## UI crashes after a button opens an external link
 
@@ -355,7 +465,7 @@ It prints each thread-local access that calls its thunk without the descriptor i
 
 ## Base install refuses to continue while Darling is not running
 
-`sudo cmake --install` prints `Darling currently running for <user>, shutting it down...` several times and then `Darling launchd PID … remains alive after shutdown`. A guest launchd outlived its darlingserver, so `darling shutdown` sees no container to stop. `python3 build/runtime/tools/ensure-darling-runtime.py` stops such a launchd (your own, only when no darlingserver runs); `scripts/run.sh` and `scripts/install-runtime.sh` run it too.
+`sudo cmake --install` prints `Darling currently running for <user>, shutting it down...` several times and then `Darling launchd PID … remains alive after shutdown`. A guest launchd outlived its darlingserver, so `darling shutdown` sees no container to stop. Automatic cleanup by process name is disabled because guest names and UIDs do not prove prefix ownership (killing by name risks terminating an active launchd from an unrelated prefix or session). If setup is blocked, shut down the original Darling session from its own namespace (`darling shutdown`), or inspect the leftover PID under `/proc/<PID>` before terminating it manually.
 
 ## Lower fight FPS than Windows
 

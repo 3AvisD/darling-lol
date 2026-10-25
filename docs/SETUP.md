@@ -61,10 +61,15 @@ The normal launcher starts neither an Electron inspector nor client API/UI helpe
 
 ## Application-menu diagnostics and recovery options
 
-`scripts/create-desktop-entry.sh` creates an application-menu entry that runs
-`scripts/desktop-run.sh`, preserving the normal launcher behavior and saving
-stdout/stderr in `build/desktop-launch.log` with mode 0600. Logs can contain
-private session details; do not attach raw launcher logs to a public issue.
+`scripts/create-desktop-entry.sh` creates a `Darling Launcher` application-menu
+entry that runs `scripts/desktop-run.sh`, preserving the normal launcher behavior
+and saving stdout/stderr in `build/desktop-launch.log` with mode 0600. Logs can
+contain private session details; do not attach raw launcher logs to a public
+issue. The helper also removes the `league-of-legends.*` entry and icons written
+by older versions, but only when it can prove this project created them. The
+entry keeps `StartupWMClass=RiotClientServices`: Darling derives `WM_CLASS` from
+the basename of `argv[0]`, so that is the window class of the client the entry
+starts, while `Riot Client` is only its bundle display name.
 Region/locale remain the existing `RCLOL_REGION`/`RCLOL_LOCALE` options.
 
 `RCLOL_CDN_IPV4_ONLY` defaults to `1` in the Riot launcher and can be set to `0`
@@ -72,6 +77,38 @@ to disable the CDN-only resolver workaround. `RCLOL_RECOVER_HIDDEN_CLIENT=1`
 opts in to Hyprland-only recovery of a default-prefix Riot session with no
 visible window; it is off by default. See [troubleshooting](TROUBLESHOOTING.md#riot-exits-and-league-reports-that-it-lost-its-connection)
 for the observed failures, recovery guards and NSURLSession limitations.
+
+`RCLOL_RECOVER_STALE_CLIENT=1` opts in to partial runtime recovery before
+launch. If `darlingserver` is alive, no game is running, no managed client
+window is visible and stale Riot/League/CEF processes at least 60 seconds old
+remain, the launcher stops only that client tree and reuses the runtime. It
+recognizes `LeagueClientUx`, `Riot Client` and `RiotClientServices` windows and
+preserves `darlingserver`, launchd/mldr, sockets and `.init.pid`; if X11/Xwayland
+properties cannot be inspected it does nothing. See
+[troubleshooting](TROUBLESHOOTING.md#client-remains-running-without-a-window).
+
+`RCLOL_CLEAN_STALE_HELPERS=1` runs a preflight before the match helper starts.
+It removes `close-league-client-in-game.py` and
+`hide-league-client-in-game.py` processes of this prefix whose parent is
+`init`/`systemd`, which means the launcher that started them has exited. A
+helper of a live launcher, another prefix, the game, Riot/League/CEF and
+`darlingserver` are preserved. It fails closed when a command line,
+environment, stat entry or parent cannot be read. See
+[troubleshooting](TROUBLESHOOTING.md#multiple-client-in-game-helpers).
+
+`RCLOL_CLIENT_IN_GAME_TRICKS=1` opts in to automatic client handling during a
+match. It reads `lol-user-experience` from the installed client's
+`LCULocalPreferences.yaml`: with `potatoModeEnabled: true`, it closes the client
+UI when `closeLeagueClientDuringGame: true`, and hides the managed
+`LeagueClientUx`/`Riot Client` X11 windows when that value is false. Missing or
+invalid preference values, disabled client optimizations and unreadable files
+select no action. The low-level `RCLOL_CLOSE_CLIENT_IN_GAME=1` and
+`RCLOL_HIDE_CLIENT_IN_GAME=1` switches remain available when the automatic
+switch is not set. The feature is off by default, requires X11/Xwayland, and
+does not patch client binaries, CEF or the game. The hide helper exits after ten
+minutes without a client or match once it has seen one. See
+[the troubleshooting measurement](TROUBLESHOOTING.md#automatic-client-handling-during-a-match)
+for the measured CPU effect and limitations.
 
 `RCLOL_FILTER_HOST_ENV=1` opts in to removing host desktop-session variables before
 the guest starts: `WAYLAND_DISPLAY`, `XDG_SESSION_*`, `XDG_CURRENT_DESKTOP`,
