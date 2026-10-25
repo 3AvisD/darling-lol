@@ -42,6 +42,8 @@ def facts(**overrides):
 class CheckTests(unittest.TestCase):
     def test_kernel_rejects_old_release(self):
         self.assertEqual(doctor.check_kernel(facts(host={'kernel': '5.4.0'}))[0], 'warn')
+        self.assertEqual(doctor.check_kernel(facts(host={'kernel': '5.13.0'}))[0], 'warn')
+        self.assertEqual(doctor.check_kernel(facts(host={'kernel': '5.14.0'}))[0], 'ok')
         self.assertEqual(doctor.check_kernel(facts(host={'kernel': '6.8.0-arch1'}))[0], 'ok')
         self.assertEqual(doctor.check_kernel(facts(host={'kernel': 'unparsed'}))[0], 'warn')
 
@@ -152,6 +154,29 @@ class PrefixStateTests(unittest.TestCase):
         self.assertEqual(doctor.prefix_state(self.prefix, self.proc)['stale_markers'], 2)
 
 
+class RuntimeDirTests(unittest.TestCase):
+    def test_workspace_runtime_wins(self):
+        with tempfile.TemporaryDirectory() as folder:
+            runtime = Path(folder) / 'usr-local/libexec/darling'
+            (runtime / 'sbin').mkdir(parents=True)
+            (runtime / 'sbin/launchd').write_text('')
+            self.assertEqual(doctor.runtime_dir({'DARLING_WORKSPACE': folder}), runtime)
+
+    def test_config_sdk_is_a_fallback(self):
+        with tempfile.TemporaryDirectory() as folder:
+            workspace = Path(folder) / 'workspace'
+            runtime = Path(folder) / 'sdk'
+            (runtime / 'sbin').mkdir(parents=True)
+            (runtime / 'sbin/launchd').write_text('')
+            (workspace / 'build').mkdir(parents=True)
+            (workspace / 'build/config.json').write_text(json.dumps({'sdk': str(runtime)}))
+            self.assertEqual(doctor.runtime_dir({'DARLING_WORKSPACE': str(workspace)}), runtime)
+
+    def test_native_path_is_last(self):
+        self.assertEqual(doctor.runtime_dir({'DARLING_WORKSPACE': '/nonexistent'}),
+                         Path('/usr/local/libexec/darling'))
+
+
 class GpuAndVulkanTests(unittest.TestCase):
     def test_read_gpus_follows_driver_link(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -173,8 +198,12 @@ class GpuAndVulkanTests(unittest.TestCase):
             icd = Path(folder) / 'vulkan/icd.d'
             icd.mkdir(parents=True)
             (icd / 'intel.json').write_text('{}')
-            found = doctor.vulkan_icds({'XDG_DATA_DIRS': folder})
+            second = Path(folder) / 'other/vulkan/icd.d'
+            second.mkdir(parents=True)
+            (second / 'radeon.json').write_text('{}')
+            found = doctor.vulkan_icds({'XDG_DATA_DIRS': '%s:%s' % (folder, second.parents[1])})
             self.assertIn(str(icd / 'intel.json'), found)
+            self.assertIn(str(second / 'radeon.json'), found)
             self.assertEqual(len(found), len(set(found)))
 
 
@@ -197,6 +226,27 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(document['environment'], {'DISPLAY': ':0', 'RCLOL_REGION': 'EUW'})
         self.assertNotIn('MANGOHUD', document['environment'])
 
+    def test_report_redacts_paths_by_default(self):
+        home = str(Path.home())
+        data = facts(prefix=home + '/.darling', workspace=home + '/work',
+                     environment={'DPREFIX': home + '/.darling',
+                                  'DARLING_WORKSPACE': home + '/work'},
+                     prefix_state={'pid': 0, 'state': 'absent', 'stale_markers': 0})
+        results = [{'id': 'prefix', 'title': 'Darling prefix', 'status': 'ok',
+                    'message': home + '/.darling'}]
+        document = doctor.report(data, results)
+        self.assertEqual(document['prefix'], '<prefix>')
+        self.assertEqual(document['environment']['DPREFIX'], '<prefix>')
+        self.assertEqual(document['environment']['DARLING_WORKSPACE'], '<workspace>')
+        self.assertEqual(document['checks'][0]['message'], '<prefix>')
+        self.assertNotIn(home, json.dumps(document))
+
+    def test_report_can_keep_real_paths(self):
+        data = facts(prefix='/tmp/darling-prefix')
+        document = doctor.report(data, [], redact=False)
+        self.assertEqual(document['prefix'], '/tmp/darling-prefix')
+        self.assertFalse(document['redacted'])
+
     def test_cli_writes_json(self):
         with tempfile.TemporaryDirectory() as folder:
             prefix = Path(folder) / 'prefix'
@@ -209,6 +259,7 @@ class ReportTests(unittest.TestCase):
             document = json.loads(out.read_text())
             self.assertEqual(document['tool'], 'darling-lol doctor')
             self.assertIn('checks', document)
+            self.assertEqual(out.stat().st_mode & 0o777, 0o600)
 
 
 if __name__ == '__main__':

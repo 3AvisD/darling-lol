@@ -7,7 +7,8 @@ launcher logs, recent kernel messages and the last core dumps, and writes one
 gzipped tarball that can be attached to an issue.
 
 Home directory, user name and host name are replaced by placeholders by
-default; environment variables are an allowlist, so tokens are never included.
+default. Environment variables are not collected, and credentials in command
+lines are masked.
 
 Usage:
     python3 tools/crash-report.py
@@ -15,6 +16,7 @@ Usage:
     python3 tools/crash-report.py --no-redact --json
 """
 import argparse
+from collections import deque
 import json
 import os
 import platform
@@ -42,15 +44,52 @@ PROCESS_NAMES = (
     'LeagueClient', 'League of Legends', 'CrBrowserMain', 'CrGpuMain', 'CrRendererMain',
     'CrUtilityMain', 'wine', 'gamescope', 'Xwayland',
 )
+SENSITIVE = re.compile(
+    r'(?i)^(?:--?)?(?:pass(?:word|wd)?|token|secret|api[-_]?key|auth(?:orization)?|'
+    r'credential|cookie|session|bearer)$')
+SENSITIVE_ASSIGNMENT = re.compile(
+    r'(?i)^((?:--?)?(?:pass(?:word|wd)?|token|secret|api[-_]?key|auth(?:orization)?|'
+    r'credential|cookie|session)[^=]*)=(.*)$')
+URL_USERINFO = re.compile(r'(://[^/:@\s]+:)[^/@\s]+@')
 
 
 def read_tail(path, limit=LOG_TAIL_LINES):
+    """Return the last lines without holding the whole log in memory."""
     try:
         with open(path, 'r', errors='replace') as handle:
-            lines = handle.readlines()
+            lines = deque(handle, maxlen=limit)
     except OSError as error:
         return None, str(error)
-    return ''.join(lines[-limit:]), None
+    return ''.join(lines), None
+
+
+def mask_argv(arguments):
+    """Replace credentials in a command line, without hiding the command itself."""
+    masked = []
+    hide_next = False
+    for argument in arguments:
+        if hide_next:
+            masked.append('<redacted>')
+            hide_next = False
+            continue
+        if SENSITIVE.match(argument):
+            masked.append(argument)
+            hide_next = True
+            continue
+        assignment = SENSITIVE_ASSIGNMENT.match(argument)
+        if assignment:
+            masked.append(assignment.group(1) + '=<redacted>')
+            continue
+        masked.append(URL_USERINFO.sub(r'\1<redacted>@', argument))
+    return ' '.join(masked)
+
+
+def command_arguments(proc):
+    try:
+        raw = (proc / 'cmdline').read_bytes()
+    except OSError:
+        return []
+    return [part.decode(errors='replace') for part in raw.split(b'\0') if part]
 
 
 def process_snapshot(proc_root=Path('/proc')):
@@ -70,7 +109,7 @@ def process_snapshot(proc_root=Path('/proc')):
             if owner != uid and state != 'Z':
                 continue
             comm = (entry / 'comm').read_text().strip()
-            argv = (entry / 'cmdline').read_bytes().replace(b'\0', b' ').decode(errors='replace').strip()
+            argv = mask_argv(command_arguments(entry)).strip()
         except (OSError, ValueError, IndexError):
             continue
         rows.append({
@@ -94,13 +133,16 @@ def relevant_processes(rows):
     return selected
 
 
-def format_processes(rows, relevant):
-    lines = ['# all processes owned by this user, plus zombies',
-             'pid\tppid\tstate\tcomm\targv']
-    for row in rows:
-        lines.append('%s\t%s\t%s\t%s\t%s' % (row['pid'], row['ppid'], row['state'], row['comm'], row['argv']))
-    lines.append('')
+def format_processes(rows, relevant, all_processes=False):
+    lines = []
+    if all_processes:
+        lines.append('# all processes owned by this user, plus zombies')
+        lines.append('pid\tppid\tstate\tcomm\targv')
+        for row in rows:
+            lines.append('%s\t%s\t%s\t%s\t%s' % (row['pid'], row['ppid'], row['state'], row['comm'], row['argv']))
+        lines.append('')
     lines.append('# runtime, client and zombie processes')
+    lines.append('pid\tppid\tstate\tcomm\targv')
     for row in relevant:
         lines.append('%s\t%s\t%s\t%s\t%s' % (row['pid'], row['ppid'], row['state'], row['comm'], row['argv']))
     return '\n'.join(lines) + '\n'
@@ -135,12 +177,33 @@ def coredumps(which):
     return output or '# no core dumps\n'
 
 
+CLIENT_FIELDS = ('address', 'mapped', 'hidden', 'at', 'size', 'workspace',
+                 'floating', 'fullscreen', 'class', 'initialClass', 'pinned',
+                 'grouped', 'swallowing', 'monitor')
+
+
+def window_listing(output):
+    """Keep geometry and class from hyprctl; drop titles, which are private."""
+    try:
+        clients = json.loads(output)
+    except ValueError:
+        return '# hyprctl clients output could not be parsed\n'
+    if not isinstance(clients, list):
+        return '# unexpected hyprctl clients output\n'
+    visible = [
+        {key: client[key] for key in CLIENT_FIELDS if key in client}
+        for client in clients if isinstance(client, dict)
+    ]
+    return json.dumps(visible, indent=2) + '\n'
+
+
 def display_state(which, env):
     if env.get('WAYLAND_DISPLAY') and which('hyprctl'):
         output, error = run_command(['hyprctl', 'monitors', '-j'])
         clients, client_error = run_command(['hyprctl', 'clients', '-j'])
-        return '# hyprctl monitors\n%s\n# hyprctl clients\n%s\n%s' % (
-            output or error, clients or client_error, '')
+        listing = window_listing(clients) if clients else '# unavailable: %s\n' % client_error
+        return '# hyprctl monitors\n%s\n# hyprctl clients (titles omitted)\n%s' % (
+            output or error, listing)
     if which('xrandr') and env.get('DISPLAY'):
         output, error = run_command(['xrandr', '--query'])
         if output:
@@ -149,34 +212,57 @@ def display_state(which, env):
         env.get('DISPLAY'), env.get('WAYLAND_DISPLAY'))
 
 
+def replace_token(text, value, placeholder):
+    """Replace a whole word, so a short user name cannot hit unrelated text."""
+    return re.sub(r'(?<![A-Za-z0-9_])%s(?![A-Za-z0-9_])' % re.escape(value),
+                  placeholder, text)
+
+
 def scrub(text, home=None, username=None, hostname=None):
     if not text:
         return text
-    replacements = [
-        (str(home or Path.home()), '~'),
-        (username or os.environ.get('USER') or '', '<user>'),
-        (hostname or socket.gethostname(), '<host>'),
-    ]
-    for value, placeholder in replacements:
-        if value:
-            text = text.replace(value, placeholder)
+    text = text.replace(str(home or Path.home()), '~')
+    username = username or os.environ.get('USER') or ''
+    if username:
+        text = replace_token(text, username, '<user>')
+    hostname = hostname or socket.gethostname()
+    if hostname:
+        text = replace_token(text, hostname, '<host>')
     return text
 
 
+LABEL = re.compile(r'^[A-Za-z0-9._-]{1,64}$')
+
+
 def bundle_name(label=None):
+    if label is not None and (not LABEL.match(label) or label in ('.', '..')):
+        raise ValueError('label may contain only letters, digits, dot, underscore and dash')
     stamp = time.strftime('%Y%m%d-%H%M%S', time.localtime())
     return 'lol-report-%s%s.tar.gz' % (stamp, '-' + label if label else '')
 
 
-def build(prefix, out_dir, launch_log=None, label=None, redact=True,
+def default_launch_log(env):
+    """Launcher log written by desktop-run.sh, preferring the active workspace."""
+    candidates = []
+    workspace = env.get('DARLING_WORKSPACE')
+    if workspace:
+        candidates.append(Path(workspace) / 'build/desktop-launch.log')
+    root = Path(__file__).resolve().parents[1]
+    candidates.append(root / 'build/desktop-launch.log')
+    candidates.append(root / 'build/lol-launch.log')
+    return next((path for path in candidates if path.is_file()), candidates[0])
+
+
+def build(prefix, out_dir, launch_log=None, label=None, redact=True, all_processes=False,
           proc_root=Path('/proc'), which=None, env=None):
     """Write the bundle and return its path and manifest."""
     env = dict(os.environ if env is None else env)
     which = which or shutil.which
     prefix = Path(prefix or env.get('DPREFIX') or (Path.home() / '.darling')).expanduser()
     out_dir = Path(out_dir).expanduser()
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     archive = out_dir / bundle_name(label)
+    launch_log = Path(launch_log).expanduser() if launch_log else default_launch_log(env)
 
     facts = doctor.gather(prefix=prefix, env=env, proc_root=proc_root, which=which)
     checks = doctor.run_checks(facts)
@@ -185,21 +271,27 @@ def build(prefix, out_dir, launch_log=None, label=None, redact=True,
 
     dserver_log = Path(prefix) / 'private/var/log/dserver.log'
     log_text, log_error = read_tail(dserver_log)
-    launch_text, launch_error = (read_tail(launch_log) if launch_log else (None, 'no launcher log'))
+    launch_text, launch_error = read_tail(launch_log)
 
     entries = {
-        'processes.txt': format_processes(rows, relevant),
-        'logs/dserver.log.tail': log_text or '# unavailable: %s\n' % log_error,
-        'logs/launch.log.tail': launch_text or '# unavailable: %s\n' % launch_error,
+        'processes.txt': format_processes(rows, relevant, all_processes),
+        'logs/dserver.log.tail': (log_text if log_text is not None
+                                  else '# unavailable: %s\n' % log_error),
+        'logs/launch.log.tail': (launch_text if launch_text is not None
+                                 else '# unavailable: %s\n' % launch_error),
         'logs/kernel.txt': kernel_messages(which),
         'display.txt': display_state(which, env),
         'coredumps.txt': coredumps(which),
     }
     if redact:
-        entries = {name: scrub(text, username=env.get('USER')) for name, text in entries.items()}
+        workspace = facts.get('workspace', '')
+
+        def private(text):
+            return scrub(doctor.redact_text(text, prefix, workspace), username=env.get('USER'))
+
+        entries = {name: private(text) for name, text in entries.items()}
         checks = [
-            dict(check, title=scrub(check['title'], username=env.get('USER')),
-                 message=scrub(check['message'], username=env.get('USER')))
+            dict(check, title=private(check['title']), message=private(check['message']))
             for check in checks
         ]
 
@@ -210,8 +302,14 @@ def build(prefix, out_dir, launch_log=None, label=None, redact=True,
         'python': platform.python_version(),
         'prefix': '<prefix>' if redact else facts['prefix'],
         'redacted': redact,
+        'archive': archive.name,
         'doctor': {'summary': doctor.summarize(checks), 'checks': checks},
-        'processes': {'total': len(rows), 'relevant': len(relevant), 'zombies': sum(1 for row in rows if row['state'] == 'Z')},
+        'processes': {
+            'total': len(rows),
+            'relevant': len(relevant),
+            'zombies': sum(1 for row in rows if row['state'] == 'Z'),
+            'included': 'all' if all_processes else 'runtime-client-zombies',
+        },
         'files': sorted(entries),
     }
     if redact:
@@ -227,9 +325,22 @@ def build(prefix, out_dir, launch_log=None, label=None, redact=True,
         with tarfile.open(archive, 'w:gz') as tar:
             for path in sorted(root.rglob('*')):
                 if path.is_file():
-                    tar.add(path, arcname=str(Path('lol-report') / path.relative_to(root)))
+                    add_private(tar, path, str(Path('lol-report') / path.relative_to(root)))
 
+    os.chmod(archive, 0o600)
     return archive, manifest
+
+
+def add_private(tar, path, name):
+    """Add a file without this machine's uid, user name or timestamps."""
+    info = tarfile.TarInfo(name)
+    info.size = path.stat().st_size
+    info.mode = 0o600
+    info.mtime = 0
+    info.uid = info.gid = 0
+    info.uname = info.gname = ''
+    with open(path, 'rb') as handle:
+        tar.addfile(info, handle)
 
 
 def readme(manifest):
@@ -243,17 +354,18 @@ Redacted: %(redacted)s
 
 What is inside:
 - report.json: the doctor checks, host summary and process counts
-- processes.txt: this user's processes plus every zombie, and the subset that is
-  part of the Darling runtime or the Riot/League client
+- processes.txt: the Darling runtime, Riot/League client and zombie processes;
+  pass --all-processes to include every process owned by this user
 - logs/dserver.log.tail: the last %(lines)d lines of the runtime log
 - logs/launch.log.tail: the last lines the launcher wrote
 - logs/kernel.txt: graphics-related kernel messages
 - display.txt: monitors and windows (or an explanation when unavailable)
 - coredumps.txt: recent systemd-coredump entries, if any
 
-Tokens, passwords and other environment secrets are not collected. Home
-directory, user name and host name are replaced with placeholders unless the
-bundle was created with --no-redact.
+Environment variables are not collected. Credentials in command-line arguments
+(--token, --password, URL userinfo) are masked. Home directory, user name and
+host name are replaced with placeholders unless the bundle was created with
+--no-redact. The archive is mode 0600 and carries no owner metadata.
 ''' % {
         'created': manifest['created'],
         'distro': manifest['host']['distro'],
@@ -272,30 +384,33 @@ def main(argv=None):
                         default=Path(os.environ.get('XDG_CACHE_HOME', Path.home() / '.cache')) / 'darling-lol/reports',
                         help='directory for the tarball (default: ~/.cache/darling-lol/reports)')
     parser.add_argument('--launch-log', type=Path, help='launcher log to include')
-    parser.add_argument('--label', help='short label added to the file name')
+    parser.add_argument('--label', help='short label added to the file name ([A-Za-z0-9._-])')
+    parser.add_argument('--all-processes', action='store_true',
+                        help='include every process owned by this user, not only the runtime/client tree')
     parser.add_argument('--no-redact', action='store_true', help='keep the real home path, user and host name')
     parser.add_argument('--json', action='store_true', help='print the manifest')
     args = parser.parse_args(argv)
 
-    launch_log = args.launch_log
-    if launch_log is None:
-        candidate = Path(__file__).resolve().parents[1] / 'build/lol-launch.log'
-        launch_log = candidate if candidate.is_file() else None
-
-    archive, manifest = build(
-        prefix=args.prefix,
-        out_dir=args.out,
-        launch_log=launch_log,
-        label=args.label,
-        redact=not args.no_redact,
-    )
+    try:
+        archive, manifest = build(
+            prefix=args.prefix,
+            out_dir=args.out,
+            launch_log=args.launch_log,
+            label=args.label,
+            redact=not args.no_redact,
+            all_processes=args.all_processes,
+        )
+    except ValueError as error:
+        parser.error(str(error))
     if args.json:
         print(json.dumps(manifest, indent=2))
+        print('Report: %s (%s)' % (archive, human_size(archive.stat().st_size)), file=sys.stderr)
+        return 0
     print('Report: %s (%s)' % (archive, human_size(archive.stat().st_size)))
     summary = manifest['doctor']['summary']
     print('%d ok, %d warning(s), %d failure(s); %d zombie process(es)' % (
         summary['ok'], summary['warn'], summary['fail'], manifest['processes']['zombies']))
-    print('Attach this file to the issue; it contains no tokens or environment secrets.')
+    print('Attach this file to the issue; environment variables and command-line credentials are omitted.')
     return 0
 
 

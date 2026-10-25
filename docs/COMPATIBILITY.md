@@ -23,22 +23,23 @@ darling-lol --perf                   # frame pacing from the game's own logs
 darling-lol --perf --json            # the same numbers as JSON
 ```
 
-`lol doctor` needs no runtime and starts nothing, so it is safe to run at any
-time. `lol perf` reads the `netstats.csv` files that League already writes; it
-does not touch the client or the game.
+`darling-lol --doctor` needs no runtime and starts nothing, so it is safe to run
+at any time. `darling-lol --perf` reads the `netstats.csv` files that League
+already writes; it does not touch the client or the game.
 
 Open an issue titled `Compatibility: <distro> / <GPU>` and attach `doctor.json`
 plus the `perf --json` output. Do not paste a full `~/.darling` log or your home
-directory; `lol report` produces a redacted bundle if more diagnostics are
-needed. Then add a row here in a pull request, or mention the issue and a
+directory; `darling-lol --report` produces a redacted bundle if more
+diagnostics are needed. Then add a row here in a pull request, or mention the issue and a
 maintainer will add it.
 
 ### What the numbers mean
 
-- `avgfps` is the mean of League's own ten-second `game.frametime_average`
-  samples over the whole match.
-- `p50/p95/p99ms` are frame times: the typical frame, the slow 5 %, and the
-  slowest 1 %.
+- `avgfps` is the inverse of the mean sampled frame time over the match, not
+  the average of per-second FPS values.
+- `p50/p95/p99ms` are percentiles of League's ten-second `game.frametime_average`
+  samples: the typical sample, the slow 5 %, and the slowest 1 %. They describe
+  ten-second averages, not individual frames.
 - `slowfps` is the average FPS over the slowest quarter of the match, which is
   closer to what stutter feels like than the headline average.
 - `hitch` counts ten-second samples whose frame time is at least twice the
@@ -61,7 +62,7 @@ Notes for the UHD 620 row:
   builds, so single-match comparisons are not meaningful.
 - Intel panel self-refresh (`i915.enable_psr`) was on for part of this period.
   See [panel self-refresh](TROUBLESHOOTING.md#blocky-video-or-flickering-startup-logo).
-- Expect first-match shader compilation to show up as a low `p99` until the
+- Expect first-match shader compilation to show up as a high `p99` until the
   cache is warm.
 
 The Ryzen 5 5500 / RX 6600 development machine is faster and is documented

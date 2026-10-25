@@ -51,12 +51,20 @@ class ProcessSnapshotTests(unittest.TestCase):
         relevant = crash_report.relevant_processes(rows)
         self.assertEqual([row['pid'] for row in relevant], [101, 102])
 
-    def test_format_has_both_sections(self):
+    def test_format_defaults_to_the_runtime_and_client_tree(self):
         rows = crash_report.process_snapshot(self.proc)
         text = crash_report.format_processes(rows, crash_report.relevant_processes(rows))
-        self.assertIn('# all processes owned by this user', text)
+        self.assertNotIn('# all processes owned by this user', text)
         self.assertIn('# runtime, client and zombie processes', text)
         self.assertIn('101\t100\tS\tmldr', text)
+        self.assertNotIn('100\t1\tS\tsystemd', text)
+
+    def test_format_includes_everything_on_request(self):
+        rows = crash_report.process_snapshot(self.proc)
+        text = crash_report.format_processes(rows, crash_report.relevant_processes(rows),
+                                             all_processes=True)
+        self.assertIn('# all processes owned by this user', text)
+        self.assertIn('100\t1\tS\tsystemd', text)
 
 
 class HelperTests(unittest.TestCase):
@@ -80,6 +88,48 @@ class HelperTests(unittest.TestCase):
         text, error = crash_report.read_tail('/nonexistent/dserver.log')
         self.assertIsNone(text)
         self.assertIn('No such file', error)
+
+    def test_mask_argv_hides_credentials(self):
+        masked = crash_report.mask_argv([
+            'RiotClientServices', '--token', 'abc123', '--password=hunter2',
+            'https://user:secret@example.test/path', '--region=EUW',
+            'AUTH=topsecret', '--bearer', 'xyz',
+        ])
+        self.assertNotIn('abc123', masked)
+        self.assertNotIn('hunter2', masked)
+        self.assertNotIn('secret', masked)
+        self.assertNotIn('topsecret', masked)
+        self.assertNotIn('xyz', masked)
+        self.assertIn('--region=EUW', masked)
+
+    def test_scrub_uses_whole_tokens(self):
+        self.assertEqual(
+            crash_report.scrub('al and alps at /mnt/al on al-host', home=Path('/mnt/al'),
+                               username='al', hostname='not-present'),
+            '<user> and alps at ~ on <user>-host')
+
+    def test_window_listing_drops_titles(self):
+        listing = crash_report.window_listing(json.dumps([
+            {'address': '0x1', 'class': 'Riot Client', 'title': 'inbox - secret subject',
+             'initialTitle': 'old secret', 'size': [100, 100]},
+        ]))
+        self.assertIn('Riot Client', listing)
+        self.assertNotIn('secret', listing)
+
+    def test_label_is_restricted(self):
+        with self.assertRaises(ValueError):
+            crash_report.bundle_name('../../escape')
+        with self.assertRaises(ValueError):
+            crash_report.bundle_name('hang report')
+        self.assertTrue(crash_report.bundle_name('hang-2').endswith('-hang-2.tar.gz'))
+
+    def test_default_launch_log_prefers_workspace(self):
+        with tempfile.TemporaryDirectory() as folder:
+            workspace = Path(folder)
+            log = workspace / 'build/desktop-launch.log'
+            log.parent.mkdir()
+            log.write_text('launcher output\n')
+            self.assertEqual(crash_report.default_launch_log({'DARLING_WORKSPACE': folder}), log)
 
     def test_human_size(self):
         self.assertEqual(crash_report.human_size(512), '512 B')
@@ -121,7 +171,8 @@ class BuildTests(unittest.TestCase):
     def test_bundle_contains_expected_files_and_summary(self):
         archive, manifest = self.build()
         self.assertTrue(archive.is_file())
-        self.assertEqual(manifest['processes'], {'total': 2, 'relevant': 2, 'zombies': 1})
+        self.assertEqual(manifest['processes'], {'total': 2, 'relevant': 2, 'zombies': 1,
+                                                  'included': 'runtime-client-zombies'})
         self.assertEqual(manifest['redacted'], True)
         self.assertEqual(manifest['prefix'], '<prefix>')
         with tarfile.open(archive) as tar:
@@ -146,6 +197,28 @@ class BuildTests(unittest.TestCase):
         self.assertNotIn('do-not-publish', combined)
         self.assertIn('~/.darling running', combined)
 
+    def test_workspace_paths_are_redacted(self):
+        archive, _ = self.build(launch_log=None,
+                                env=dict(self.env, DARLING_WORKSPACE=str(self.root / 'work')))
+        with tarfile.open(archive) as tar:
+            text = tar.extractfile('lol-report/logs/launch.log.tail').read().decode()
+        self.assertNotIn(str(self.root), text)
+        self.assertIn('<workspace>', text)
+
+    def test_archive_is_private_and_has_no_owner_metadata(self):
+        archive, _ = self.build()
+        self.assertEqual(archive.stat().st_mode & 0o777, 0o600)
+        with tarfile.open(archive) as tar:
+            for member in tar.getmembers():
+                self.assertEqual((member.uid, member.gid, member.uname, member.gname), (0, 0, '', ''))
+
+    def test_all_processes_is_opt_in(self):
+        archive, manifest = self.build(all_processes=True)
+        self.assertEqual(manifest['processes']['included'], 'all')
+        with tarfile.open(archive) as tar:
+            text = tar.extractfile('lol-report/processes.txt').read().decode()
+        self.assertIn('# all processes owned by this user', text)
+
     def test_no_redact_keeps_paths(self):
         archive, manifest = self.build(redact=False)
         self.assertEqual(manifest['redacted'], False)
@@ -157,9 +230,11 @@ class BuildTests(unittest.TestCase):
     def test_missing_logs_are_explained(self):
         archive, manifest = self.build(launch_log=None)
         self.assertIn('logs/launch.log.tail', manifest['files'])
+        self.assertEqual(manifest['processes']['included'], 'runtime-client-zombies')
         with tarfile.open(archive) as tar:
             text = tar.extractfile('lol-report/logs/launch.log.tail').read().decode()
-        self.assertIn('no launcher log', text)
+        self.assertIn('desktop-launch.log', text)
+        self.assertIn('No such file', text)
 
 
 if __name__ == '__main__':

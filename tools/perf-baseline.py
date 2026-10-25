@@ -38,10 +38,15 @@ TIME_COLUMN = 'game.time'
 DEFAULT_GAME_LOGS = Path(
     'Applications/League of Legends.app/Contents/LoL/Logs/GameLogs')
 HITCH_FACTOR = 2.0
+# A ten-second sample above a minute is corrupt, and would make derived
+# milliseconds non-finite in the JSON report.
+MAX_FRAMETIME_SECONDS = 60.0
+MAX_GAME_SECONDS = 6 * 60 * 60
+SAMPLE_SECONDS = 10.0
 APPEND_HEADER = (
-    'measured', 'match', 'samples', 'seconds', 'avg_fps', 'mean_ms',
-    'p50_ms', 'p95_ms', 'p99_ms', 'slowest_quarter_fps', 'slowest_quarter_ms',
-    'hitches', 'host',
+    'measured', 'match', 'file', 'samples', 'seconds', 'avg_fps', 'mean_ms',
+    'sample_p50_ms', 'sample_p95_ms', 'sample_p99_ms',
+    'slowest_quarter_fps', 'slowest_quarter_ms', 'hitches', 'host',
 )
 
 
@@ -69,7 +74,8 @@ def read_rows(path):
                 game_time = float(row.get(TIME_COLUMN) or 0)
             except (TypeError, ValueError):
                 continue
-            if math.isfinite(frametime) and frametime > 0:
+            if (math.isfinite(frametime) and 0 < frametime <= MAX_FRAMETIME_SECONDS
+                    and math.isfinite(game_time) and 0 <= game_time <= MAX_GAME_SECONDS):
                 yield game_time, frametime
 
 
@@ -97,20 +103,22 @@ def measure(path, measured=None):
         return None
     times = [time_value for time_value, _ in samples]
     frames = [frametime for _, frametime in samples]
-    seconds = max(times) - min(times) if len(times) > 1 else 10.0 * len(samples)
+    intervals = [later - earlier for earlier, later in zip(times, times[1:]) if later > earlier]
+    interval = statistics.median(intervals) if intervals else SAMPLE_SECONDS
+    seconds = max(times) - min(times) + interval if len(times) > 1 else interval
     focus = sorted(frames)[-max(1, math.ceil(len(frames) / 4)):]
     median = statistics.median(frames)
     return {
         'measured': measured or time.strftime('%Y-%m-%dT%H:%M:%S'),
         'match': match_label(path),
-        'path': str(path),
+        'file': Path(path).name,
         'samples': len(frames),
         'seconds': round(seconds, 1),
         'avg_fps': round(len(frames) / sum(frames), 1),
         'mean_ms': round(statistics.mean(frames) * 1000, 2),
-        'p50_ms': round(percentile(frames, 0.50) * 1000, 2),
-        'p95_ms': round(percentile(frames, 0.95) * 1000, 2),
-        'p99_ms': round(percentile(frames, 0.99) * 1000, 2),
+        'sample_p50_ms': round(percentile(frames, 0.50) * 1000, 2),
+        'sample_p95_ms': round(percentile(frames, 0.95) * 1000, 2),
+        'sample_p99_ms': round(percentile(frames, 0.99) * 1000, 2),
         'slowest_quarter_fps': round(len(focus) / sum(focus), 1),
         'slowest_quarter_ms': round(statistics.mean(focus) * 1000, 2),
         'hitches': sum(1 for frametime in frames if frametime >= median * HITCH_FACTOR),
@@ -137,11 +145,14 @@ def host_summary():
 
 
 def collect(paths, limit=None):
+    """Measure usable matches; --last counts matches, not file paths."""
     results = []
-    for path in paths[:limit] if limit else paths:
+    for path in paths:
         result = measure(path)
         if result:
             results.append(result)
+            if limit and len(results) >= limit:
+                break
     return results
 
 
@@ -155,13 +166,16 @@ def render(results):
     ]
     for result in results:
         lines.append('%-17s %6.1f %6.2f %6.2f %6.2f %6.1f %6.2f %5d' % (
-            result['match'], result['avg_fps'], result['p50_ms'], result['p95_ms'],
-            result['p99_ms'], result['slowest_quarter_fps'],
-            result['slowest_quarter_ms'], result['hitches']))
+            result['match'], result['avg_fps'], result['sample_p50_ms'],
+            result['sample_p95_ms'], result['sample_p99_ms'],
+            result['slowest_quarter_fps'], result['slowest_quarter_ms'],
+            result['hitches']))
     lines.append('')
-    lines.append('avgfps over the match, p95/p99 frame time, slowfps/slowms over the'
-                 ' slowest quarter,')
-    lines.append('hitch = samples at least %.0fx the median frame time.' % HITCH_FACTOR)
+    lines.append('avgfps = 1 / mean sampled frame time. p50/p95/p99 are percentiles of')
+    lines.append('the ten-second samples, not of individual frames. slowfps/slowms cover')
+    lines.append('the slowest quarter of the match. hitch = samples at least %.0fx the'
+                 % HITCH_FACTOR)
+    lines.append('median frame time.')
     return '\n'.join(lines)
 
 

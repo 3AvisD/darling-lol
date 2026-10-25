@@ -30,7 +30,7 @@ MIN_FREE_DISK_GIB = 5
 WARN_FREE_DISK_GIB = 15
 MIN_RAM_GIB = 4
 WARN_RAM_GIB = 8
-MIN_KERNEL = (5, 10)
+MIN_KERNEL = (5, 14)
 # A report is public when it is attached to an issue, so only the variables
 # that describe the runtime environment are collected.
 ENV_ALLOWLIST = (
@@ -128,7 +128,8 @@ def vulkan_icds(env=None):
         '/usr/local/share/vulkan/icd.d',
         '/run/opengl-driver/share/vulkan/icd.d',
         '/etc/vulkan/icd.d',
-        os.path.join(env.get('XDG_DATA_DIRS', ''), 'vulkan/icd.d') if env.get('XDG_DATA_DIRS') else None,
+        *[os.path.join(value, 'vulkan/icd.d')
+          for value in (env.get('XDG_DATA_DIRS') or '').split(':') if value],
     ]
     found = []
     for folder in filter(None, search):
@@ -165,6 +166,27 @@ def prefix_state(prefix, proc_root=Path('/proc')):
     return {'pid': pid, 'state': state, 'stale_markers': stale_markers}
 
 
+def runtime_dir(env=None):
+    """Installed Darling runtime: workspace/Nix first, then the native path."""
+    env = os.environ if env is None else env
+    candidates = []
+    workspace = env.get('DARLING_WORKSPACE')
+    if workspace:
+        candidates.append(Path(workspace) / 'usr-local/libexec/darling')
+        config = Path(workspace) / 'build/config.json'
+        try:
+            configured = json.loads(config.read_text()).get('sdk')
+        except (OSError, ValueError, AttributeError):
+            configured = None
+        if configured:
+            candidates.append(Path(configured))
+    candidates.append(Path('/usr/local/libexec/darling'))
+    for candidate in candidates:
+        if (candidate / 'sbin/launchd').is_file():
+            return candidate
+    return next((candidate for candidate in candidates if candidate.is_dir()), candidates[0])
+
+
 def gather(prefix=None, env=None, proc_root=Path('/proc'), sys_root=Path('/sys'), which=None):
     """Collect facts once; checks below only interpret them and stay testable."""
     env = dict(os.environ if env is None else env)
@@ -181,7 +203,7 @@ def gather(prefix=None, env=None, proc_root=Path('/proc'), sys_root=Path('/sys')
         free_disk = 0
 
     socket = prefix / '.darlingserver.sock'
-    runtime_bin = Path('/usr/local/libexec/darling')
+    runtime_bin = runtime_dir(env)
     return {
         'host': {
             'distro': release.get('PRETTY_NAME') or platform.system(),
@@ -205,6 +227,8 @@ def gather(prefix=None, env=None, proc_root=Path('/proc'), sys_root=Path('/sys')
         'gpus': read_gpus(sys_root),
         'vulkan_icds': vulkan_icds(env),
         'prefix': str(prefix),
+        'workspace': env.get('DARLING_WORKSPACE', ''),
+        'runtime_dir': str(runtime_bin),
         'prefix_exists': prefix.is_dir(),
         'prefix_launchd': (runtime_bin / 'sbin/launchd').is_file(),
         'prefix_socket': socket.exists(),
@@ -310,7 +334,8 @@ def check_prefix(facts):
     if not facts['prefix_exists']:
         return 'fail', 'Prefix %s does not exist; run the installer first' % facts['prefix']
     if not facts['prefix_launchd']:
-        return 'fail', 'Installed launchd is missing; the runtime install did not complete'
+        return 'fail', ('Installed launchd is missing from %s; the runtime install did not complete'
+                        % facts.get('runtime_dir', '/usr/local/libexec/darling'))
     return 'ok', facts['prefix']
 
 
@@ -364,21 +389,51 @@ def summarize(results):
     return counts
 
 
-def report(facts, results):
+def redact_text(text, prefix='', workspace=''):
+    """Replace the home, prefix and workspace paths before a report is shared."""
+    replacements = [
+        (str(prefix), '<prefix>'),
+        (str(workspace), '<workspace>'),
+        (str(Path.home()), '~'),
+    ]
+    for value, placeholder in replacements:
+        if value and value not in ('', '.'):
+            text = text.replace(value, placeholder)
+    return text
+
+
+def report(facts, results, redact=True):
+    prefix = facts['prefix']
+    workspace = facts.get('workspace', '')
+    checks = results
+    environment = facts['environment']
+    icds = facts['vulkan_icds']
+    if redact:
+        checks = [
+            dict(check, title=redact_text(check['title'], prefix, workspace),
+                 message=redact_text(check['message'], prefix, workspace))
+            for check in results
+        ]
+        environment = {
+            key: redact_text(value, prefix, workspace)
+            for key, value in environment.items()
+        }
+        icds = [redact_text(item, prefix, workspace) for item in icds]
     return {
         'schema': SCHEMA,
         'tool': 'darling-lol doctor',
         'created': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-        'summary': summarize(results),
+        'summary': summarize(checks),
         'host': facts['host'],
         'session': facts['session'],
         'memory': facts['memory'],
         'disk': facts['disk'],
         'gpus': facts['gpus'],
-        'vulkan_icds': facts['vulkan_icds'],
-        'prefix': facts['prefix'],
-        'environment': facts['environment'],
-        'checks': results,
+        'vulkan_icds': icds,
+        'prefix': '<prefix>' if redact else prefix,
+        'redacted': redact,
+        'environment': environment,
+        'checks': checks,
     }
 
 
@@ -410,14 +465,17 @@ def main(argv=None):
     parser.add_argument('--json', action='store_true', help='print the report as JSON')
     parser.add_argument('--report', type=Path, help='write the JSON report to this file')
     parser.add_argument('--prefix', type=Path, help='Darling prefix (default: DPREFIX or ~/.darling)')
+    parser.add_argument('--no-redact', action='store_true',
+                        help='keep the real prefix and workspace paths in the report')
     args = parser.parse_args(argv)
 
     facts = gather(prefix=args.prefix)
     results = run_checks(facts)
-    document = report(facts, results)
+    document = report(facts, results, redact=not args.no_redact)
 
     if args.report:
         args.report.write_text(json.dumps(document, indent=2) + '\n')
+        os.chmod(args.report, 0o600)
     if args.json:
         print(json.dumps(document, indent=2))
     else:

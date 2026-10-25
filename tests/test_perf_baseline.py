@@ -43,13 +43,28 @@ class MeasureTests(unittest.TestCase):
         result = perf.measure(path)
         self.assertEqual(result['match'], '2026-10-23 17:03')
         self.assertEqual(result['samples'], 8)
-        self.assertEqual(result['seconds'], 70.0)
+        self.assertEqual(result['seconds'], 80.0)
         self.assertEqual(result['avg_fps'], 24.2)
-        self.assertEqual(result['p50_ms'], 30.0)
-        self.assertEqual(result['p95_ms'], 90.0)
+        self.assertEqual(result['sample_p50_ms'], 30.0)
+        self.assertEqual(result['sample_p95_ms'], 90.0)
         self.assertEqual(result['slowest_quarter_fps'], 13.3)
         self.assertEqual(result['slowest_quarter_ms'], 75.0)
         self.assertEqual(result['hitches'], 2)
+
+    def test_file_is_a_basename_and_not_a_path(self):
+        path = write_match(self.root, [0.03])
+        self.assertEqual(perf.measure(path)['file'], path.name)
+        self.assertNotIn(str(self.root), json.dumps(perf.measure(path)))
+
+    def test_non_finite_time_and_huge_frames_are_skipped(self):
+        path = self.root / '2026-01-01T00-00-00' / '2026-01-01T00-00-00_netstats.csv'
+        path.parent.mkdir()
+        path.write_text(','.join(HEADER) + '\n'
+                        '0.03,0,nan,0,0\n'
+                        '0.03,0,inf,0,0\n'
+                        '1e308,0,10,0,0\n'
+                        '0.03,0,10,0,0\n')
+        self.assertEqual(perf.measure(path)['samples'], 1)
 
     def test_bad_and_empty_rows_are_skipped(self):
         path = self.root / '2026-01-01T00-00-00' / '2026-01-01T00-00-00_netstats.csv'
@@ -130,6 +145,8 @@ class OutputTests(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[0]['match'], '2026-10-23 17:03')
         self.assertEqual(rows[0]['avg_fps'], '20.0')
+        self.assertEqual(rows[0]['sample_p50_ms'], '40.0')
+        self.assertNotIn('p50_ms', rows[0])
         self.assertEqual(path.read_text().count('measured,match'), 1)
 
     def test_json_cli(self):
@@ -139,6 +156,17 @@ class OutputTests(unittest.TestCase):
         self.assertEqual(code, 0)
         document = json.loads(stream.getvalue())
         self.assertEqual(document['matches'][0]['samples'], 4)
+
+    def test_last_counts_usable_matches(self):
+        empty = self.root / '2026-10-24T10-00-00' / '2026-10-24T10-00-00_netstats.csv'
+        empty.parent.mkdir(parents=True)
+        empty.write_text(','.join(HEADER) + '\n')
+        results = perf.collect([empty, self.path], 1)
+        self.assertEqual([result['match'] for result in results], ['2026-10-23 17:03'])
+
+    def test_duration_includes_the_final_sample_interval(self):
+        path = write_match(self.root, [0.04] * 4)
+        self.assertEqual(perf.measure(path)['seconds'], 40.0)
 
     def test_cli_without_matches_returns_one(self):
         missing = self.root / 'missing.csv'
