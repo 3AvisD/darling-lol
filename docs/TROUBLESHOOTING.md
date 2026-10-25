@@ -500,6 +500,56 @@ With the window visual and compositor draw buffer fixes (#22) and the RPC socket
 
 If the game window stays black on NVIDIA, check `metal-device.log` as described in [Check which GPU rendered](#check-which-gpu-rendered).
 
+## Vulkan device or ICD selection
+
+The Metal wrapper renders with Vulkan and hands each frame to an OpenGL (EGL)
+context. If the machine has more than one Vulkan ICD, or a software Vulkan
+device such as lavapipe, the loader can enumerate a device that does not match
+the presenting GPU. The client may then stop with a Metal device or version
+error even though the runtime built correctly ([#127](https://github.com/lucannez64/darling-lol/issues/127)).
+
+Check what the loader reports and what Metal selected:
+
+```sh
+ls -l /usr/share/vulkan/icd.d/
+vulkaninfo --summary
+```
+
+The device log is opt-in and append-only. With the game and both clients closed,
+clear the old log and enable logging for one reproduction:
+
+```sh
+rm -f "${DPREFIX:-$HOME/.darling}/private/tmp/metal-device.log"
+DARLING_METAL_DEVICE_LOG=1 sh scripts/run.sh
+```
+
+After reproducing, inspect the `physical`, `selected` and `presenting` lines
+for the same process ID:
+
+```sh
+grep -E 'physical name|selected name|presenting GL' "${DPREFIX:-$HOME/.darling}/private/tmp/metal-device.log"
+```
+
+If the selected device is wrong, restrict Vulkan to the intended driver's ICD:
+
+```sh
+DARLING_METAL_DEVICE_LOG=1 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json sh scripts/run.sh
+```
+
+The filename is distribution and driver specific (`radeon_icd.x86_64.json`,
+`nvidia_icd.json` and `intel_icd.x86_64.json` are common). Choose the JSON for
+the GPU you want, and set this per launch; do not install it globally in a shell
+profile. `VK_ICD_FILENAMES` changes the Vulkan side only. If the log reports
+`MISMATCH`, the presenting OpenGL context is on another GPU; use the PRIME or
+EGL variables in [hybrid graphics](#hybrid-graphics-laptops-amdintel-igpu--nvidia)
+as well. If `physical name` shows `llvmpipe` or another CPU device, select the
+hardware ICD or enable [`/tmp/metal-skip-cpu-devices`](SETUP.md#metal-and-indium-overlays).
+
+This workaround selects an ICD/driver, which can expose several physical GPUs.
+It does not guarantee a particular GPU or a match with the OpenGL presenting
+GPU, and it does not make unsupported Metal features available. Include the `physical`, `selected` and `presenting` lines from
+`metal-device.log` when reporting the failure.
+
 ## Hybrid graphics laptops (AMD/Intel iGPU + NVIDIA)
 
 Metal renders with Vulkan, and each finished frame is handed to an OpenGL (EGL) context that presents it. The hand-off uses opaque file descriptors, which only work when Vulkan and OpenGL run on the same GPU. Indium takes the first Vulkan device the loader lists, and on a hybrid laptop both that device and the EGL context are normally the integrated GPU, so the discrete GPU stays idle. A report in [issue #3](https://github.com/lucannez64/darling-lol/issues/3) (Ryzen 9 5900HS, RTX 3060 Laptop) measured 60-70 FPS in ARAM on the integrated GPU; on the NVIDIA GPU the game showed a black screen, since fixed (see [NVIDIA](#nvidia)).
