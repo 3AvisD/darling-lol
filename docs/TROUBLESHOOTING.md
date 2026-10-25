@@ -157,8 +157,13 @@ the normal launcher start the product again. It recognizes `LeagueClientUx`,
 `Riot Client` and `RiotClientServices` windows, does nothing while a game process
 is running or when a managed client window is visible, and fails closed when
 X11/Xwayland properties are missing or unreadable. This saves the Darling
-bootstrap but not the Riot Client/CEF startup itself. If no window appears
-afterward, use a full runtime shutdown/restart.
+bootstrap but not the Riot Client/CEF startup itself. The stale tree is signalled
+deepest-first so live parents can still reap their own children. Guest launchd
+periodically reaps untracked orphaned zombie children. Recovery reports the PID,
+state and parent of each process still present after SIGKILL; a surviving live
+process or a zombie owned by another parent may require further investigation.
+If processes remain or no window appears afterward, use a full runtime
+shutdown/restart.
 
 ### Multiple client-in-game helpers
 
