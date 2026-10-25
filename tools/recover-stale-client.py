@@ -76,6 +76,14 @@ def process_state(proc):
         return None
 
 
+def process_start_ticks(proc):
+    """Field 22 of stat: start time in clock ticks, even for a zombie."""
+    try:
+        return int((proc / 'stat').read_text().rsplit(')', 1)[1].split()[19])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 def server_running(proc_root=Path('/proc')):
     try:
         entries = list(proc_root.iterdir())
@@ -162,8 +170,8 @@ def client_identity(prefix, pid, proc_root=Path('/proc')):
         if not math.isfinite(uptime) or uptime < 0 or ticks <= 0:
             return None
         # Field 22 follows a comm field that may contain spaces/parentheses.
-        start_ticks = int((proc / 'stat').read_text().rsplit(')', 1)[1].split()[19])
-        if start_ticks < 0 or uptime - start_ticks / ticks < MIN_AGE_SECONDS:
+        start_ticks = process_start_ticks(proc)
+        if start_ticks is None or start_ticks < 0 or uptime - start_ticks / ticks < MIN_AGE_SECONDS:
             return None
         return start_ticks
     except (OSError, ValueError, IndexError):
@@ -223,13 +231,17 @@ def _signal_tree(prefix, identities, order, signum, kill, proc_root):
 
 def wait_for_exit(prefix, identities, proc_root=Path('/proc'), sleep=time.sleep,
                   attempts=5):
-    """Wait briefly for the tree to leave the process table; return leftovers."""
+    """Wait briefly for the tree to leave the process table; return leftovers.
+
+    A PID that was reused by an unrelated process is not a leftover. Only the
+    original process, including while it is an unreaped zombie, counts.
+    """
     leftovers = []
     for attempt in range(attempts):
         leftovers = [
             pid for pid, start_ticks in identities.items()
-            if client_identity(prefix, pid, proc_root) == start_ticks
-            or process_state(proc_root / str(pid)) is not None
+            if process_state(proc_root / str(pid)) is not None
+            and process_start_ticks(proc_root / str(pid)) == start_ticks
         ]
         if not leftovers:
             break

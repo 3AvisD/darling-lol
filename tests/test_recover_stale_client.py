@@ -151,6 +151,30 @@ class RecoverStaleClientTests(unittest.TestCase):
         self.assertIn('still present after SIGKILL', output)
         self.assertIn('parent PID(s): 0', output)
 
+    def test_reused_pid_is_not_reported_as_a_leftover(self):
+        folder = self.process(12, 'mldr', [CLIENT], self.client_env())
+        start_ticks = recover_stale_client.process_start_ticks(folder)
+        stat = (folder / 'stat').read_text()
+        fields = stat.rsplit(')', 1)[1].split()
+        fields[19] = str(int(fields[19]) + 100)
+        (folder / 'stat').write_text(stat.rsplit(')', 1)[0] + ') ' + ' '.join(fields) + '\n')
+        leftovers = recover_stale_client.wait_for_exit(
+            self.prefix, {12: start_ticks}, proc_root=self.proc,
+            sleep=lambda _seconds: None)
+        self.assertEqual(leftovers, [])
+
+    def test_unreaped_zombie_is_still_a_leftover(self):
+        folder = self.process(12, 'mldr', [CLIENT], self.client_env())
+        start_ticks = recover_stale_client.process_start_ticks(folder)
+        stat = (folder / 'stat').read_text()
+        fields = stat.rsplit(')', 1)[1].split()
+        fields[0] = 'Z'
+        (folder / 'stat').write_text(stat.rsplit(')', 1)[0] + ') ' + ' '.join(fields) + '\n')
+        leftovers = recover_stale_client.wait_for_exit(
+            self.prefix, {12: start_ticks}, proc_root=self.proc,
+            sleep=lambda _seconds: None)
+        self.assertEqual(leftovers, [12])
+
     def test_young_client_is_preserved(self):
         self.process(10, 'darlingserver', ['darlingserver'])
         self.process(12, 'mldr', [CLIENT], self.client_env(),
