@@ -6236,7 +6236,7 @@ index f890ab2..8969577 100644
  int handle_socket(int fd, unsigned int cmd, void* arg, int* retval)
  {
  	switch (cmd)
-@@ -19,6 +36,43 @@ int handle_socket(int fd, unsigned int cmd, void* arg, int* retval)
+@@ -19,6 +36,57 @@ int handle_socket(int fd, unsigned int cmd, void* arg, int* retval)
  		case SIOCAIFADDR_IN6: // set IPv6 address
  			*retval = -ENOTSUP;
  			return IOCTL_HANDLED;
@@ -6249,7 +6249,7 @@ index f890ab2..8969577 100644
 +			struct linux_ifreq ifr;
 +			int status;
 +
-+			if (ifmr == NULL)
++			if (ifmr == NULL || ifmr->ifm_count < 0)
 +			{
 +				*retval = -EINVAL;
 +				return IOCTL_HANDLED;
@@ -6264,6 +6264,12 @@ index f890ab2..8969577 100644
 +				return IOCTL_HANDLED;
 +			}
 +
++			if (ifr.lifr_flags & IFF_LOOPBACK)
++			{
++				*retval = -ENOTSUP;
++				return IOCTL_HANDLED;
++			}
++
 +			if (strncmp(ifmr->ifm_name, "wl", 2) == 0)
 +				ifmr->ifm_current = IFM_IEEE80211 | IFM_AUTO;
 +			else
@@ -6272,8 +6278,16 @@ index f890ab2..8969577 100644
 +			ifmr->ifm_status = ((ifr.lifr_flags & IFF_UP) && (ifr.lifr_flags & IFF_RUNNING))
 +					? (IFM_AVALID | IFM_ACTIVE) : IFM_AVALID;
 +			ifmr->ifm_active = ifmr->ifm_current;
-+			ifmr->ifm_count = 0;
-+			ifmr->ifm_ulist = NULL;
++			if (ifmr->ifm_count > 0)
++			{
++				if (ifmr->ifm_ulist == NULL)
++				{
++					*retval = -EFAULT;
++					return IOCTL_HANDLED;
++				}
++				ifmr->ifm_ulist[0] = ifmr->ifm_current;
++			}
++			ifmr->ifm_count = 1;
 +			*retval = 0;
 +			return IOCTL_HANDLED;
 +		}
