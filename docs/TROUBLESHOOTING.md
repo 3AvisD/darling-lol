@@ -184,6 +184,43 @@ is available from the configured tools directory:
 RCLOL_CLEAN_STALE_HELPERS=1 python3 build/runtime/tools/clean-stale-helpers.py --dry-run
 ```
 
+## Launcher stays attached after closing the client
+
+`scripts/run.sh` keeps a supervisor between the terminal and Darling. It exists
+because the Riot Client does not exit when its window closes, and because a
+loader that dies before `darlingserver` can leave launchd/mldr and its client
+tree running. The supervisor:
+
+- forwards `Ctrl+C`, terminal close and `SIGTERM` to the loader, then shuts the
+  runtime down and stops anything still inside the guest PID namespace. A
+  process is only stopped when it carries this prefix's `__mldr_sockpath` and
+  the same user, and a namespace equal to the host's is refused, so another
+  prefix or a host process is never touched.
+- shuts the runtime down after the loader exits normally. If a second launch
+  attached to a runtime that was already running, that runtime is left alone.
+- leaves everything as it was with `RCLOL_CLEAN_ON_EXIT=0`, which is the old
+  `exec` behaviour.
+
+Closing the client window is not the same as quitting the client. The window is
+gone but `RiotClientServices`, `LeagueClientUx` and their CEF helpers stay
+resident, and `xwininfo` can still list their windows. If closing the window
+should end the session, opt in to an idle stop:
+
+```sh
+RCLOL_STOP_AFTER_CLIENT_SECONDS=120 ./scripts/run.sh
+```
+
+The session stops after no managed League/Riot window and no game process have
+been seen for that many seconds, but only after a client window was seen. It
+never stops while a game runs, and it never stops when the window state cannot
+be read (for example a missing display or `xprop`), so a Wayland session without
+Xwayland still has to quit the client normally. The default is off.
+
+Quit the Riot Client itself (tray icon, then Quit) to end the session in every
+setup. If the launcher was killed with `SIGKILL`, or the whole terminal was
+terminated without a signal reaching the supervisor, the runtime still has to
+be stopped with `darling shutdown` as described below.
+
 ### Client window stays black after a match
 
 The League client keeps its Chromium/CEF UI (`LeagueClientUx` and its helpers)
@@ -465,7 +502,7 @@ It prints each thread-local access that calls its thunk without the descriptor i
 
 ## Base install refuses to continue while Darling is not running
 
-`sudo cmake --install` prints `Darling currently running for <user>, shutting it down...` several times and then `Darling launchd PID … remains alive after shutdown`. A guest launchd outlived its darlingserver, so `darling shutdown` sees no container to stop. Automatic cleanup by process name is disabled because guest names and UIDs do not prove prefix ownership (killing by name risks terminating an active launchd from an unrelated prefix or session). If setup is blocked, shut down the original Darling session from its own namespace (`darling shutdown`), or inspect the leftover PID under `/proc/<PID>` before terminating it manually.
+`sudo cmake --install` prints `Darling currently running for <user>, shutting it down...` several times and then `Darling launchd PID … remains alive after shutdown`. A guest launchd outlived its darlingserver, so `darling shutdown` sees no container to stop. Automatic cleanup by process name is disabled because guest names and UIDs do not prove prefix ownership (killing by name risks terminating an active launchd from an unrelated prefix or session). The launcher supervisor stops such leftovers when the session ends through `Ctrl+C`, a closed terminal or a normal client exit. If setup is already blocked, shut down the original Darling session from its own namespace (`darling shutdown`), or inspect the leftover PID under `/proc/<PID>` before terminating it manually.
 
 ## Lower fight FPS than Windows
 
