@@ -3,6 +3,12 @@ on: [push, pull_request]
 permissions:
   contents: read
 jobs:
+  nix-fonts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@3c6342b75005b9cc7c7d4069c3e9179247c89012 # v31
+      - run: nix build .#checks.x86_64-linux.fonts --no-link -L
   validate:
     runs-on: ubuntu-latest
     steps:
@@ -10,15 +16,27 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Require C++ regression compiler
+        run: |
+          command -v c++
+          c++ --version
       - run: python scripts/validate.py
       - run: python tools/riot-input-offline-check.py
       - run: python tools/riot-launcher-offline-check.py
       - run: python tools/riot-runtime-cleanup-offline-check.py
       - run: python tools/riot-cdn-dns-offline-check.py
+      - run: python -m unittest discover -s tests -p 'test_nix_fonts.py'
+      - run: python -m unittest discover -s tests -p 'test_nix_repairs.py'
       - run: python -m unittest discover -s tests -p 'test_hidden_riot_recovery.py'
       - run: python -m unittest discover -s tests -p 'test_desktop_run.py'
+      - run: python -m unittest discover -s tests -p 'test_desktop_entry.py'
       - run: python -m unittest discover -s tests -p 'test_urlsession_runner.py'
       - run: python -m unittest discover -s tests -p 'test_system_profiler.py'
       - run: python -m unittest discover -s tests -p 'test_metal_device_info.py'
+      - run: python -m unittest discover -s tests -p 'test_indium_address_shadow.py' -v
       - run: python -m unittest discover -s tests -p 'test_exec_guest.py'
       - run: python -m unittest discover -s tests -p 'test_close_league_client_in_game.py'
+      - run: python -m unittest discover -s tests -p 'test_recover_stale_client.py'
+      - run: python -m unittest discover -s tests -p 'test_clean_stale_helpers.py'
+      - run: python -m unittest discover -s tests -p 'test_hide_league_client_in_game.py'
+      - run: python -m unittest discover -s tests -p 'test_client_in_game_tricks.py'
