@@ -150,14 +150,14 @@ def check_llvm_tools(report):
 
 
 def vulkan_devices():
-    """(highest apiVersion, whether a device reports timelineSemaphore, device names)."""
+    """(highest apiVersion, device names) from vulkaninfo, or None when it is not available."""
     summary = output(['vulkaninfo', '--summary'])
     if summary is None:
         return None
     api = [version(found) for found in re.findall(r'apiVersion\s*=\s*(\d+\.\d+)', summary)]
     api = [value for value in api if value]
     names = re.findall(r'deviceName\s*=\s*(.+)', summary)
-    return (max(api) if api else None, None, [name.strip() for name in names])
+    return (max(api) if api else None, [name.strip() for name in names])
 
 
 def check_vulkan(report):
@@ -168,7 +168,7 @@ def check_vulkan(report):
                'timeline semaphores; without a suitable device the game cannot render.',
                required=False)
         return
-    api, timeline, names = devices
+    api, names = devices
     detail = f'apiVersion {dotted(api)}' + (f' ({", ".join(names[:2])})' if names else '')
     report('vulkan', api is not None and api >= MIN_VULKAN, detail,
            f'Vulkan {dotted(MIN_VULKAN)} or newer is required: Indium rejects older devices. '

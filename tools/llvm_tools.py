@@ -85,9 +85,3 @@ def config(*arguments):
     if result.returncode:
         raise SystemExit(f'{path} {" ".join(arguments)} failed: {result.stderr.strip()}')
     return result.stdout.strip()
-
-
-def major():
-    """LLVM major version reported by llvm-config, or None when unparsable."""
-    head = config('--version').strip().split('.', 1)[0]
-    return int(head) if head.isdigit() else None
