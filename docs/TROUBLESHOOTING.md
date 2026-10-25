@@ -453,6 +453,31 @@ A separate multi-window path stopped the active async presenter when another dif
 - **Prebuilt Swift file contains Git LFS pointer text:** install Git LFS and fetch the original upstream assets; pointer text is not a usable library.
 - **Submodule fetch stops with no output right after `src/external/sqlite`:** the next submodule is `src/external/swift`, whose pinned `.lfsconfig` points at the retired `git-lfs.darlinghq.org`. The checkout is blocked on that host, not on sqlite. `prepare.py` redirects that submodule's LFS requests to GitHub. To finish a fetch that was interrupted before any patches were applied, run `git -C build/darling-src -c lfs.url=https://github.com/darlinghq/darling-swift.git/info/lfs submodule update --init --recursive --progress`, then re-run `./scripts/build.sh`. Do not run that submodule update once `prepare.py` has applied patches: it resets every submodule working tree to the pinned revision and discards the patches.
 
+## Checkout moved to another path or account
+
+`build/config.json`, the generated helpers and the CMake cache record absolute paths, so a checkout that was moved (for example from `/root/darling-lol` to `/home/<user>/darling-lol`, or renamed while staying in the same account) keeps pointing at the old location ([issue #142](https://github.com/lucannez64/darling-lol/issues/142)). `scripts/configure.py` now repairs the parts it owns and reports the rest on stderr:
+
+- **Prefix:** a saved prefix that was exactly `<previous home>/.darling` follows the new host home. A prefix you chose yourself is kept, and a prefix inside the previous home prints a reminder to pass `--prefix` explicitly.
+- **`build/runtime/build`:** recreated as a relative link, so it survives later moves. An absolute or dangling leftover is replaced; a real directory at that path is reported and left untouched.
+- **CMake cache:** a `build/darling-src/build/CMakeCache.txt` whose `CMAKE_HOME_DIRECTORY` names a different checkout is reported, together with the path to remove. It is never deleted automatically because it can hold local build state.
+
+After moving a checkout, run:
+
+```sh
+python3 scripts/configure.py
+```
+
+If the warning names another source directory, the cache still holds object files and dependency lists for the old path, and the build fails with `Permission denied` or `No such file or directory` against it. Remove it and rebuild (as the same user that owns the checkout):
+
+```sh
+rm -rf build/darling-src/build
+./scripts/build.sh
+```
+
+Patches are rendered at `scripts/prepare.py` time, so `@PROJECT_ROOT@` in a patched file keeps the old path until it runs again. `./scripts/build.sh` and `./scripts/update.sh` both do that; do not run `prepare.py` by hand while the checkout has other edits in `build/darling-src`, because it refuses rather than resetting them.
+
+The opt-in RenderDoc capture bridge (`RCLOL_RENDERDOC_CAPTURE=1`) is a developer diagnostic, not part of the installer. It expects `build/renderdoc/capture-bridge.so` and a RenderDoc build under `build/renderdoc/`, and neither setup script creates them. Without those files the capture is skipped and the game runs normally; the absolute path baked into the Indium patch is refreshed by the same `prepare.py` run.
+
 ## launchd crashes at boot after changing compiler flags
 
 `darling shell` fails with `Error connecting to shellspawn` and `/tmp/lolsig.log` shows `LOLSIGFAIL pid=1 sig=11 code=1 addr=0x0` in `memmove`, called from `snprintf` in libkqueue's `epoll_event_dump`. The binaries were tuned for AMD Zen: clang 23 with `-mtune=znver*` (also selected by `-march=native` or `-mtune=native` on Zen) loads a thread-local variable's descriptor into a register other than `%rdi`, but dyld's `tlv_get_addr` reads `%rdi`, so every `__thread` and `thread_local` access returns NULL. Rebuild with `-mtune=generic` (the default in `scripts/build.sh` and the overlay builders), and check any binary with:
