@@ -33,7 +33,7 @@ def find_sdk():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--guest-home', default=None,
-                        help='guest home, e.g. /Users/hirew (default: build/config.json)')
+                        help='guest home, e.g. /Users/example (default: build/config.json)')
     parser.add_argument('--library-path', default=None,
                         help='extra guest DYLD_LIBRARY_PATH entry, e.g. a rebuilt kernel overlay')
     parser.add_argument('--timeout', type=float, default=60)
