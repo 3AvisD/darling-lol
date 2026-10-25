@@ -149,6 +149,41 @@ ownership or window information cannot be read. A hidden background client or
 download is restarted when recovery is enabled. Other desktop environments are
 not supported by this helper; recovery is off by default.
 
+For a live Darling runtime with no visible client window but stale Riot/League/
+CEF processes at least 60 seconds old, `RCLOL_RECOVER_STALE_CLIENT=1` performs a
+partial recovery before the next launch. It keeps `darlingserver`, launchd/mldr,
+sockets and `.init.pid`, stops only the stale client process tree, and then lets
+the normal launcher start the product again. It recognizes `LeagueClientUx`,
+`Riot Client` and `RiotClientServices` windows, does nothing while a game process
+is running or when a managed client window is visible, and fails closed when
+X11/Xwayland properties are missing or unreadable. This saves the Darling
+bootstrap but not the Riot Client/CEF startup itself. If no window appears
+afterward, use a full runtime shutdown/restart.
+
+### Multiple client-in-game helpers
+
+The close/hide helper is a long-lived watcher. If an earlier launcher exits
+while it remains, the next launch can start another copy; list them with:
+
+```sh
+pgrep -af 'close-league-client-in-game.py|hide-league-client-in-game.py'
+```
+
+To remove the orphaned copies before the next helper starts:
+
+```sh
+RCLOL_CLEAN_STALE_HELPERS=1 ./scripts/run.sh
+```
+
+Only helpers of the current prefix whose parent is `init`/`systemd` are
+terminated. Helpers whose launcher is still alive, other prefixes, the game,
+Riot/League/CEF, `darlingserver` and the runtime are never touched. A dry run
+is available from the configured tools directory:
+
+```sh
+RCLOL_CLEAN_STALE_HELPERS=1 python3 build/runtime/tools/clean-stale-helpers.py --dry-run
+```
+
 ### Client window stays black after a match
 
 The League client keeps its Chromium/CEF UI (`LeagueClientUx` and its helpers)
@@ -190,6 +225,60 @@ observation, without waiting for a match:
 
 ```sh
 python3 tools/close-league-client-in-game.py --once --dry-run
+```
+
+### Automatic client handling during a match
+
+A single opt-in switch reads the client's own preferences and chooses the mode:
+
+```sh
+RCLOL_CLIENT_IN_GAME_TRICKS=1 ./scripts/run.sh
+```
+
+It reads `lol-user-experience` from the installed client's
+`LCULocalPreferences.yaml`:
+
+| Client preference | Launcher action |
+|---|---|
+| `potatoModeEnabled: false` or unreadable | no client-in-game helper |
+| `potatoModeEnabled: true`, close preference missing or invalid | no action |
+| `potatoModeEnabled: true`, `closeLeagueClientDuringGame: true` | close the client UI |
+| `potatoModeEnabled: true`, `closeLeagueClientDuringGame: false` | hide the client windows |
+
+The hide path unmaps the `LeagueClientUx` and `Riot Client` X11 windows and maps
+them again when the game process ends. The client is not closed, the League
+backend and Riot client keep running, and the game window is never hidden. The
+close path uses the UI-close helper described above. The hide helper exits after
+ten minutes without a client or match once it has seen one; a missing or invalid
+close preference selects no helper.
+
+The low-level `RCLOL_HIDE_CLIENT_IN_GAME=1` and
+`RCLOL_CLOSE_CLIENT_IN_GAME=1` switches remain available when the automatic
+switch is not set. All modes are off by default. The helpers are
+window-management only: they do not patch client binaries, CEF, anti-cheat or
+DRM. They attribute the game to this prefix through the loader's
+`__mldr_sockpath`, and fail closed when ownership, proc state, environment or
+window information cannot be read. The hide helper requires an X11 or Xwayland
+desktop; on a native Wayland window manager without Xwayland it cannot find the
+windows.
+
+On a CPU-bound host the hide effect appears after CEF has been hidden for a few
+seconds. In a local 30-second test on an i5-3470 with a Radeon RX 550, hiding
+`LeagueClientUx` reduced the summed CPU of the matched client/CEF processes from
+120.7% to 93.4% (about 23%, or 27 percentage points, of one core); showing the
+window returned it to 119.9%. This is not a universal FPS or percentage claim:
+a game that is GPU-bound, a client with no active UI work, or a different
+desktop may show less benefit. The hidden window can also need a moment to
+repaint after it is shown.
+
+With client optimizations enabled and close-during-game enabled, the close
+helper remains the more aggressive option when in-client chat during the match
+is not needed.
+
+Diagnose the match detector without changing any window:
+
+```sh
+python3 tools/hide-league-client-in-game.py --once
 ```
 
 ### Riot reports NO INTERNET FOUND while the host is online
