@@ -20,4 +20,22 @@ command -v darling >/dev/null && darling --version 2>&1 || echo "darling not ins
 echo "== gpu =="
 ls /dev/dri 2>/dev/null || echo "no /dev/dri (Vulkan render needs GPU or lavapipe)"
 command -v vulkaninfo >/dev/null && vulkaninfo --summary 2>&1 | head -20 || echo "vulkaninfo absent"
+echo "== display =="
+# DISPLAY is not enough: the X server can reject the connection when the cookie
+# is missing or stale, and Darling's iokitd then has no X11/EGL path. Ask the
+# server with the environment Darling will inherit.
+if [ -n "${DISPLAY:-}" ]; then
+  echo "DISPLAY=$DISPLAY XAUTHORITY=${XAUTHORITY:-unset}"
+  if command -v xdpyinfo >/dev/null 2>&1; then
+    if xdpyinfo >/dev/null 2>&1; then
+      echo "X display reachable"
+    else
+      echo "WARN: cannot open $DISPLAY; export XAUTHORITY with a readable cookie (typical for servers and SSH), otherwise iokitd runs without X11/EGL"
+    fi
+  else
+    echo "xdpyinfo not installed; skipping the display probe (install x11-utils)"
+  fi
+else
+  echo "DISPLAY unset; iokitd runs without X11/EGL (expected on a headless host)"
+fi
 [ "$ok" -eq 1 ] && echo "OK" || { echo "FAIL: install missing tools"; exit 1; }
