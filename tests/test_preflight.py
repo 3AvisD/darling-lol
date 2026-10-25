@@ -40,11 +40,23 @@ esac'''.replace('LLVM_BINDIR', str(self.llvm_bindir)))
         self.stub('llvm-nm', 'exit 0')
         self.stub('cmake', 'echo "cmake version 3.31.6"')
         self.stub('git', 'case "$*" in "lfs version") echo "git-lfs/3.7.0 (GitHub; linux amd64)";; esac')
-        self.stub('vulkaninfo', '''case "$*" in
- --summary) printf 'apiVersion = 1.3.289\\ndeviceName = Test GPU\\n';;
- *) printf 'timelineSemaphore = true\\n';;
-esac''')
+        self.vulkan([('1.3.289', 'Test GPU', True)])
         self.stub('xdpyinfo', 'exit 0')
+
+    def vulkan(self, devices):
+        """Stub vulkaninfo with [(apiVersion, name, timeline)] per device."""
+        summary = ['Devices:', '========']
+        features = ['Device Properties and Extensions:', '=================================']
+        for index, (api, name, timeline) in enumerate(devices):
+            summary += [f'GPU{index}:', f'\tapiVersion = {api}', f'\tdeviceName = {name}']
+            features += [f'GPU{index}:', 'VkPhysicalDeviceProperties:',
+                         f'\tapiVersion = {api}', f'\tdeviceName = {name}']
+            if timeline is not None:
+                features += ['VkPhysicalDeviceVulkan12Features:',
+                             f'\ttimelineSemaphore = {"true" if timeline else "false"}']
+        self.stub('vulkaninfo', 'case "$*" in\n'
+                  " --summary) printf '%s\\n' " + ' '.join(f"'{line}'" for line in summary) + ';;\n'
+                  " *) printf '%s\\n' " + ' '.join(f"'{line}'" for line in features) + ';;\nesac')
 
     def stub(self, name, body, folder=None):
         path = (folder or self.bin) / name
@@ -152,11 +164,12 @@ esac''')
 
 
     def test_old_vulkan_stops_the_setup(self):
-        self.stub('vulkaninfo', 'echo "apiVersion = 1.2.170"')
+        self.vulkan([('1.2.170', 'Old GPU', True)])
         result = self.preflight()
         self.assertEqual(result.returncode, 1)
         self.assertIn('FAIL vulkan', result.stdout)
-        self.assertIn('Vulkan 1.3 or newer is required', result.stdout)
+        self.assertIn('Vulkan 1.3 or newer', result.stdout)
+        self.assertIn('Old GPU 1.2', result.stdout)
 
 
     def test_missing_vulkaninfo_only_warns(self):
@@ -178,13 +191,38 @@ esac''')
 
 
     def test_missing_timeline_semaphores_is_reported(self):
-        self.stub('vulkaninfo', '''case "$*" in
- --summary) echo 'apiVersion = 1.3.289';;
- *) echo 'timelineSemaphore = false';;
-esac''')
+        self.vulkan([('1.3.289', 'Test GPU', False)])
         result = self.preflight()
         self.assertEqual(result.returncode, 1)
-        self.assertIn('FAIL vulkan-timeline', result.stdout)
+        self.assertIn('FAIL vulkan', result.stdout)
+        self.assertIn('timelineSemaphore false', result.stdout)
+        self.assertIn('on the same device', result.stdout)
+
+
+    def test_a_second_device_can_satisfy_both_requirements(self):
+        self.vulkan([('1.4.309', 'New GPU without semaphores', False),
+                     ('1.4.309', 'Second GPU', True)])
+        result = self.preflight()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('ok   vulkan', result.stdout)
+
+
+    def test_requirements_are_not_combined_across_devices(self):
+        self.vulkan([('1.2.170', 'Old GPU with semaphores', True),
+                     ('1.4.309', 'New GPU without semaphores', False)])
+        result = self.preflight()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('FAIL vulkan', result.stdout)
+        self.assertIn('Old GPU with semaphores 1.2', result.stdout)
+        self.assertIn('New GPU without semaphores 1.4', result.stdout)
+
+
+    def test_no_reported_device_is_required(self):
+        self.vulkan([])
+        result = self.preflight()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('FAIL vulkan', result.stdout)
+        self.assertIn('no devices reported', result.stdout)
 
 
     def test_unreachable_display_only_warns(self):

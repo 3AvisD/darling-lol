@@ -149,15 +149,57 @@ def check_llvm_tools(report):
            'The runtime install validates Darwin binaries with them.')
 
 
+def gpu_blocks(text):
+    """{index: [lines]} for each `GPUn:` block in vulkaninfo output."""
+    blocks = {}
+    current = None
+    for line in (text or '').splitlines():
+        header = re.match(r'GPU(\d+):\s*$', line)
+        if header:
+            current = blocks.setdefault(int(header.group(1)), [])
+            continue
+        if current is not None:
+            current.append(line)
+    return blocks
+
+
+def first_match(pattern, lines):
+    for line in lines:
+        found = re.search(pattern, line)
+        if found:
+            return found.group(1).strip()
+    return None
+
+
 def vulkan_devices():
-    """(highest apiVersion, device names) from vulkaninfo, or None when it is not available."""
+    """One record per Vulkan device, or None when vulkaninfo does not run.
+
+    A device is kept as a whole record so a host with an old fast GPU and a new
+    GPU without timeline semaphores cannot pass by combining the two. The full
+    dump carries the features; `--summary` carries the versions that every
+    version of the tool prints.
+    """
     summary = output(['vulkaninfo', '--summary'])
     if summary is None:
         return None
-    api = [version(found) for found in re.findall(r'apiVersion\s*=\s*(\d+\.\d+)', summary)]
-    api = [value for value in api if value]
-    names = re.findall(r'deviceName\s*=\s*(.+)', summary)
-    return (max(api) if api else None, [name.strip() for name in names])
+    features = gpu_blocks(output(['vulkaninfo'], timeout=60))
+    devices = []
+    for index, lines in sorted(gpu_blocks(summary).items()):
+        found = features.get(index, [])
+        values = [value == 'true'
+                  for value in re.findall(r'timelineSemaphore\s*=\s*(true|false)',
+                                          '\n'.join(found))]
+        devices.append({'name': first_match(r'deviceName\s*=\s*(.+)', lines),
+                        'api': version(first_match(r'apiVersion\s*=\s*(\d+\.\d+)', lines)),
+                        'timeline': any(values) if values else None})
+    return devices
+
+
+def describe_device(device):
+    text = f'{device["name"] or "unnamed device"} {dotted(device["api"])}'
+    if device['timeline'] is not None:
+        text += ', timelineSemaphore ' + ('true' if device['timeline'] else 'false')
+    return text
 
 
 def check_vulkan(report):
@@ -174,19 +216,20 @@ def check_vulkan(report):
                'timeline semaphores; without a suitable device the game cannot render.',
                required=False)
         return
-    api, names = devices
-    detail = f'apiVersion {dotted(api)}' + (f' ({", ".join(names[:2])})' if names else '')
-    report('vulkan', api is not None and api >= MIN_VULKAN, detail,
-           f'Vulkan {dotted(MIN_VULKAN)} or newer is required: Indium rejects older devices. '
-           'Update Mesa or the vendor driver, or check `vulkaninfo --summary`.')
-    feature = output(['vulkaninfo'], timeout=60)
-    if feature is None:
+    if not devices:
+        report('vulkan', False, 'no devices reported',
+               '`vulkaninfo --summary` listed no Vulkan device. Check the loader and the ICD '
+               'files, or reinstall the driver: the game cannot render without a device.')
         return
-    values = re.findall(r'timelineSemaphore\s*=\s*(true|false)', feature)
-    if values and 'true' not in values:
-        report('vulkan-timeline', False, 'timelineSemaphore = false',
-               'No Vulkan device reports timeline semaphores, which the Metal wrapper needs; '
-               'update the driver or select another ICD.')
+    # A dump that carries no feature section still gets the version check, as before.
+    checked = any(device['timeline'] is not None for device in devices)
+    usable = [device for device in devices
+              if device['api'] is not None and device['api'] >= MIN_VULKAN
+              and (device['timeline'] or not checked)]
+    report('vulkan', bool(usable), '; '.join(describe_device(device) for device in devices),
+           f'Vulkan {dotted(MIN_VULKAN)} or newer and timeline semaphores on the same device are '
+           'required: Indium rejects older devices and uses the semaphores. Update Mesa or the '
+           'vendor driver, or check `vulkaninfo`.')
 
 
 def check_display(report):
