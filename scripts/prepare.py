@@ -17,11 +17,11 @@ LFS_URL='lfs.url=https://github.com/darlinghq/darling-swift.git/info/lfs'
 LFS_FILTERS=['-c','filter.lfs.required=true','-c','filter.lfs.smudge=git-lfs smudge -- %f',
              '-c','filter.lfs.process=git-lfs filter-process','-c','filter.lfs.clean=git-lfs clean -- %f']
 def submodules(checkout):
-    out=subprocess.run(['git','-C',str(checkout),'submodule','status','--recursive'],text=True,capture_output=True).stdout
+    out=subprocess.run(['git','-C',str(checkout),'submodule','status','--recursive'],text=True,capture_output=True,check=True).stdout
     return [checkout/line.split()[1] for line in out.splitlines() if len(line.split())>1]
 def pointers(repo):
     """Tracked files still checked out as LFS pointer text instead of their real content."""
-    out=subprocess.run(['git','-C',str(repo),'lfs','ls-files'],text=True,capture_output=True).stdout
+    out=subprocess.run(['git','-C',str(repo),'lfs','ls-files'],text=True,capture_output=True,check=True).stdout
     return [f for f in (line.split(maxsplit=2) for line in out.splitlines()) if len(f)==3 and f[1]=='-']
 def repair(checkout):
     """An interrupted fetch leaves a submodule with a wiped index or pointer text and 'submodule update'
@@ -29,7 +29,7 @@ def repair(checkout):
     for repo in [checkout,*submodules(checkout)]:
         name=repo.relative_to(checkout) or '.'
         if repo!=checkout and subprocess.run(['git','-C',str(repo),'status','--porcelain'],text=True,
-                                             capture_output=True).stdout.strip():
+                                             capture_output=True,check=True).stdout.strip():
             print(f'Repairing the interrupted checkout of {name}',flush=True)
             run(['git','-C',str(repo),'checkout','-f','HEAD'],stdout=subprocess.DEVNULL)
         if pointers(repo):

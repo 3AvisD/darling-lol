@@ -280,11 +280,14 @@ def recover(prefix, proc_root=Path('/proc'), window_check=visible_client_window,
     _signal_tree(prefix, identities, order, signal.SIGKILL, kill, proc_root)
     leftovers = wait_for_exit(prefix, identities, proc_root, sleep)
     if leftovers:
-        parents = sorted({parent_pid(proc_root / str(pid)) for pid in leftovers} - {None})
-        print('recover-stale-client: %d process(es) still present after SIGKILL '
-              '(parent PID(s): %s); the guest launchd reaps untracked zombies within '
-              'seconds' % (len(leftovers), ', '.join(str(p) for p in parents) or 'unknown'),
-              file=out, flush=True)
+        details = [
+            'PID %d state=%s parent=%s' % (
+                pid, process_state(proc_root / str(pid)) or 'unknown',
+                parent_pid(proc_root / str(pid)))
+            for pid in leftovers
+        ]
+        print('recover-stale-client: %d process(es) still present after SIGKILL: %s' %
+              (len(leftovers), '; '.join(details)), file=out, flush=True)
     return 0
 
 

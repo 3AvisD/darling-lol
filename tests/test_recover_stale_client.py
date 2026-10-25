@@ -149,7 +149,8 @@ class RecoverStaleClientTests(unittest.TestCase):
         result, killed, output = self.run_recover(on_kill=survivor)
         self.assertEqual(result, 0)
         self.assertIn('still present after SIGKILL', output)
-        self.assertIn('parent PID(s): 0', output)
+        self.assertIn('PID 12 state=S parent=0', output)
+        self.assertNotIn('launchd reaps', output)
 
     def test_reused_pid_is_not_reported_as_a_leftover(self):
         folder = self.process(12, 'mldr', [CLIENT], self.client_env())
