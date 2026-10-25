@@ -440,7 +440,7 @@ diff --git a/src/IOSurfaceRoot.mm b/src/IOSurfaceRoot.mm
 index d7e6fab..f47889f 100644
 --- a/src/IOSurfaceRoot.mm
 +++ b/src/IOSurfaceRoot.mm
-@@ -21,13 +21,33 @@
+@@ -21,13 +21,34 @@
  #include "iokitd.h"
  #include "IOSurface.h"
  #include "IODisplayConnectX11.h"
@@ -467,7 +467,8 @@ index d7e6fab..f47889f 100644
 +		m_display = EGL_NO_DISPLAY;
 +		std::cerr << "iokitd: cannot open X display "
 +			<< (std::getenv("DISPLAY") ? std::getenv("DISPLAY") : "(DISPLAY unset)")
-+			<< "; X11 surface acceleration disabled, set XAUTHORITY to a readable cookie"
++			<< " or its :0 fallback; X11 surface acceleration disabled, set XAUTHORITY to a "
++			<< "readable cookie"
 +			<< std::endl;
 +		return;
 +	}

@@ -436,9 +436,9 @@ The installer adds a CarbonCore framework override and the matching absolute Cor
 
 ## `iokitd` restarts when the X display is not accessible
 
-`DISPLAY` can name an X server that rejects the connection, which is what an unset or stale `XAUTHORITY` does on a server, over SSH, or in a `sudo` session that dropped the cookie. `iokitd` then has no Xlib display and previously still called into EGL with a null display, so the process faulted and launchd restarted it in a loop while `/tmp/lolsig.log` filled with frames ([#140](https://github.com/lucannez64/darling-lol/issues/140)).
+`DISPLAY` can name an X server that rejects the connection, which is what an unset or stale `XAUTHORITY` does on a server, over SSH, or in a `sudo` session that dropped the cookie. `iokitd` opens `DISPLAY` and then falls back to `:0`, so the display is missing only when both fail. Previously it still called into EGL with a null display, so the process faulted and launchd restarted it in a loop while `/tmp/lolsig.log` filled with frames ([#140](https://github.com/lucannez64/darling-lol/issues/140)).
 
-`iokitd` now checks the display before EGL. Without a usable display it prints one line (`iokitd: cannot open X display …; X11 surface acceleration disabled`) and keeps running, so `darling shell` starts instead of crash-looping. Surfaces then fail with `KERN_FAILURE`, which means the guest has no GPU rendering: export a cookie the user running Darling can read and start again, for example:
+`iokitd` now checks the display before EGL. When neither `DISPLAY` nor the `:0` fallback can be opened it prints one line (`iokitd: cannot open X display … or its :0 fallback; X11 surface acceleration disabled`) and keeps running, so `darling shell` starts instead of crash-looping. Surfaces then fail with `KERN_FAILURE`, which means the guest has no GPU rendering: export a cookie the user running Darling can read and start again, for example:
 
 ```sh
 export XAUTHORITY=/run/user/$(id -u)/xauth
@@ -446,7 +446,7 @@ export XAUTHORITY=/run/user/$(id -u)/xauth
 XAUTHORITY=$(ls /var/run/sddm/* | head -1) DISPLAY=:0 EGL_PLATFORM=x11 darling shell echo hola
 ```
 
-`bash tools/env-check.sh` now probes the display with `xdpyinfo` in the environment Darling inherits and warns when it cannot open it. That check is advisory: without X11/EGL the runtime still boots, but the game cannot render.
+`bash tools/env-check.sh` now probes the display with `xdpyinfo` in the environment Darling inherits, tries the `:0` fallback that `iokitd` uses, and warns only when both fail. That check is advisory: without X11/EGL the runtime still boots, but the game cannot render.
 
 ## Blocky video or flickering startup logo
 
