@@ -2,6 +2,11 @@
 # Launch Riot Client using the Darling runtime, without library injection.
 # Darling supplies Xlib Display pointers to EGL, so select X11 explicitly.
 set -eu
+# Native MangoHud uses the guest PID against the host /proc view and can abort
+# in GPU_fdinfo::find_fd (issue #38). Disable inherited implicit activation
+# before any helper can start Darling, including first-time installation.
+unset MANGOHUD
+export DISABLE_MANGOHUD=1
 # Native guest crashes created large system core files and exhausted this disk.
 # Address-only diagnostics suffice; bound this runner and its new namespace.
 if [ "${RCLOL_CORE_DUMPS:-0}" != 1 ]; then
@@ -44,11 +49,19 @@ unset RCLOL_UX_ARG2 RCLOL_UX_ARG2_SLOT
 # Explicit 0 or an empty value selects the CPU fallback for diagnostics.
 # DARLING_METAL_MAC_GPU_NAME reports the MacBookPro16,1 GPU of the host vendor (AMD or Intel) as
 # MTLDevice.name, matching the model IOKit reports; memory figures stay the host's.
+# VRAM clamp: honor an explicit DARLING_METAL_VRAM_MB, otherwise pin 4096 MB so the
+# 5500M identity does not leak the host card's heap size.
+export DARLING_METAL_VRAM_MB="${DARLING_METAL_VRAM_MB:-4096}"
 for option in RCLOL_GPU_DIRECT_PRESENT RCLOL_GPU_DIRECT_ASYNC RCLOL_GPU_DIRECT_VSYNC DARLING_CA_PRESENT_AT_COMMIT DARLING_CA_SKIP_LOCAL_IOSURFACE_RENDER RCLOL_FORWARD_MOUSE_MOVED RCLOL_MOUSE_CONFINEMENT DARLING_METAL_MAC_GPU_NAME; do
  eval 'value=${'"$option"'-1}'
  case "$value" in 0|'') unset "$option";; *) export "$option=$value";; esac
 done
 prefix=$prefix_dir
+# Resolve the loader before the environment filter replaces PATH with the Mac layout.
+darling_bin=$(command -v darling) || {
+ echo 'darling loader not found in PATH' >&2
+ exit 1
+}
 # RIOT_GUEST_HOME is host-side; DYLD paths must be relative to the guest root.
 case "$guest_home" in
  "$prefix"/*) guest_path=/${guest_home#"$prefix"/} ;;
@@ -166,6 +179,6 @@ exec python3 "$runner_dir/exec-guest.py" env -u ELECTRON_RUN_AS_NODE -u DYLD_INS
   DYLD_LIBRARY_PATH="${DYLD_LIBRARY_PATH:-$guest_path/RuntimeLibraries}" \
   DYLD_FRAMEWORK_PATH="${DYLD_FRAMEWORK_PATH:-$guest_path/RuntimeFrameworks}" \
   DARLING_XSHM_LIBRARY="${DARLING_XSHM_LIBRARY:-$guest_path/libDarlingXShm.dylib}" \
-  darling "$A" --region="${RCLOL_REGION:-EUW}" --locale="${RCLOL_LOCALE:-en_GB}" \
+  "$darling_bin" "$A" --region="${RCLOL_REGION:-EUW}" --locale="${RCLOL_LOCALE:-en_GB}" \
     "$@" \
     --log-dir="$guest_path/Library/Logs/Riot Games/Riot Client"
