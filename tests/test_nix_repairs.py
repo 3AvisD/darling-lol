@@ -440,6 +440,7 @@ class SessionTests(unittest.TestCase):
             self.assertFalse((root / 'other-prefix').exists())
 
     def test_first_run_eof_is_actionable_and_desktop_requests_terminal(self):
+        """Report missing terminal input without setup and package a terminal launcher."""
         with tempfile.TemporaryDirectory(prefix='nix-session-test-') as directory:
             root = Path(directory)
             (root / 'scripts').mkdir()
@@ -453,7 +454,8 @@ class SessionTests(unittest.TestCase):
             self.assertIn('terminal', result.stderr.lower())
             self.assertFalse((root / 'build').exists())
         self.assertIn('Terminal=true', (ROOT / 'flake.nix').read_text())
-        self.assertIn('checks.${system}.packaging', (ROOT / 'flake.nix').read_text())
+        self.assertIn('packaging = pkgs.runCommand "darling-lol-packaging-tests"',
+                      (ROOT / 'flake.nix').read_text())
 
     def test_rootless_update_refuses_live_marker_without_build_or_stop(self):
         with tempfile.TemporaryDirectory(prefix='nix-update-idle-') as directory:
@@ -491,6 +493,9 @@ class SessionTests(unittest.TestCase):
                 path.chmod(0o755)
             (scripts / 'nix-state.py').write_text('import os, sys\nwith open(os.environ["TEST_LOG"], "a") as f: f.write(sys.argv[1]+"\\n")\n')
             (tools / 'stop-darling-runtime.py').write_text('import os\nwith open(os.environ["TEST_LOG"], "a") as f: f.write("stop\\n")\n')
+            (root / 'tools').mkdir()
+            (root / 'tools/configure-darling-platform.py').write_text(
+                'import os, sys\nwith open(os.environ["TEST_LOG"], "a") as f: f.write("identity " + " ".join(sys.argv[1:]) + "\\n")\n')
             for name in ['cmake', 'sudo', 'nix-store']:
                 path = bin_dir / name
                 path.write_text('#!/bin/sh\necho ' + name + ' >> "$TEST_LOG"\n' +
@@ -502,12 +507,15 @@ class SessionTests(unittest.TestCase):
             result = run('sh', str(scripts / 'update.sh'), env=env)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(log.read_text().splitlines(),
-                             ['nix-store', 'invalidate-base', 'build', 'stop', 'cmake', 'stamp-base', 'overlays'])
+                             ['nix-store', 'invalidate-base', 'build', 'stop', 'cmake', 'stamp-base', 'overlays',
+                              # The shared serial/UUID replacement writes the prefix, so Darling is stopped first.
+                              'stop', 'identity --replace-known-defaults --write'])
             log.write_text('')
             env['INSTALL_EXIT'] = '23'
             self.assertEqual(run('sh', str(scripts / 'update.sh'), env=env).returncode, 23)
             self.assertNotIn('stamp-base', log.read_text())
             self.assertNotIn('overlays', log.read_text())
+            self.assertNotIn('identity', log.read_text())
             self.assertNotIn('sudo', log.read_text())
 
     def test_rootless_update_never_uses_sudo_and_stamps_only_after_success(self):

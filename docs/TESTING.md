@@ -23,11 +23,11 @@ c++ -std=c++17 -I build/darling-src/src/external/metal/private-include \
 build/test-metal-device-info
 ```
 
-Expected: `METAL_DEVICE_INFO failures=0 pass=1`. It covers how `MTLDevice.name` turns Vulkan names into macOS style (`AMD Radeon RX 6800 XT (RADV NAVI21)` becomes `AMD Radeon RX 6800 XT`, `Intel(R) UHD Graphics 630 (CML GT2)` becomes `Intel UHD Graphics 630`, NVIDIA names stay as they are), the `DARLING_METAL_VRAM_MB` parser, and the working-set sum over Vulkan heaps.
+Expected: `METAL_DEVICE_INFO failures=0 pass=1`. It covers how `MTLDevice.name` turns Vulkan names into macOS style (`AMD Radeon RX 6800 XT (RADV NAVI21)` becomes `AMD Radeon RX 6800 XT`, `Intel(R) UHD Graphics 630 (CML GT2)` becomes `Intel UHD Graphics 630`, NVIDIA names stay as they are), the `DARLING_METAL_VRAM_MB` parser, the working-set sum over Vulkan heaps, and a non-zero `registryID`. `python3 -m unittest tests.test_metal_device_info` runs the same check against the header in `patches/metal.patch`, so it also works without a prepared source tree; CI runs it.
 
 The LLVM version check compiles Iridium's actual dynamic loader against small stub libraries. It verifies that a matching major initializes, older/newer majors produce a version mismatch, and a missing library fails initialization. It does not start Darling. The native AIR translator (`python3 tools/build-riot-air-check.py --native`) selects both headers and the shared library from the same `llvm-config`; its build prints those paths so shader results can be attributed to the tested LLVM installation.
 
-The patch check uses temporary base indexes and does not reset or modify the source checkout. The launcher check uses stub commands and never starts or contacts Riot or Darling. It checks installed-client and first-time-installer launches, strips inherited `DYLD_INSERT_LIBRARIES` even with the old VPX opt-in set, and preserves Darling runtime library/framework paths. The memory-installer check imports the installer and exercises its policy (default source is the prepared artifact; the artifact is never a destination of a different library) in temporary directories. The Foundation-installer check does the same for the overlay installer: it seeds a temporary framework from a stub SDK, replaces `Versions/C/Foundation`, keeps the standard symlinks, stages a backup, treats a re-run as current and refuses a non-Mach-O source. The installer handoff mock covers 28 scenarios, including HTTP 409, interrupted verification and preserving active downloads.
+The patch check uses temporary base indexes and does not reset or modify the source checkout. The launcher check uses stub commands and never starts or contacts Riot or Darling. It checks installed-client and first-time-installer launches, strips inherited `DYLD_INSERT_LIBRARIES` even with the old VPX opt-in set, preserves Darling runtime library/framework paths, and checks that host file descriptors the launcher inherited (including multi-digit ones) are closed before the guest starts. The memory-installer check imports the installer and exercises its policy (default source is the prepared artifact; the artifact is never a destination of a different library) in temporary directories. The Foundation-installer check does the same for the overlay installer: it seeds a temporary framework from a stub SDK, replaces `Versions/C/Foundation`, keeps the standard symlinks, stages a backup, treats a re-run as current and refuses a non-Mach-O source. The installer handoff mock covers 28 scenarios, including HTTP 409, interrupted verification and preserving active downloads.
 
 ## NSURLSession lifecycle regression
 
@@ -78,6 +78,7 @@ Host-only checks, which do not start Darling:
 python3 tools/riot-cdn-dns-offline-check.py
 python3 -m unittest discover -s tests -p 'test_hidden_riot_recovery.py'
 python3 -m unittest discover -s tests -p 'test_desktop_run.py'
+python3 -m unittest discover -s tests -p 'test_desktop_entry.py'
 python3 -m unittest discover -s tests -p 'test_urlsession_runner.py'
 ```
 
@@ -87,8 +88,24 @@ insensitivity, A queries, non-CDN names and misleading domain suffixes without
 sending a DNS query. Recovery tests use fake `/proc` entries and mock every
 compositor/shutdown command. The desktop test checks exit/argument forwarding,
 append-only output and tightening an existing public log to mode 0600. The
-runner test uses a fake `darling` executable to verify loopback fixtures and
+desktop-entry test renders the helper against a disposable `HOME` and checks
+the neutral fields, Exec quoting, icon paths, that only launcher artifacts
+this project created are removed, and that the checkout and packaged entries
+share their identity fields. The runner test uses a fake `darling` executable to verify loopback fixtures and
 private-prefix-only shutdown/cleanup.
+
+With the pinned Darling sources available, run the host resolver regression:
+
+```sh
+python3 -m unittest discover -s tests -p 'test_host_dns.py' -v
+```
+
+It compiles the actual patched vchroot implementation in its Linux test mode
+and reads temporary resolver files through absolute and relative host symlinks.
+It checks atomic file replacement, symlink retargeting, guest DNS overrides and
+guest absolute-link scope. A CMake fixture verifies that both install modes
+replace an older Google resolver file with the host link. No Darling session or
+DNS traffic is started.
 
 ## CoreText font-list and AppKit resize regressions
 
@@ -119,6 +136,121 @@ Expected: `CORETEXT_FONT_LIST pass=1` with nonzero family/face counts (306/1124 
 
 The font probe reproduces Chromium's installed-family enumeration, mandatory family matching and localized-name lookup with a null language output. It checks ownership of the single-match result and that a nonexistent mandatory family produces no substitute. The resize probe checks backing-layer bounds immediately after frame/bounds changes, including a scaled view and a child layer, without relying on input or coordinate conversion to refresh them. It also verifies that native parent size is current during child layout, and that adding an overlay sibling after the content view does not redirect subsequent content resizing into that overlay. The old sibling selection left content at 1600×900 while stretching the 30×20 overlay to 1280×720; the corrected layout resizes the content and preserves the overlay. Before the fixes, these checks report a stale 1280×720 layer and native parent after a 1600×900 resize. The `FRAME_SIZE_HOOK` check uses a subclass whose `setFrameSize:` publishes its viewport size. It checks growth and shrinkage through parent autoresizing, direct `setFrame:`, and direct `setFrameSize:`. Before component-setter dispatch was corrected only the final direct size setter reached the subclass (one callback); afterward all four updates do, with current geometry visible inside the callback. No probe launches or contacts Riot/League. The user confirmed that the language dropdown and League window resizing work after the final X11 correction (2026-10-15). The practice-tool crash remains unresolved.
 
+### Local event monitors and client dragging
+
+`python3 tools/build-riot-x11-runtime.py` builds
+`build/riot-event-monitors-check`. With patched AppKit installed and clients
+closed, run:
+
+```sh
+darling shell env DYLD_LIBRARY_PATH=/Users/me/RuntimeLibraries \
+  DYLD_FRAMEWORK_PATH=/Users/me/RuntimeFrameworks \
+  /Volumes/SystemRoot/path/to/darling-lol/build/riot-event-monitors-check
+```
+
+Expected: nine `PASS` lines and exit status 0. This independent probe tests
+multiple monitors, mask filtering, removal, consumption, event replacement,
+self-removal, and the in-flight snapshot when another monitor is removed.
+Monitor order is unspecified and is deliberately not asserted. It dispatches
+only synthetic events to its own unmapped window.
+The same source runs against native macOS AppKit:
+
+```sh
+clang -fblocks -framework AppKit tools/riot-event-monitors-check.m \
+  -o /tmp/riot-event-monitors-check
+/tmp/riot-event-monitors-check
+```
+
+Native reference: macOS 26.6.2. LeagueClientUx uses local
+monitors for custom window movement; intercepting a fixed titlebar strip instead
+would bypass its own drag policy and risk stealing its window-control clicks.
+For a live regression check, drag its header, drag ordinary content (which must
+not move the window), minimize and restore it, and check Riot Client header
+dragging separately. No match is required.
+
+### X11 window decorations
+
+`python3 tools/build-riot-x11-runtime.py` also builds
+`build/riot-window-decorations-check`. Install and activate both the patched
+AppKit and X11 backend before running it, with clients and the game closed:
+
+```sh
+darling shell env DYLD_LIBRARY_PATH=/Users/me/RuntimeLibraries \
+  DYLD_FRAMEWORK_PATH=/Users/me/RuntimeFrameworks \
+  /Volumes/SystemRoot/path/to/darling-lol/build/riot-window-decorations-check
+```
+
+Expected: `WINDOW_DECORATIONS_CHECK cases=10 pass=1`. The independent Cocoa
+probe reads `_MOTIF_WM_HINTS` on its own unmapped native windows. It covers a
+normal titled window, hidden title alone, hidden plus transparent titlebar,
+both reverse transitions, untitled masks with additional flags, switching to
+borderless after creation, native-window recreation, and properties set before
+the native window exists. It sends no input, maps no windows and does not
+launch or contact Riot/League. Check the success marker, not only the launcher
+exit status: some Darling versions do not propagate a guest assertion failure.
+
+Before the fix the hidden/transparent case fails. With the corrected overlays,
+the ten cases passed on KDE Wayland/Xwayland. Passive inspection of the reopened
+Riot Client also confirmed the no-decoration hint and identical compositor frame
+and client dimensions (1536×864), instead of the previous 28-pixel titlebar.
+This validates the Riot Client window, not every LeagueClientUx or game mode.
+
+### NSOpenPanel Open/Cancel (issue #85)
+
+`python3 tools/build-riot-openpanel-check.py` builds
+`build/riot-openpanel-check`. Install the patched AppKit first, with clients and
+the game closed. The probe opens its own directory chooser in a fresh `/tmp`
+folder containing one subfolder and needs no Riot/League client:
+
+```sh
+P=/Volumes/SystemRoot/path/to/darling-lol/build/riot-openpanel-check
+E="env DYLD_LIBRARY_PATH=/Users/me/RuntimeLibraries DYLD_FRAMEWORK_PATH=/Users/me/RuntimeFrameworks"
+for m in cancel open-selected open-none; do darling shell $E $P --auto $m; done
+darling shell $E $P --interactive
+```
+
+Each `--auto` mode waits 1.5 s, then clicks the panel's own Cancel or Open
+button (selecting the subfolder first for `open-selected`), and checks that
+`runModal` returned, the result code and URL, and that the panel is gone. A
+15 s watchdog on a separate thread reports a hang. Expected, one line per mode:
+
+```
+OPENPANEL_CHECK mode=cancel result=PASS code=0 ...
+OPENPANEL_CHECK mode=open-selected result=PASS code=1 url=/tmp/openpanel-check.XXXXXX/subfolder ...
+OPENPANEL_CHECK mode=open-none result=PASS code=1 url=/tmp/openpanel-check.XXXXXX ...
+```
+
+A failure prints `result=FAIL ... problems=...` (`HANG` when `runModal` never
+returned) and exits non-zero. `--interactive` shows the panel for manual clicks
+and prints `OPENPANEL_CHECK mode=interactive result=RETURNED code=... url=...`
+once it closes. As with the other probes, check the printed line rather than
+only the launcher exit status.
+
+### NSSavePanel Finder tags (`setTagNames:` / `tagNames`)
+
+`python3 tools/build-riot-save-panel-tag-check.py` builds
+`build/riot-save-panel-tag-check`. Install the patched AppKit first, with clients
+and the game closed. The probe checks selector availability, inheritance, and
+safe no-op semantics without launching any client or creating window fixtures:
+
+```sh
+P=/Volumes/SystemRoot/path/to/darling-lol/build/riot-save-panel-tag-check
+E="env DYLD_LIBRARY_PATH=/Users/me/RuntimeLibraries DYLD_FRAMEWORK_PATH=/Users/me/RuntimeFrameworks"
+darling shell $E $P
+```
+
+Expected output:
+
+```
+SAVE_PANEL_TAG class=NSSavePanel selectors=1 inherited=1 values=1 pass=1
+SAVE_PANEL_TAG class=NSOpenPanel selectors=1 inherited=1 values=1 pass=1
+SAVE_PANEL_TAG_CHECK pass=1
+```
+
+Cocotron does not persist Finder tag metadata or provide a tag UI. `setTagNames:`
+safely ignores input and `tagNames` returns an empty `NSArray` to prevent
+unrecognized-selector crashes from callers (such as Electron file dialogs).
+
 ### Presentation publisher handoff
 
 With clients closed, run `build/riot-client-resize-check --handoff` through Darling with the normal runtime overrides. This creates an owned window and two fixture frame slots. The live software owner first supplies a 1280×720 main frame, then switches to a 262×131 popup; another slot supplies the resized main frame without the software flag. The test samples its own window beyond the original frame extent and checks generation colors across growth and shrinkage. The old selector reports black at the 1600×900 sample; the correction passes all four sizes. Repeat with `RCLOL_XSHM=0` and with `DARLING_XSHM_LIBRARY` pointing to the normal transport to cover both paths. The fixtures remove their own frame slots on exit; they do not read client pixels or send input.
@@ -128,6 +260,12 @@ With clients closed, run `build/riot-client-resize-check --handoff` through Darl
 `python3 build/runtime/tools/build-riot-client-resize-check.py` builds an independent AppKit window and IOSurface publisher. With clients closed and a display at least 1600×900, run it with the same framework/library overrides and `DARLING_XSHM_LIBRARY=/Users/me/libDarlingXShm.dylib`, `DARLING_CA_PRESENT_AT_COMMIT=1`, `DARLING_CA_SKIP_LOCAL_IOSURFACE_RENDER=1`. The default mode publishes software pixels. For the GPU path add `--gpu` and set `RCLOL_GPU_DIRECT_PRESENT=1 RCLOL_GPU_DIRECT_ASYNC=1` in the guest environment.
 
 The probe cycles through 1280×720, 1600×900, 1024×576 and 1280×720. Each stage changes the frame color and samples its own X11 window near the bottom-right corner, beyond the original frame's extent when growing. It waits up to 2.5 seconds for presentation and prints `RESIZE_PIXEL ... pass=1` for every stage. This verifies presented pixels rather than only view properties. Success does not reproduce League's own resize callbacks; the reported League UI failure remains open, with the opt-in [geometry trace](TROUBLESHOOTING.md#language-dropdown-closes-riot-or-client-resize-leaves-a-clipped-ui) needed to locate the remaining mismatch.
+
+### X11 drag and drop
+
+`python3 build/runtime/tools/build-riot-x11-drag-check.py` builds an independent AppKit check for the in-process drag loop that the X11 backend uses (`-[NSWindow dragImage:at:offset:event:pasteboard:source:slideBack:]`). It needs the cocotron AppKit built with the drag-and-drop patch. With clients closed, run `build/riot-x11-drag-check` through Darling with the same framework/library overrides as the other probes. It opens its own source and destination windows, posts synthetic events to its own application queue, and does not inject X11 input or touch other clients.
+
+It prints `PASS` or `FAIL` for seven cases: a drop onto a destination without `prepareForDragOperation:` (the default must proceed), a drag ending outside any destination, Escape cancel, two drags back to back with a source lacking `pasteboardChangedOwner:`, main-queue blocks and run loop timers firing during the drag, a mouse-down reaching a view afterwards, and a destination view removed from its window mid-drag. Each drag must call `draggedImage:endedAt:operation:` exactly once. The process exits nonzero on any failure, and a case that makes no progress for 20 seconds is reported as a hang, which is the original failure mode. Success covers the AppKit drag loop only; it does not exercise Chromium's own drag source.
 
 ## Legacy operating-system version query
 
@@ -181,7 +319,7 @@ build/riot-host-receive-check
 python3 tools/riot-launcher-offline-check.py
 ```
 
-Expected: `warm_empty_allocations=0 single_packet_allocations=2`, correct credentials, descriptor ownership/CLOEXEC, sender addresses, multiple batches, truncation flags, callback reentrancy and exception cleanup. The old receive implementation makes 32 allocations for a warmed empty receive and 64 for a single-packet receive in the same fixture. These are allocation counts, not an FPS benchmark. The launcher check uses stub commands and never starts or contacts Riot or Darling. It checks installed-client and first-time-installer launches, strips inherited `DYLD_INSERT_LIBRARIES` even with the old VPX opt-in set, and preserves Darling runtime library/framework paths.
+Expected: `warm_empty_allocations=0 single_packet_allocations=2`, correct credentials, descriptor ownership/CLOEXEC, sender addresses, multiple batches, truncation flags, callback reentrancy and exception cleanup. The old receive implementation makes 32 allocations for a warmed empty receive and 64 for a single-packet receive in the same fixture. These are allocation counts, not an FPS benchmark. The launcher check uses stub commands and never starts or contacts Riot or Darling. It checks installed-client and first-time-installer launches, strips inherited `DYLD_INSERT_LIBRARIES` even with the old VPX opt-in set, preserves Darling runtime library/framework paths, and checks that host file descriptors the launcher inherited (including multi-digit ones) are closed before the guest starts.
 
 The same source passed AddressSanitizer/UndefinedBehaviorSanitizer and leak detection. Allocation counts depend on this fixture/compiler/library; preserve the no-wasted-slot property rather than interpreting them as game performance. See [setup](SETUP.md#updating-an-existing-runtime) for server build/install/activation.
 
@@ -527,3 +665,76 @@ launch, window placement, click alignment and edge panning before rollout.
 
 After installing the tested X11 and CoreGraphics binaries locally, the user
 reported that everything was working (2026-10-16). Fullscreen policy was unchanged.
+
+## VRR presentation regression (#46)
+
+```sh
+python3 -m unittest discover -s tests -p 'test_x11_vrr.py'
+```
+
+The host fixtures exercise the patched eligibility, X11 property updates and
+EGL surface ownership transitions. They cover hidden/titled/partial views,
+multiple views, parent recreation, child fallback and current-context handling.
+
+Build `build-riot-coregraphics-runtime.py`, `build-riot-x11-runtime.py` and
+`build-riot-metal-presentation.py` together. Stage all three updated frameworks
+(CoreGraphics, AppKit's X11 backend, QuartzCore) when testing isolated binaries.
+Run `riot-metal-presentation-check` with `RIOT_PRESENTATION_PARENT=1` to create
+an owned borderless game-like window. It verifies the parent drawable is
+borrowed. Add `RIOT_PRESENTATION_RESIZE=1` to verify fallback to a child at
+half width and borrowing the parent again when restored. Add
+`RIOT_PRESENTATION_NESTED=1` for nested layers.
+The default probe still exercises the independent child-window path.
+
+For physical VRR validation, enable adaptive sync in the monitor and desktop,
+then manually test fullscreen and borderless League with a frame cap inside
+the monitor's VRR range (for example 157 FPS on a 165 Hz display), with VSync
+off. Check the monitor's live refresh display as well as the game FPS counter.
+Also test leaving fullscreen, restoring it, resizing, and alt-tab. Report GPU,
+driver, compositor and session type. A stable FPS counter or the X11 property
+alone does not prove that the monitor is using variable refresh.
+
+Local native validation on 2026-10-19 passed all three modes (child, parent
+with resize, nested parent with resize), including Vulkan-to-GL pixel readback
+and ten presentations per mode, using staged frameworks in a private prefix.
+Physical VRR and in-game performance on the reporter's Mutter setup remain
+unverified.
+
+## Metal VSync regression (#46)
+
+```sh
+python3 -m unittest discover -s tests -p 'test_metal_vsync.py'
+```
+
+These host checks compile the patched layer-tree policy, flush body and CGL
+swap methods against inert fixtures. They cover nested layers, VSync toggles,
+shared-window requests, independent contexts, late attachment and failed
+context/interval changes. They do not measure physical display refresh.
+
+For manual validation after updating with the clients closed, compare the
+same scene with in-game VSync on and off. With VSync on, presentation should
+follow the display/compositor cadence; with it off, the game's frame cap
+should continue to work. Record monitor refresh, compositor, X11/Xwayland,
+GPU/driver and window mode. The window presentation probe above checks the
+API wiring; an in-game/compositor timing comparison remains necessary.
+
+## Combined VSync and VRR testing
+
+The `test/vsync-vrr` branch combines PRs #81 and #88, resolving their shared
+compositor-patch and presentation-probe changes. The probe toggles
+`displaySyncEnabled` and checks the CGL interval in child, parent and nested
+parent modes; the parent modes also support resize fallback/restoration.
+All three native modes passed locally in a private prefix, together with ten
+host regression checks and validation of all 31 component patches.
+
+After closing the game and both clients:
+
+```sh
+git fetch origin
+git switch --track origin/test/vsync-vrr
+./scripts/update.sh
+```
+
+Test VSync with desktop VRR disabled, then test VRR with VSync off and a cap
+inside the monitor's adaptive range. Finally test both enabled. Report game
+FPS and the monitor's live refresh reading separately.

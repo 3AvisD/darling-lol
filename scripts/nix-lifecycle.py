@@ -28,8 +28,13 @@ def main():
     idle = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(idle)
     prefix = Path(os.environ['DPREFIX']).resolve()
+    # darling-lol --stop creates this file; the launcher removes it.
+    stop_request = Path(os.environ['DARLING_WORKSPACE']) / '.stop-request'
     child = None
     interrupted = 0
+
+    def stopping():
+        return interrupted or stop_request.exists()
 
     def interrupted_by(signum, _frame):
         nonlocal interrupted
@@ -46,16 +51,18 @@ def main():
     result = 1
     try:
         child = subprocess.Popen(sys.argv[1:])
-        result = child.wait()
-        if result < 0:
-            result = 128 - result
+        # Poll rather than wait: guest processes can outlive the command, and a
+        # signal or stop request must still reach the shutdown below.
+        while child.poll() is None and not stopping():
+            time.sleep(0.5)
     except OSError as error:
         warn(f'Cannot start client: {error}')
     finally:
         # A launcher can return while guest clients remain. Do not tear down
-        # their server, or discard the only namespace capable of shutting it down.
+        # their server, or discard the only namespace capable of shutting it down,
+        # unless the user asked to stop.
         last_error = None
-        while True:
+        while not stopping():
             try:
                 if not idle.client_active(prefix):
                     break
@@ -66,6 +73,8 @@ def main():
                          'Exit clients to allow safe shutdown.')
                     last_error = str(error)
             time.sleep(1)
+        if stopping():
+            warn('Stopping Darling.')
         while True:
             try:
                 shutdown = subprocess.run(['bash', str(scripts / 'darling-rootless.sh'), 'shutdown']).returncode
@@ -74,10 +83,25 @@ def main():
                 shutdown = 1
             if not shutdown:
                 break
+            try:
+                # Nothing is left to shut down, for example after the server crashed.
+                if not idle.server_running(prefix):
+                    break
+            except (OSError, ValueError):
+                pass
             warn(f'Darling namespace-local shutdown failed (status {shutdown}); '
                  'retaining the original namespace and retrying in 5 seconds. '
                  'Keep this terminal open.')
             time.sleep(5)
+        if child is not None:
+            # Without its server the command exits; it is our own child to kill.
+            try:
+                result = child.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                result = child.wait()
+            if result < 0:
+                result = 128 - result
         result = interrupted or result
     return result
 

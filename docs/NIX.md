@@ -57,8 +57,15 @@ for prompts and session output.
 
 Keep the terminal open while clients are running and until cleanup completes.
 Default and installer sessions wait for clients to exit, then shut Darling down
-in the same namespace. A failed shutdown is retried without discarding that
-namespace.
+in the same namespace. Crash handlers do not count as clients, because they do
+not exit on their own under Darling. A failed shutdown is retried without
+discarding that namespace.
+
+To end a session while clients are still running, press Ctrl+C in its terminal,
+close the terminal, or run `darling-lol --stop` from anywhere. Each of these
+makes the session shut Darling down and exit. If the session does not exit
+within 30 seconds, `darling-lol --stop` kills the prefix's `darlingserver`
+itself. It also stops a server that outlived its session.
 
 ## Install permanently
 
@@ -83,6 +90,9 @@ darling-lol
 darling-lol --installer
 darling-lol-shell
 ```
+
+The application menu entry is `Darling Launcher`, and `darling-launcher` is an
+alias for `darling-lol` for scripts that prefer the neutral name.
 
 If the desktop entry does not appear, ensure your desktop session includes
 `~/.nix-profile/share` in `XDG_DATA_DIRS`, then log out and back in. Non-NixOS
@@ -198,13 +208,51 @@ nix run github:lucannez64/darling-lol#shell
 Use the launcher-provided shell rather than entering the raw FHS environment.
 If you start Darling manually in this shell, run `darling shutdown` there
 before exiting. A separately launched shell cannot reconnect to an existing
-Darling namespace.
+Darling namespace; `darling-lol --stop` can still stop it.
+
+### Text fonts
+
+The FHS environment bundles Liberation and DejaVu text fonts and uses its own
+fontconfig configuration and standard aliases. It does not depend on fonts in
+the host's `/usr/share/fonts`, which the FHS environment replaces. Fonts in your
+user font directories remain available. This also prevents an icon-only user
+font inventory from becoming the only fallback for ordinary text.
+
+The FHS environment selects the packaged fontconfig configuration and clears
+inherited `FONTCONFIG_PATH` and `FONTCONFIG_SYSROOT` overrides. Clearing the
+sysroot prevents it from redirecting the packaged configuration and font paths.
+Custom XDG font/configuration directories and legacy
+`~/.fonts` remain supported, including paths with spaces. The host configuration
+and user font files are not modified.
+
+To check font availability without starting Darling or Riot:
+
+```sh
+nix run .#default -- fc-match sans-serif
+nix run .#default -- fc-match Arial
+```
+
+These should select DejaVu Sans and Liberation Sans respectively. The standalone
+`nix build .#checks.x86_64-linux.fonts` check verifies generic and common Windows
+font aliases with both an empty home directory and icon-only user fonts. This
+checks font availability; CAPTCHA text rendering still needs manual verification
+in Riot's UI.
 
 ## Files and operational limits
 
 - Workspace: `${XDG_DATA_HOME:-$HOME/.local/share}/darling-lol`.
-- Default guest prefix: `$HOME/.darling`; set `DPREFIX` to use another prefix.
-  Explicit `DPREFIX` and `RIOT_GUEST_HOME` overrides take precedence over saved
+- Default guest prefix: `$HOME/.darling`. The prefix holds the installed
+  clients and game, about 40 GB. To keep it on another drive, close the clients
+  and run `darling-lol --set-prefix /mnt/games/league`. This moves an existing
+  prefix there and saves the path for later launches. Across filesystems it
+  copies first and removes the old prefix only after the copy completes. If the
+  path already holds a Darling prefix, it switches to it and moves nothing. The
+  path must not contain commas or colons (overlayfs uses them as separators).
+  Across filesystems the target must support `user.*` extended attributes (ext4,
+  btrfs, xfs; not NTFS or exFAT), which is checked before copying and again on
+  the finished copy. The new path is saved before the old prefix is deleted.
+  The next launch sets up the runtime in the new prefix.
+- Explicit `DPREFIX` and `RIOT_GUEST_HOME` overrides take precedence over saved
   configuration, so clear stale overrides before switching installations.
 - Package upgrades refresh managed tools and remove previously tracked obsolete
   files. Builds, the installed runtime, guest prefixes, and unmanaged files are
