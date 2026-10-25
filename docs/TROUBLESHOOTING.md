@@ -20,6 +20,29 @@ never delete a populated Riot/game prefix just to repair the launcher.
 
 Use the [setup instructions](SETUP.md) from the repository root as your ordinary user. Exit the game and both clients manually before a full installation or Darling restart. Incremental server/memory installers can replace files without interrupting processes, but their changes need a later full restart to activate.
 
+## Setup stops at preflight
+
+`scripts/build.sh` and `scripts/install-runtime.sh` now run `scripts/preflight.py` before the source fetch, the build and the per-user install. Host versions that cannot build or run the result fail in seconds with one actionable line instead of after the long steps ([#137](https://github.com/lucannez64/darling-lol/issues/137), [#138](https://github.com/lucannez64/darling-lol/issues/138), [#143](https://github.com/lucannez64/darling-lol/issues/143)):
+
+- **python** 3.10 or newer. The per-user installers hash files with a streaming helper instead of `hashlib.file_digest`, which only exists from Python 3.11, so the Ubuntu 22.04 default no longer fails at the end of the install.
+- **cmake** 3.20 or newer. The bundled indium CMakeLists requires it.
+- **git-lfs** 2.13 or newer. The pinned submodules ship libraries as LFS objects.
+- **lfs-pointer**: when `build/darling-src` is already prepared, small `.dylib`, `.a`, `.so` and `.o` files are checked for Git LFS pointer text. A pointer file links but crashes the guest, so this is a required check rather than a warning. It passes before the first fetch, when there is nothing to inspect yet.
+- **kernel** 5.14 or newer for `MADV_POPULATE_WRITE`.
+- **llvm** 16 or newer; 22 or 23 is what the patches are tested with. Iridium calls `LLVMGetVersion`, which LLVM 15 does not export, so an LLVM 15 runtime aborts as soon as Riot creates a Metal device ([#139](https://github.com/lucannez64/darling-lol/issues/139)). LLVM 16-21 builds with a warning.
+- **llvm-tools**: `llvm-objdump` and `llvm-nm`. They are now resolved as an unversioned name, as `llvm-<tool>-<N>`, or from `llvm-config --bindir`, so Ubuntu's `llvm-15-dev` no longer needs symlinks in `/usr/local/bin`.
+- **vulkan** API 1.3 and timeline semaphores. Indium rejects older devices, so this stops the setup with the version `vulkaninfo` reports. Without `vulkaninfo` it only warns, because the tool may be missing even when the driver is fine.
+- **x11** only warns: `DISPLAY` is probed with `xdpyinfo`, and the GL/EGL vendor is reported when a probe is installed. An inaccessible display is what made `iokitd` restart in a loop before [#140](https://github.com/lucannez64/darling-lol/issues/140); export `XAUTHORITY` from servers and SSH sessions. A build without a display is still valid.
+
+Run the same checks by hand, from the checkout:
+
+```sh
+python3 scripts/preflight.py
+python3 scripts/preflight.py --json
+```
+
+If a required check is stricter than your setup, `RCLOL_SKIP_PREFLIGHT=1 ./scripts/build.sh` (and the same for `scripts/install-runtime.sh`) skips the gate for that run. Include the preflight output when reporting a setup failure, and keep `--json` output when a tool needs to parse it.
+
 ## Memory installer: permission denied
 
 An earlier sudo server installation can create root-owned `build/backups`. The old memory installer tried to create `build/backups/memory-runtime` there and failed at `backup_folder.mkdir(...)`. The corrected default is a separate user-owned `build/memory-runtime-backups` directory:

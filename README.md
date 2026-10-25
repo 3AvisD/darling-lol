@@ -41,7 +41,7 @@ Game files, Riot installers, account databases, tokens, local prefixes, captures
 ## Requirements
 
 - x86-64 Linux **5.14 or newer**, an X11 session or Xwayland, and a working hardware Vulkan/OpenGL driver. AMD RADV and the NVIDIA driver (proprietary and open kernel modules) have been exercised, see [NVIDIA](docs/TROUBLESHOOTING.md#nvidia); other drivers are not validated. Hybrid laptops usually render on the integrated GPU unless started with PRIME offload. See [hybrid graphics](docs/TROUBLESHOOTING.md#hybrid-graphics-laptops-amdintel-igpu--nvidia).
-- Git + Git LFS, Bash, curl, unzip, CMake, Make, Clang/LLD, LLVM development files, a C/C++ compiler, Python 3.12+ and the Darling build dependencies. The patch includes LLVM 22/23 branch-opcode compatibility; the new PC used LLVM/Clang 23. Node.js is needed only for the offline JavaScript checks.
+- Git + Git LFS (2.13 or newer), Bash, curl, unzip, CMake 3.20+, Make, Clang/LLD, LLVM development files (16 or newer), a C/C++ compiler, Python 3.10+ and the Darling build dependencies. `scripts/build.sh` and `scripts/install-runtime.sh` run `scripts/preflight.py` first and stop on a version that cannot build or run the result; `RCLOL_SKIP_PREFLIGHT=1` bypasses that gate. The patch includes LLVM 22/23 branch-opcode compatibility, and LLVM 22 or 23 is what the Metal overlays are tested with. Node.js is needed only for the offline JavaScript checks.
 - X11/XCB/SHM development files for the current runtime helpers.
 - Enough free disk for Darling sources/build, Git LFS assets and the game: budget at least 50 GB. Building is substantially larger than this source-only repository.
 
