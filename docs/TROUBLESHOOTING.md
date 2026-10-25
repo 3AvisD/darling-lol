@@ -31,7 +31,7 @@ Use the [setup instructions](SETUP.md) from the repository root as your ordinary
 - **kernel** 5.14 or newer for `MADV_POPULATE_WRITE`.
 - **llvm** 16 or newer; 22 or 23 is what the patches are tested with. Iridium calls `LLVMGetVersion`, which LLVM 15 does not export, so an LLVM 15 runtime aborts as soon as Riot creates a Metal device ([#139](https://github.com/lucannez64/darling-lol/issues/139)). LLVM 16-21 builds with a warning.
 - **llvm-tools**: `llvm-objdump` and `llvm-nm`. They are now resolved as an unversioned name, as `llvm-<tool>-<N>`, or from `llvm-config --bindir`, so Ubuntu's `llvm-15-dev` no longer needs symlinks in `/usr/local/bin`.
-- **vulkan** API 1.3 and timeline semaphores. Indium rejects older devices, so this stops the setup with the version `vulkaninfo` reports. Without `vulkaninfo` it only warns, because the tool may be missing even when the driver is fine.
+- **vulkan** API 1.3 and timeline semaphores. Indium rejects older devices, so this stops the setup with the version `vulkaninfo` reports. An installed `vulkaninfo` that fails or times out is also required to be fixed, because the loader or the ICD files are then broken; without `vulkaninfo` at all it only warns, because the tool may be missing even when the driver is fine.
 - **x11** only warns: `DISPLAY` is probed with `xdpyinfo`, and the GL/EGL vendor is reported when a probe is installed. An inaccessible display is what made `iokitd` restart in a loop before [#140](https://github.com/lucannez64/darling-lol/issues/140); export `XAUTHORITY` from servers and SSH sessions. A build without a display is still valid.
 
 Run the same checks by hand, from the checkout:

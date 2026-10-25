@@ -9,6 +9,8 @@ reports. Nothing here runs a guest process.
 import os
 import subprocess
 
+TIMEOUT = 30  # A probe that hangs must not stall the preflight or the build.
+
 
 def _collect(directory, name, found):
     """Add every `name` and `name-<digits>` executable in the directory to found."""
@@ -41,13 +43,26 @@ def _preferred(candidates):
     return candidates[0 if 0 in candidates else max(candidates)] if candidates else None
 
 
+def _run(command):
+    """Run a short probe; return (completed process, problem), one of them None."""
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, errors='replace',
+                                timeout=TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return None, f'did not finish within {TIMEOUT} seconds'
+    except OSError as error:
+        return None, f'could not be started: {error}'
+    return result, None
+
+
 def _bindir():
     """`llvm-config --bindir` from the preferred llvm-config, or None."""
     configuration = _preferred(_executables('llvm-config'))
     if not configuration:
         return None
-    result = subprocess.run([configuration, '--bindir'],
-                            capture_output=True, text=True, errors='replace')
+    result, _ = _run([configuration, '--bindir'])
+    if result is None:
+        return None
     directory = result.stdout.strip()
     if result.returncode or not os.path.isdir(directory):
         return None
@@ -81,7 +96,10 @@ def require(name):
 def config(*arguments):
     """Run llvm-config with the arguments, or exit with an actionable message."""
     path = require('llvm-config')
-    result = subprocess.run([path, *arguments], capture_output=True, text=True, errors='replace')
+    result, problem = _run([path, *arguments])
+    called = f'{path} {" ".join(arguments)}'
+    if problem:
+        raise SystemExit(f'{called} {problem}; reinstall the LLVM development package.')
     if result.returncode:
-        raise SystemExit(f'{path} {" ".join(arguments)} failed: {result.stderr.strip()}')
+        raise SystemExit(f'{called} failed: {result.stderr.strip()}')
     return result.stdout.strip()

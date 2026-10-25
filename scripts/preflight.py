@@ -27,7 +27,7 @@ MIN_LFS = (2, 13)      # Debian 11 ships 2.13, the oldest release the setup is t
 MIN_KERNEL = (5, 14)   # MADV_POPULATE_WRITE.
 MIN_VULKAN = (1, 3)    # Indium rejects older devices and needs timeline semaphores.
 
-SOURCE = ROOT / 'build/darling-src'
+SOURCE = Path(os.environ.get('RCLOL_PREFLIGHT_SOURCE') or ROOT / 'build/darling-src')
 POINTER = b'version https://git-lfs.github.com/spec/v1'
 LIBRARY_SUFFIXES = ('.dylib', '.a', '.so', '.o')
 
@@ -162,6 +162,12 @@ def vulkan_devices():
 
 def check_vulkan(report):
     devices = vulkan_devices()
+    if devices is None and shutil.which('vulkaninfo'):
+        report('vulkan', False, 'vulkaninfo did not finish',
+               'vulkaninfo is installed but exited with an error or timed out. Run '
+               '`vulkaninfo --summary` for the loader or ICD error, then fix or reinstall the '
+               'driver: the runtime needs Vulkan 1.3 and timeline semaphores.')
+        return
     if devices is None:
         report('vulkan', False, 'vulkaninfo not available',
                'Install vulkan-tools to check the device. The runtime needs Vulkan 1.3 and '

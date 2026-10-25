@@ -53,7 +53,9 @@ esac''')
         return path
 
     def preflight(self, *arguments, kernel=KERNEL, display=':0'):
-        env = dict(os.environ, PATH=str(self.bin), RCLOL_PREFLIGHT_KERNEL_RELEASE=kernel)
+        env = dict(os.environ, PATH=str(self.bin),
+                   RCLOL_PREFLIGHT_KERNEL_RELEASE=kernel,
+                   RCLOL_PREFLIGHT_SOURCE=str(Path(self.tmp.name) / 'not fetched'))
         if display is None:
             env.pop('DISPLAY', None)
         else:
@@ -155,6 +157,24 @@ esac''')
         self.assertEqual(result.returncode, 1)
         self.assertIn('FAIL vulkan', result.stdout)
         self.assertIn('Vulkan 1.3 or newer is required', result.stdout)
+
+
+    def test_missing_vulkaninfo_only_warns(self):
+        (self.bin / 'vulkaninfo').unlink()
+        result = self.preflight()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('warn vulkan', result.stdout)
+        self.assertIn('vulkaninfo not available', result.stdout)
+        self.assertIn('Install vulkan-tools', result.stdout)
+
+
+    def test_broken_vulkaninfo_is_required(self):
+        self.stub('vulkaninfo', 'exit 1')
+        result = self.preflight()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('FAIL vulkan', result.stdout)
+        self.assertIn('vulkaninfo did not finish', result.stdout)
+        self.assertIn('timed out', result.stdout)
 
 
     def test_missing_timeline_semaphores_is_reported(self):
@@ -285,6 +305,21 @@ class LlvmToolsFixture(unittest.TestCase):
         expected = self.stub('llvm-nm-22', folder=libexec)
         self.stub('llvm-config', 'echo "%s"' % libexec)
         self.assertEqual(self.tools.find('llvm-nm'), str(expected))
+
+
+    def test_llvm_config_timeout_is_reported(self):
+        self.stub('llvm-config', 'exec /bin/sleep 5')
+        self.tools.TIMEOUT = 1
+        with self.assertRaises(SystemExit) as raised:
+            self.tools.config('--version')
+        self.assertIn('did not finish within 1 seconds', str(raised.exception))
+        self.assertIn('reinstall the LLVM development package', str(raised.exception))
+
+
+    def test_llvm_config_timeout_does_not_hang_the_bindir_probe(self):
+        self.stub('llvm-config', 'exec /bin/sleep 5')
+        self.tools.TIMEOUT = 1
+        self.assertIsNone(self.tools.find('llvm-objdump'))
 
 
     def test_require_explains_what_to_install(self):
