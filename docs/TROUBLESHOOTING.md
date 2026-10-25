@@ -505,6 +505,56 @@ With the window visual and compositor draw buffer fixes (#22) and the RPC socket
 
 If the game window stays black on NVIDIA, check `metal-device.log` as described in [Check which GPU rendered](#check-which-gpu-rendered).
 
+## Vulkan device or ICD selection
+
+The Metal wrapper renders with Vulkan and hands each frame to an OpenGL (EGL)
+context. If the machine has more than one Vulkan ICD, or a software Vulkan
+device such as lavapipe, the loader can enumerate a device that does not match
+the presenting GPU. The client may then stop with a Metal device or version
+error even though the runtime built correctly ([#127](https://github.com/lucannez64/darling-lol/issues/127)).
+
+Check what the loader reports and what Metal selected:
+
+```sh
+ls -l /usr/share/vulkan/icd.d/
+vulkaninfo --summary
+```
+
+The device log is opt-in and append-only. With the game and both clients closed,
+clear the old log and enable logging for one reproduction:
+
+```sh
+rm -f "${DPREFIX:-$HOME/.darling}/private/tmp/metal-device.log"
+DARLING_METAL_DEVICE_LOG=1 sh scripts/run.sh
+```
+
+After reproducing, inspect the `physical`, `selected` and `presenting` lines
+for the same process ID:
+
+```sh
+grep -E 'physical name|selected name|presenting GL' "${DPREFIX:-$HOME/.darling}/private/tmp/metal-device.log"
+```
+
+If the selected device is wrong, restrict Vulkan to the intended driver's ICD:
+
+```sh
+DARLING_METAL_DEVICE_LOG=1 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json sh scripts/run.sh
+```
+
+The filename is distribution and driver specific (`radeon_icd.x86_64.json`,
+`nvidia_icd.json` and `intel_icd.x86_64.json` are common). Choose the JSON for
+the GPU you want, and set this per launch; do not install it globally in a shell
+profile. `VK_ICD_FILENAMES` changes the Vulkan side only. If the log reports
+`MISMATCH`, the presenting OpenGL context is on another GPU; use the PRIME or
+EGL variables in [hybrid graphics](#hybrid-graphics-laptops-amdintel-igpu--nvidia)
+as well. If `physical name` shows `llvmpipe` or another CPU device, select the
+hardware ICD or enable [`/tmp/metal-skip-cpu-devices`](SETUP.md#metal-and-indium-overlays).
+
+This workaround selects an ICD/driver, which can expose several physical GPUs.
+It does not guarantee a particular GPU or a match with the OpenGL presenting
+GPU, and it does not make unsupported Metal features available. Include the `physical`, `selected` and `presenting` lines from
+`metal-device.log` when reporting the failure.
+
 ## Hybrid graphics laptops (AMD/Intel iGPU + NVIDIA)
 
 Metal renders with Vulkan, and each finished frame is handed to an OpenGL (EGL) context that presents it. The hand-off uses opaque file descriptors, which only work when Vulkan and OpenGL run on the same GPU. Indium takes the first Vulkan device the loader lists, and on a hybrid laptop both that device and the EGL context are normally the integrated GPU, so the discrete GPU stays idle. A report in [issue #3](https://github.com/lucannez64/darling-lol/issues/3) (Ryzen 9 5900HS, RTX 3060 Laptop) measured 60-70 FPS in ARAM on the integrated GPU; on the NVIDIA GPU the game showed a black screen, since fixed (see [NVIDIA](#nvidia)).
@@ -528,7 +578,7 @@ The guest file `/tmp/metal-gpu` (a device index or part of its name, for example
 
 ### Check which GPU rendered
 
-Each process that uses Metal appends to guest `/tmp/metal-device.log` (host `~/.darling/private/tmp/metal-device.log`): every Vulkan device the loader reported, the selected one and why, and the renderer of the presenting OpenGL context with both device UUIDs:
+With `DARLING_METAL_DEVICE_LOG=1` in the launcher environment, each process that uses Metal appends to guest `/tmp/metal-device.log` (host `~/.darling/private/tmp/metal-device.log`): every Vulkan device the loader reported, the selected one and why, and the renderer of the presenting OpenGL context with both device UUIDs. The log is off by default because the guest can read it and it names the host GPU:
 
 ```
 [MetalDevice] pid=… physical name="NVIDIA GeForce RTX 3060 Laptop GPU" type=discrete vendorID=0x10de … supported=yes
@@ -737,3 +787,36 @@ install the QuartzCore and OpenGL changes. Until updated, disable in-game
 VSync to use the game's frame cap, as the issue reporter confirmed. Physical
 scanout timing still depends on the driver and desktop compositor; the fix
 has standalone regression coverage but needs an in-game timing retest.
+
+## Installer aborts on `/proc/<pid>/fdinfo`
+
+[Issue #38](https://github.com/lucannez64/darling-lol/issues/38) reports an
+uncaught `ghc::filesystem::filesystem_error` with `Permission denied` on
+`/proc/<pid>/fdinfo`. `ghc::filesystem` is a C++ filesystem library, not evidence
+that the Riot installer is written in Haskell.
+
+An independent guest/native Vulkan probe reproduced this exact exception with
+MangoHud 0.8.4 enabled on 2026-10-18. MangoHud's `GPU_fdinfo::find_fd()` builds
+`/proc/<getpid()>/fdinfo` and uses a throwing directory iterator. Inside Darling,
+the native library's PID is in the guest PID namespace while its native `/proc`
+view can still refer to host processes: the probe's native PID 35 resolved to an
+inaccessible host process. The same probe completed Vulkan instance, device and
+swapchain creation with MangoHud disabled. This does not establish the cause of
+every installer abort; confirmation from the original reporter remains pending.
+
+The normal launcher now unsets `MANGOHUD` and exports `DISABLE_MANGOHUD=1` before
+runtime helpers start, including first-time installation. This disables inherited
+implicit MangoHud activation for the launched session without changing the host
+configuration. Do not wrap the launcher in `mangohud` or explicitly force its
+Vulkan layer. Updating these launcher scripts needs no Darling rebuild. For an
+older checkout, use:
+
+```sh
+env -u MANGOHUD DISABLE_MANGOHUD=1 ./scripts/installer.sh euw
+```
+
+Do not run the installer as root or change `/proc` permissions. If it still
+fails, include the exception and whether a host overlay was enabled; redact
+account tokens from logs.
+
+Upstream source: [MangoHud 0.8.4 fdinfo scan](https://github.com/flightlessmango/MangoHud/blob/v0.8.4/src/gpu_fdinfo.cpp#L9).
