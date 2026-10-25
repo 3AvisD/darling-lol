@@ -374,7 +374,7 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
     seen_client = False
     idle_since = None
     try:
-        while child.poll() is None:
+        while child.poll() is None and not stop:
             # Learn the guest namespace while the session runs: after a crash
             # the processes that still carry the socket may be the only proof.
             if namespace is None:
@@ -415,7 +415,21 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
                             own_namespace=own_namespace)
     if stop:
         log('interrupted by signal %d' % stop[0], out)
-    return 0 if remaining else (code if code >= 0 else 128 - code)
+    status = code if code >= 0 else 128 - code
+    # A surviving guest process is a failed cleanup, not a clean exit.
+    return (status or 1) if remaining else status
+
+
+def env_seconds(name, out=sys.stderr):
+    """Seconds from an optional environment variable; 0 when unset or invalid."""
+    raw = os.environ.get(name, '').strip()
+    if not raw:
+        return 0
+    try:
+        return int(raw)
+    except ValueError:
+        log('ignoring invalid %s=%r' % (name, raw), out)
+        return 0
 
 
 def main(argv=None):
@@ -423,7 +437,7 @@ def main(argv=None):
     parser.add_argument('--prefix', type=Path, required=True)
     parser.add_argument('--darling', help='loader used for a graceful shutdown')
     parser.add_argument('--stop-after', type=int,
-                        default=int(os.environ.get('RCLOL_STOP_AFTER_CLIENT_SECONDS', '0')),
+                        default=env_seconds('RCLOL_STOP_AFTER_CLIENT_SECONDS'),
                         help='stop after the client window has been gone this many seconds')
     parser.add_argument('--no-clean', action='store_true',
                         help='leave the runtime alone after the child exits')

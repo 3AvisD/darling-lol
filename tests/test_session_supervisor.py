@@ -3,7 +3,11 @@ import importlib.util
 import io
 import os
 from pathlib import Path
+import signal
+import sys
 import tempfile
+import threading
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -205,6 +209,129 @@ class SupervisorModeTests(unittest.TestCase):
         output = self.run_supervisor()
         self.assertIn('another session owns this runtime', output)
         self.assertNotIn('guest session stopped', output)
+
+
+class ExitStatusTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.prefix = self.root / '.darling'
+        self.prefix.mkdir()
+        self.proc = self.root / 'proc'
+        self.proc.mkdir()
+
+    def run_supervisor(self, command, remaining):
+        previous = supervisor.cleanup
+        supervisor.cleanup = lambda *_a, **_k: remaining
+        self.addCleanup(setattr, supervisor, 'cleanup', previous)
+        return supervisor.run_supervised(
+            command, self.prefix, None, proc_root=self.proc, poll=0,
+            run=lambda *_a, **_k: None, kill=lambda *_a: None,
+            sleep=lambda _s: None, out=io.StringIO())
+
+    def test_child_status_is_kept_when_cleanup_is_clean(self):
+        self.assertEqual(self.run_supervisor(['sh', '-c', 'exit 3'], []), 3)
+
+    def test_surviving_processes_force_a_failure_status(self):
+        self.assertEqual(self.run_supervisor(['true'], [1234]), 1)
+
+    def test_a_failed_child_stays_failed_with_survivors(self):
+        self.assertEqual(self.run_supervisor(['sh', '-c', 'exit 3'], [1234]), 3)
+
+
+class SignalEscalationTests(unittest.TestCase):
+    """A signal must start the TERM grace period, then kill the whole group."""
+
+    CHILD = (
+        "import os, signal, subprocess, sys, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "worker = subprocess.Popen([sys.executable, '-c', "
+        "'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(3)'])\n"
+        "with open(sys.argv[1], 'w') as handle:\n"
+        "    handle.write('%d %d' % (os.getpid(), worker.pid))\n"
+        "time.sleep(3)\n"
+    )
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.prefix = self.root / '.darling'
+        self.prefix.mkdir()
+        self.proc = self.root / 'proc'
+        self.proc.mkdir()
+        self.pids = self.root / 'pids'
+        self.script = self.root / 'ignore-term.py'
+        self.script.write_text(self.CHILD)
+        previous = supervisor.TERM_GRACE
+        supervisor.TERM_GRACE = 0.2
+        self.addCleanup(setattr, supervisor, 'TERM_GRACE', previous)
+
+    def wait_dead(self, pid, timeout=10):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                state = Path('/proc/%d/stat' % pid).read_text().rsplit(')', 1)[1].split()[0]
+            except (OSError, IndexError):
+                return True
+            if state == 'Z':
+                return True
+            time.sleep(0.02)
+        return False
+
+    def interrupt_when_ready(self):
+        deadline = time.monotonic() + 20
+        while not self.pids.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    def test_sigterm_reaches_the_grace_period_and_the_group_is_killed(self):
+        thread = threading.Thread(target=self.interrupt_when_ready, daemon=True)
+        thread.start()
+        output = io.StringIO()
+        try:
+            code = supervisor.run_supervised(
+                [sys.executable, str(self.script), str(self.pids)], self.prefix, None,
+                proc_root=self.proc, poll=0, run=lambda *_a, **_k: None,
+                kill=lambda *_a: None, sleep=lambda _s: time.sleep(0.01), out=output)
+        finally:
+            thread.join(timeout=5)
+        parent, worker = (int(part) for part in self.pids.read_text().split())
+        self.assertEqual(code, 137)
+        self.assertTrue(self.wait_dead(parent), 'the loader survived the escalation')
+        self.assertTrue(self.wait_dead(worker), 'the descendant survived the escalation')
+        self.assertIn('interrupted by signal 15', output.getvalue())
+
+
+class IdleEnvironmentTests(unittest.TestCase):
+    def setUp(self):
+        self.previous = os.environ.get('RCLOL_STOP_AFTER_CLIENT_SECONDS')
+        self.addCleanup(self.restore)
+
+    def restore(self):
+        if self.previous is None:
+            os.environ.pop('RCLOL_STOP_AFTER_CLIENT_SECONDS', None)
+        else:
+            os.environ['RCLOL_STOP_AFTER_CLIENT_SECONDS'] = self.previous
+
+    def test_absent_value_disables_the_idle_stop(self):
+        os.environ.pop('RCLOL_STOP_AFTER_CLIENT_SECONDS', None)
+        self.assertEqual(supervisor.env_seconds('RCLOL_STOP_AFTER_CLIENT_SECONDS'), 0)
+
+    def test_valid_value_is_used(self):
+        os.environ['RCLOL_STOP_AFTER_CLIENT_SECONDS'] = ' 120 '
+        self.assertEqual(supervisor.env_seconds('RCLOL_STOP_AFTER_CLIENT_SECONDS'), 120)
+
+    def test_invalid_value_warns_and_disables_the_idle_stop(self):
+        os.environ['RCLOL_STOP_AFTER_CLIENT_SECONDS'] = '5m'
+        output = io.StringIO()
+        self.assertEqual(supervisor.env_seconds('RCLOL_STOP_AFTER_CLIENT_SECONDS', output), 0)
+        self.assertIn("ignoring invalid RCLOL_STOP_AFTER_CLIENT_SECONDS='5m'", output.getvalue())
+
+    def test_empty_value_disables_the_idle_stop(self):
+        os.environ['RCLOL_STOP_AFTER_CLIENT_SECONDS'] = ''
+        self.assertEqual(supervisor.env_seconds('RCLOL_STOP_AFTER_CLIENT_SECONDS'), 0)
 
 
 class IdleDecisionTests(unittest.TestCase):
