@@ -513,13 +513,27 @@ Check what the loader reports and what Metal selected:
 ```sh
 ls -l /usr/share/vulkan/icd.d/
 vulkaninfo --summary
-grep -E 'physical name|selected name|presenting GL' ~/.darling/private/tmp/metal-device.log
 ```
 
-If the selected device is wrong, force the ICD for the GPU that should present:
+The device log is opt-in and append-only. With the game and both clients closed,
+clear the old log and enable logging for one reproduction:
 
 ```sh
-VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json sh scripts/run.sh
+rm -f "${DPREFIX:-$HOME/.darling}/private/tmp/metal-device.log"
+DARLING_METAL_DEVICE_LOG=1 sh scripts/run.sh
+```
+
+After reproducing, inspect the `physical`, `selected` and `presenting` lines
+for the same process ID:
+
+```sh
+grep -E 'physical name|selected name|presenting GL' "${DPREFIX:-$HOME/.darling}/private/tmp/metal-device.log"
+```
+
+If the selected device is wrong, restrict Vulkan to the intended driver's ICD:
+
+```sh
+DARLING_METAL_DEVICE_LOG=1 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json sh scripts/run.sh
 ```
 
 The filename is distribution and driver specific (`radeon_icd.x86_64.json`,
@@ -531,8 +545,9 @@ EGL variables in [hybrid graphics](#hybrid-graphics-laptops-amdintel-igpu--nvidi
 as well. If `physical name` shows `llvmpipe` or another CPU device, select the
 hardware ICD or enable [`/tmp/metal-skip-cpu-devices`](SETUP.md#metal-and-indium-overlays).
 
-This workaround selects a device; it does not make an unsupported Metal feature
-available. Include the `physical`, `selected` and `presenting` lines from
+This workaround selects an ICD/driver, which can expose several physical GPUs.
+It does not guarantee a particular GPU or a match with the OpenGL presenting
+GPU, and it does not make unsupported Metal features available. Include the `physical`, `selected` and `presenting` lines from
 `metal-device.log` when reporting the failure.
 
 ## Hybrid graphics laptops (AMD/Intel iGPU + NVIDIA)
