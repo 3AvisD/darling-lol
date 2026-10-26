@@ -1,5 +1,33 @@
 # Troubleshooting
 
+## Before reporting a problem
+
+Run the host checks first; they start nothing and work while a client is open:
+
+```sh
+darling-lol --doctor
+```
+
+It reports the GPU/driver, Vulkan, display session, memory, disk, overlay layer
+and prefix state, and ends with the checks that need attention. If you open an
+issue, attach the machine-readable report and a crash bundle instead of a
+hand-copied log:
+
+```sh
+darling-lol --doctor --report doctor.json
+darling-lol --report                # ~/.cache/darling-lol/reports/*.tar.gz
+darling-lol --perf                  # frame pacing from the game's own logs
+```
+
+The crash bundle contains the doctor checks, the runtime/client/zombie process
+table, the runtime and launcher log tails, graphics kernel messages, display
+state and recent core dumps. It does not collect environment variables, masks
+credential-shaped command-line values, and replaces your home directory, user
+name and host name unless you pass `--no-redact`. Log text itself is copied
+verbatim, so skim the bundle before sharing it. See
+[compatibility](COMPATIBILITY.md) for what the performance numbers mean and
+for verified machines.
+
 ## NixOS launcher fails before Riot opens
 
 A message saying Darling must be setuid root is not fixed by running `sudo`
