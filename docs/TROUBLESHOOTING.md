@@ -504,6 +504,20 @@ The installer adds a CarbonCore framework override and the matching absolute Cor
 
 `iokitd` crashed in host glibc's `pthread_mutex_lock` and launchd restarted it every 10 seconds. It called `eglGetDisplay()` with an Xlib display, so Mesa picked the platform from `EGL_PLATFORM`. Wayland sessions often set that to `wayland`, and the first `darling` command passes its environment to every guest service, including `iokitd`. `scripts/run.sh` sets `EGL_PLATFORM=x11` and was unaffected, but `darling shell` from a Wayland terminal (including the one in `scripts/install-runtime.sh`) started the loop. `iokitd` now requests the X11 platform explicitly. The fix is part of the base install (`sudo cmake --install`); until then, start Darling with `EGL_PLATFORM=x11`.
 
+## `iokitd` restarts when the X display is not accessible
+
+`DISPLAY` can name an X server that rejects the connection, which is what an unset or stale `XAUTHORITY` does on a server, over SSH, or in a `sudo` session that dropped the cookie. `iokitd` opens `DISPLAY` and then falls back to `:0`, so the display is missing only when both fail. Previously it still called into EGL with a null display, so the process faulted and launchd restarted it in a loop while `/tmp/lolsig.log` filled with frames ([#140](https://github.com/lucannez64/darling-lol/issues/140)).
+
+`iokitd` now checks the display before EGL. When neither `DISPLAY` nor the `:0` fallback can be opened it prints one line (`iokitd: cannot open X display … or its :0 fallback; X11 surface acceleration disabled`) and keeps running, so `darling shell` starts instead of crash-looping. Surfaces then fail with `KERN_FAILURE`, which means the guest has no GPU rendering: export a cookie the user running Darling can read and start again, for example:
+
+```sh
+export XAUTHORITY=/run/user/$(id -u)/xauth
+# or, from a server install that keeps its cookie elsewhere:
+XAUTHORITY=$(ls /var/run/sddm/* | head -1) DISPLAY=:0 EGL_PLATFORM=x11 darling shell echo hola
+```
+
+`bash tools/env-check.sh` now probes the display with `xdpyinfo` in the environment Darling inherits, tries the `:0` fallback that `iokitd` uses, and warns only when both fail. That check is advisory: without X11/EGL the runtime still boots, but the game cannot render.
+
 ## Blocky video or flickering startup logo
 
 The first dynamically resolved GL call could lose floating-point arguments during ELF symbol lookup. Chromium's linear sampler request then failed and left nearest sampling. The generated resolver now preserves those registers. Install both the rebuilt native `libGL.dylib` in `RuntimeLibraries` and the OpenGL framework's library copy using the paired runtime installer; the framework alone is insufficient.
