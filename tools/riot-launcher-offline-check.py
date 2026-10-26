@@ -23,6 +23,15 @@ def check():
         stub = f'''#!{sys.executable}
 import json, os, sys
 record = {{"command": os.path.basename(sys.argv[0]), "args": sys.argv[1:]}}
+# The launcher hands the guest to the session supervisor before exec-guest.py.
+# Run the supervised command without recording the supervisor itself, so the
+# existing assertions still inspect the guest launch that follows.
+if record["command"] == "python3" and sys.argv[1:] and os.path.basename(sys.argv[1]) == "session-supervisor.py":
+    remainder = sys.argv[2:]
+    if "--" in remainder:
+        command = remainder[remainder.index("--") + 1:]
+        if command and command[0] == "python3":
+            os.execv(sys.executable, [sys.executable] + command[1:])
 # The launcher starts the guest through exec-guest.py; run it for real.
 if record["command"] == "python3" and sys.argv[1:] and os.path.basename(sys.argv[1]) == "exec-guest.py":
     os.execv(sys.executable, [sys.executable] + sys.argv[1:])
