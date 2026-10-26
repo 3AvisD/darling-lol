@@ -33,6 +33,8 @@ fi
 # The bundled downloader rejects IPv6 CONNECT_TO addresses. Only Riot CDN
 # AAAA lookups are suppressed; set this to 0 to retain the upstream resolver.
 export RCLOL_CDN_IPV4_ONLY="${RCLOL_CDN_IPV4_ONLY:-1}"
+# Capture ownership before the certificate helper can start this session's runtime.
+runtime_at_start=$(python3 "$runner_dir/session-supervisor.py" --prefix "$prefix_dir" --probe-runtime)
 python3 "$runner_dir/ensure-darling-runtime.py"
 python3 "$runner_dir/ensure-darling-service-accounts.py"
 python3 "$runner_dir/ensure-league-runtime-layout.py"
@@ -171,7 +173,15 @@ fi
 # failed copy as "not found". Use a writable guest directory by default.
 # exec-guest.py closes host file descriptors above stderr before starting the guest. A shell
 # loop cannot: dash only accepts single-digit descriptors in redirections.
-exec python3 "$runner_dir/exec-guest.py" env -u ELECTRON_RUN_AS_NODE -u DYLD_INSERT_LIBRARIES EGL_PLATFORM=x11 \
+# Keep the launcher as a supervisor: on Ctrl+C/terminal close it stops the
+# guest session instead of orphaning launchd/mldr and the client tree. It also
+# shuts the runtime down after the loader exits, unless another session already
+# owned it. Set RCLOL_CLEAN_ON_EXIT=0 for the previous exec-only behaviour, and
+# RCLOL_STOP_AFTER_CLIENT_SECONDS=N to stop once the client window has been
+# gone for N seconds with no game running.
+exec python3 "$runner_dir/session-supervisor.py" --prefix "$prefix" \
+  --darling "${darling_bin:-darling}" --runtime-at-start "$runtime_at_start" -- \
+  python3 "$runner_dir/exec-guest.py" env -u ELECTRON_RUN_AS_NODE -u DYLD_INSERT_LIBRARIES EGL_PLATFORM=x11 \
   MAC_CHROMIUM_TMPDIR="${MAC_CHROMIUM_TMPDIR:-/private/tmp}" \
   LANG="${RCLOL_GUEST_LOCALE:-en_US.UTF-8}" LC_ALL="${RCLOL_GUEST_LOCALE:-en_US.UTF-8}" \
   mesa_glthread="${RCLOL_MESA_GLTHREAD-${mesa_glthread-false}}" \

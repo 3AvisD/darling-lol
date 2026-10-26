@@ -23,6 +23,21 @@ def check():
         stub = f'''#!{sys.executable}
 import json, os, sys
 record = {{"command": os.path.basename(sys.argv[0]), "args": sys.argv[1:]}}
+# The launcher hands the guest to the session supervisor before exec-guest.py.
+# Run the supervised command without recording the supervisor itself, so the
+# existing assertions still inspect the guest launch that follows.
+if record["command"] == "python3" and sys.argv[1:] and os.path.basename(sys.argv[1]) == "session-supervisor.py":
+    remainder = sys.argv[2:]
+    if "--probe-runtime" in remainder:
+        with open({str(log)!r}, "a") as output:
+            output.write(json.dumps({{"command": "runtime-probe"}}) + "\\n")
+        print("stopped")
+        sys.exit(0)
+    if "--" in remainder:
+        assert remainder[remainder.index("--runtime-at-start") + 1] == "stopped"
+        command = remainder[remainder.index("--") + 1:]
+        if command and command[0] == "python3":
+            os.execv(sys.executable, [sys.executable] + command[1:])
 # The launcher starts the guest through exec-guest.py; run it for real.
 if record["command"] == "python3" and sys.argv[1:] and os.path.basename(sys.argv[1]) == "exec-guest.py":
     os.execv(sys.executable, [sys.executable] + sys.argv[1:])
@@ -86,6 +101,11 @@ with open({str(log)!r}, "a") as output:
             for fd in leaked:
                 os.close(fd)
         records = [json.loads(line) for line in log.read_text().splitlines()]
+        probe = next(i for i, record in enumerate(records) if record["command"] == "runtime-probe")
+        roots = next(i for i, record in enumerate(records)
+                     if record["command"] == "python3" and
+                     Path(record["args"][0]).name == "ensure-darling-root-certificates.py")
+        assert probe < roots, "runtime ownership was captured after certificate startup"
         maintenance = [r for r in records if r["command"] == "python3"]
         assert [Path(r["args"][0]).name for r in maintenance] == [
             "runtime_paths.py", "ensure-darling-runtime.py", "ensure-darling-service-accounts.py", "ensure-league-runtime-layout.py",
@@ -94,6 +114,8 @@ with open({str(log)!r}, "a") as output:
         launches = [r for r in records if r["command"] == "darling"]
         assert len(launches) == 1, "unexpected launch count"
         for record in records:
+            if record["command"] == "runtime-probe":
+                continue
             assert record["hud"] == {"MANGOHUD": None, "DISABLE_MANGOHUD": "1"}, "MangoHud survived before a runtime helper"
         launch = launches[0]
         assert launch["fds"] == [0, 1, 2], f"inherited descriptors reached the guest: {launch['fds']}"
