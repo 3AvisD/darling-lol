@@ -44,12 +44,10 @@ PROCESS_NAMES = (
     'LeagueClient', 'League of Legends', 'CrBrowserMain', 'CrGpuMain', 'CrRendererMain',
     'CrUtilityMain', 'wine', 'gamescope', 'Xwayland',
 )
+# Credential names may be qualified, e.g. --riotclient-auth-token.
 SENSITIVE = re.compile(
-    r'(?i)^(?:--?)?(?:pass(?:word|wd)?|token|secret|api[-_]?key|auth(?:orization)?|'
-    r'credential|cookie|session|bearer)$')
-SENSITIVE_ASSIGNMENT = re.compile(
-    r'(?i)^((?:--?)?(?:pass(?:word|wd)?|token|secret|api[-_]?key|auth(?:orization)?|'
-    r'credential|cookie|session)[^=]*)=(.*)$')
+    r'(?i)(?:^|[-_])(?:pass(?:word|wd)?|token|secret|api[-_]?key|'
+    r'auth(?:orization)?|credential|cookie|session|bearer)')
 URL_USERINFO = re.compile(r'(://[^/:@\s]+:)[^/@\s]+@')
 
 
@@ -72,13 +70,13 @@ def mask_argv(arguments):
             masked.append('<redacted>')
             hide_next = False
             continue
-        if SENSITIVE.match(argument):
+        name, separator, _value = argument.partition('=')
+        if SENSITIVE.search(name):
+            if separator:
+                masked.append(name + '=<redacted>')
+                continue
             masked.append(argument)
             hide_next = True
-            continue
-        assignment = SENSITIVE_ASSIGNMENT.match(argument)
-        if assignment:
-            masked.append(assignment.group(1) + '=<redacted>')
             continue
         masked.append(URL_USERINFO.sub(r'\1<redacted>@', argument))
     return ' '.join(masked)

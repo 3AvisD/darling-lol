@@ -9,6 +9,9 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
+import subprocess
+import shutil
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location(
@@ -116,6 +119,63 @@ class CleanupTests(unittest.TestCase):
                                   (10, supervisor.signal.SIGTERM)])
         self.assertIn('guest session stopped', self.output.getvalue())
 
+    def test_pid_reused_during_shutdown_is_never_signalled(self):
+        proc = self.process(10)
+        def shutdown(*_args, **_kwargs):
+            shutil.rmtree(proc)
+            fake_process(self.root, 10, ns=self.own, comm='host-editor')
+        killed = []
+        remaining = supervisor.cleanup(
+            self.prefix, 'darling', self.ns, proc_root=self.root,
+            run=shutdown, kill=lambda *args: killed.append(args),
+            sleep=lambda _: None, out=self.output, own_namespace=self.own,
+            term_grace=0, kill_grace=0)
+        self.assertEqual(killed, [])
+        self.assertEqual(remaining, [])
+
+    def test_pid_reused_after_term_is_not_killed(self):
+        proc = self.process(10)
+        killed = []
+        def kill(pid, signum):
+            killed.append(signum)
+            fields = (proc / 'stat').read_text().split()
+            fields[-1] = '200'
+            (proc / 'stat').write_text(' '.join(fields))
+        remaining = supervisor.stop_processes(
+            [(10, proc)], kill=kill, proc_root=self.root,
+            term_grace=0, kill_grace=0)
+        self.assertEqual(killed, [signal.SIGTERM])
+        self.assertEqual(remaining, [])
+
+    def test_pidfd_is_checked_after_open_and_closed_on_identity_change(self):
+        proc = self.process(10)
+        identity = supervisor.process_identity(proc)
+        def opened(_pid):
+            (proc / 'ns/pid').unlink()
+            os.symlink(self.own, proc / 'ns/pid')
+            return 123
+        with mock.patch.object(supervisor.os, 'pidfd_open', side_effect=opened), \
+             mock.patch.object(supervisor.signal, 'pidfd_send_signal') as send, \
+             mock.patch.object(supervisor.os, 'close') as close:
+            supervisor.signal_process(10, proc, identity, signal.SIGTERM)
+        send.assert_not_called()
+        close.assert_called_once_with(123)
+
+    def test_unavailable_pidfd_never_falls_back_to_numeric_pid(self):
+        proc = self.process(10)
+        with mock.patch.object(supervisor.os, 'pidfd_open', side_effect=OSError), \
+             mock.patch.object(supervisor.signal, 'pidfd_send_signal') as send:
+            supervisor.signal_process(10, proc, supervisor.process_identity(proc), signal.SIGTERM)
+        send.assert_not_called()
+
+    def test_real_pidfd_stops_only_the_selected_child(self):
+        child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+        self.addCleanup(child.wait)
+        self.addCleanup(lambda: child.poll() is None and child.kill())
+        proc = Path('/proc') / str(child.pid)
+        supervisor.signal_process(child.pid, proc, supervisor.process_identity(proc), signal.SIGTERM)
+        self.assertEqual(child.wait(timeout=5), -signal.SIGTERM)
+
     def test_cleanup_does_nothing_without_attribution(self):
         output = io.StringIO()
         remaining = supervisor.cleanup(
@@ -209,6 +269,24 @@ class SupervisorModeTests(unittest.TestCase):
         output = self.run_supervisor()
         self.assertIn('another session owns this runtime', output)
         self.assertNotIn('guest session stopped', output)
+
+    def test_runtime_started_by_startup_helper_is_owned(self):
+        proc = fake_process(self.proc, 10, comm='darlingserver')
+        (proc / 'cmdline').write_bytes(b'darlingserver\0' + os.fsencode(self.prefix) + b'\0')
+        (self.prefix / '.init.pid').write_text('10')
+        with mock.patch.object(supervisor, 'cleanup', return_value=[]) as cleanup:
+            code = supervisor.run_supervised(
+                ['true'], self.prefix, None, proc_root=self.proc, poll=0,
+                sleep=lambda _: None, runtime_at_start='stopped')
+        self.assertEqual(code, 0)
+        cleanup.assert_called_once()
+
+    def test_runtime_existing_before_helpers_is_left_running(self):
+        with mock.patch.object(supervisor, 'cleanup') as cleanup:
+            supervisor.run_supervised(
+                ['true'], self.prefix, None, proc_root=self.proc, poll=0,
+                sleep=lambda _: None, out=io.StringIO(), runtime_at_start='running')
+        cleanup.assert_not_called()
 
 
 class ExitStatusTests(unittest.TestCase):

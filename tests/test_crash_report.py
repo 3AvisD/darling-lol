@@ -102,6 +102,15 @@ class HelperTests(unittest.TestCase):
         self.assertNotIn('xyz', masked)
         self.assertIn('--region=EUW', masked)
 
+    def test_qualified_credential_flags_in_both_formats(self):
+        for flag in ('--remoting-auth-token', '--riotclient-auth-token',
+                     '--access_token', '--client-password', '--api-key', '--authToken'):
+            for arguments in ([flag + '=synthetic-value'], [flag, 'synthetic-value']):
+                with self.subTest(arguments=arguments):
+                    masked = crash_report.mask_argv(['LeagueClientUx', *arguments, '--region=EUW'])
+                    self.assertNotIn('synthetic-value', masked)
+                    self.assertIn('--region=EUW', masked)
+
     def test_scrub_uses_whole_tokens(self):
         self.assertEqual(
             crash_report.scrub('al and alps at /mnt/al on al-host', home=Path('/mnt/al'),
@@ -196,6 +205,17 @@ class BuildTests(unittest.TestCase):
         self.assertNotIn(str(Path.home()), combined)
         self.assertNotIn('do-not-publish', combined)
         self.assertIn('~/.darling running', combined)
+
+    def test_bundle_omits_riot_command_line_tokens(self):
+        make_process(self.proc, 202, 200, 'S', 'LeagueClientUx',
+                     ['LeagueClientUx', '--remoting-auth-token=synthetic-remote',
+                      '--riotclient-auth-token', 'synthetic-riot'])
+        archive, _ = self.build()
+        with tarfile.open(archive) as tar:
+            text = tar.extractfile('lol-report/processes.txt').read().decode()
+        self.assertIn('LeagueClientUx', text)
+        self.assertNotIn('synthetic-remote', text)
+        self.assertNotIn('synthetic-riot', text)
 
     def test_workspace_paths_are_redacted(self):
         archive, _ = self.build(launch_log=None,

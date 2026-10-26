@@ -257,6 +257,8 @@ tree running. The supervisor:
 - leaves everything as it was with `RCLOL_CLEAN_ON_EXIT=0`, which is the old
   `exec` behaviour.
 
+Runtime ownership is captured before startup helpers run, so a certificate refresh that starts Darling still belongs to this launcher. Leftover process cleanup checks the original start time, UID and PID namespace and sends signals through pidfds; if a process cannot be pinned, it is left alone and a surviving process is reported as a cleanup failure.
+
 Closing the client window is not the same as quitting the client. The window is
 gone but `RiotClientServices`, `LeagueClientUx` and their CEF helpers stay
 resident, and `xwininfo` can still list their windows. If closing the window

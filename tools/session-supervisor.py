@@ -191,18 +191,59 @@ def wrapper(proc, name):
         return None
 
 
+def process_identity(proc):
+    """Identity captured before shutdown, not just a reusable PID."""
+    info = process_info(proc)
+    if info is None:
+        return None
+    try:
+        return info[2], os.readlink(proc / 'ns/pid'), proc.stat().st_uid
+    except OSError:
+        return None
+
+
+def signal_process(pid, proc, identity, signum, kill=os.kill):
+    """Pin the process before the final identity check to close the PID reuse race."""
+    if identity is None or process_identity(proc) != identity:
+        return
+    if kill is not os.kill:
+        # Injected signal transport for offline process fixtures.
+        kill(pid, signum)
+        return
+    try:
+        descriptor = os.pidfd_open(pid)
+    except (AttributeError, OSError):
+        # Never fall back to signalling an unpinned PID.
+        return
+    try:
+        if process_identity(proc) == identity:
+            signal.pidfd_send_signal(descriptor, signum)
+    except (AttributeError, OSError):
+        pass
+    finally:
+        os.close(descriptor)
+
+
 def stop_processes(members, kill=os.kill, sleep=time.sleep, proc_root=Path('/proc'),
                    out=sys.stdout, term_grace=TERM_GRACE, kill_grace=KILL_GRACE,
-                   clock=time.monotonic):
+                   clock=time.monotonic, identities=None):
     """SIGTERM then SIGKILL a set of processes; return what is still present."""
+    if identities is None:
+        identities = {pid: process_identity(proc) for pid, proc in members}
+
+    def present(pid, proc):
+        return (identities.get(pid) is not None
+                and process_identity(proc) == identities[pid])
+
     def alive(pid, proc):
         info = process_info(proc)
-        return info is not None and info[0] != 'Z'
+        return present(pid, proc) and info is not None and info[0] != 'Z'
 
+    processes = dict(members)
     remaining = [(pid, proc) for pid, proc in members if alive(pid, proc)]
     for pid in deepest_first(remaining, proc_root):
         try:
-            kill(pid, signal.SIGTERM)
+            signal_process(pid, processes[pid], identities[pid], signal.SIGTERM, kill)
         except OSError:
             pass
     deadline = clock() + term_grace
@@ -214,18 +255,18 @@ def stop_processes(members, kill=os.kill, sleep=time.sleep, proc_root=Path('/pro
     remaining = [(pid, proc) for pid, proc in remaining if alive(pid, proc)]
     for pid in deepest_first(remaining, proc_root):
         try:
-            kill(pid, signal.SIGKILL)
+            signal_process(pid, processes[pid], identities[pid], signal.SIGKILL, kill)
         except OSError:
             pass
     deadline = clock() + kill_grace
     while remaining and clock() < deadline:
         sleep(POLL_SECONDS)
         remaining = [(pid, proc) for pid, proc in remaining
-                     if process_info(proc) is not None]
+                     if present(pid, proc)]
     # Re-read once even when a grace period is zero, so the caller never gets a
     # stale "still running" answer for a process that SIGKILL already removed.
     return [(pid, proc) for pid, proc in remaining
-            if process_info(proc) is not None]
+            if present(pid, proc)]
 
 
 def cleanup(prefix, darling, namespace, proc_root=Path('/proc'), run=subprocess.run,
@@ -236,6 +277,7 @@ def cleanup(prefix, darling, namespace, proc_root=Path('/proc'), run=subprocess.
         namespace = prefix_namespace(prefix, proc_root)
     own_namespace = own_namespace or os.readlink('/proc/self/ns/pid')
     members = namespace_members(namespace, proc_root, own_namespace)
+    identities = {pid: process_identity(proc) for pid, proc in members}
     if members and darling:
         try:
             run([darling, 'shutdown'], stdout=subprocess.DEVNULL,
@@ -246,16 +288,18 @@ def cleanup(prefix, darling, namespace, proc_root=Path('/proc'), run=subprocess.
         while members and clock() < deadline:
             sleep(POLL_SECONDS)
             members = [(pid, proc) for pid, proc in members
-                       if process_info(proc) is not None]
+                       if identities.get(pid) is not None
+                       and process_identity(proc) == identities[pid]]
     if not members:
         members = prefix_only(prefix, proc_root)
+        identities = {pid: process_identity(proc) for pid, proc in members}
     if not members:
         log('runtime and guest processes are gone', out)
         return []
     log('stopping %d leftover guest process(es)' % len(members), out)
     remaining = stop_processes(members, kill=kill, sleep=sleep,
                                proc_root=proc_root, out=out, term_grace=term_grace,
-                               kill_grace=kill_grace, clock=clock)
+                               kill_grace=kill_grace, clock=clock, identities=identities)
     if remaining:
         details = []
         for pid, proc in remaining:
@@ -347,7 +391,7 @@ def idle_decision(seen_client, idle_since, now, windows, game, seconds):
 def run_supervised(command, prefix, darling, stop_after=0, clean=True,
                    proc_root=Path('/proc'), run=subprocess.run, kill=os.kill,
                    sleep=time.sleep, out=sys.stdout, poll=POLL_SECONDS,
-                   own_namespace=None):
+                   own_namespace=None, runtime_at_start=None):
     """Run command, forward termination signals, then clean the session.
 
     Cleanup only runs when this launcher started the runtime. A second launch
@@ -356,7 +400,8 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
     """
     if not clean:
         os.execvp(command[0], command)
-    owns_runtime = not runtime_alive(prefix, proc_root)
+    owns_runtime = (runtime_at_start == 'stopped' if runtime_at_start is not None
+                    else not runtime_alive(prefix, proc_root))
     namespace = None
     child = subprocess.Popen(command, start_new_session=True)
     stop = []
@@ -435,6 +480,10 @@ def env_seconds(name, out=sys.stderr):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument('--prefix', type=Path, required=True)
+    parser.add_argument('--probe-runtime', action='store_true',
+                        help='print runtime state before launcher startup helpers')
+    parser.add_argument('--runtime-at-start', choices=('running', 'stopped'),
+                        help='runtime state captured before launcher startup helpers')
     parser.add_argument('--darling', help='loader used for a graceful shutdown')
     parser.add_argument('--stop-after', type=int,
                         default=env_seconds('RCLOL_STOP_AFTER_CLIENT_SECONDS'),
@@ -443,13 +492,16 @@ def main(argv=None):
                         help='leave the runtime alone after the child exits')
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
+    prefix = args.prefix.expanduser().resolve()
+    if args.probe_runtime:
+        print('running' if runtime_alive(prefix) else 'stopped')
+        return 0
     command = args.command[1:] if args.command[:1] == ['--'] else args.command
     if not command:
         parser.error('a command is required after --')
     clean = not args.no_clean and os.environ.get('RCLOL_CLEAN_ON_EXIT', '1') != '0'
-    prefix = args.prefix.expanduser().resolve()
     return run_supervised(command, prefix, args.darling, stop_after=max(0, args.stop_after),
-                          clean=clean)
+                          clean=clean, runtime_at_start=args.runtime_at_start)
 
 
 if __name__ == '__main__':
