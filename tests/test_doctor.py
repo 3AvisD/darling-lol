@@ -5,6 +5,7 @@ import io
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -173,8 +174,18 @@ class RuntimeDirTests(unittest.TestCase):
             self.assertEqual(doctor.runtime_dir({'DARLING_WORKSPACE': str(workspace)}), runtime)
 
     def test_native_path_is_last(self):
-        self.assertEqual(doctor.runtime_dir({'DARLING_WORKSPACE': '/nonexistent'}),
-                         Path('/usr/local/libexec/darling'))
+        native = Path('/usr/local/libexec/darling')
+        with mock.patch.object(Path, 'is_file', autospec=True,
+                               side_effect=lambda path: path == native / 'sbin/launchd'):
+            self.assertEqual(doctor.runtime_dir({'DARLING_WORKSPACE': '/nonexistent'}),
+                             native)
+
+    def test_no_runtime_returns_expected_workspace_path(self):
+        with mock.patch.object(Path, 'is_file', return_value=False), \
+             mock.patch.object(Path, 'is_dir', return_value=False):
+            self.assertEqual(doctor.runtime_dir({'DARLING_WORKSPACE': '/nonexistent'}),
+                             Path('/nonexistent/usr-local/libexec/darling'))
+            self.assertEqual(doctor.runtime_dir({}), Path('/usr/local/libexec/darling'))
 
 
 class GpuAndVulkanTests(unittest.TestCase):
