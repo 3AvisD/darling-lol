@@ -43,3 +43,4 @@ jobs:
       - run: python -m unittest discover -s tests -p 'test_clean_stale_helpers.py'
       - run: python -m unittest discover -s tests -p 'test_hide_league_client_in_game.py'
       - run: python -m unittest discover -s tests -p 'test_client_in_game_tricks.py'
+      - run: python -m unittest discover -s tests -p 'test_setup_portability.py'
