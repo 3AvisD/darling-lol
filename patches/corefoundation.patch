@@ -321,3 +321,340 @@ index a3da56a..4678733 100644
  - (NSArray *)keysSortedByValueUsingSelector:(SEL)comparator
  {
      return [[self allKeys] sortedArrayUsingComparator:^NSComparisonResult(id obj1, id obj2) {
+diff --git a/CFRuntime.c b/CFRuntime.c
+index 6b55812..0abd639 100644
+--- a/CFRuntime.c
++++ b/CFRuntime.c
+@@ -138,6 +138,10 @@ extern void __HALT(void);
+ 
+ static CFTypeID __kCFNotATypeTypeID = _kCFRuntimeNotATypeID;
+ id __NSDictionary0__, __NSArray0__;
++/* clang binds an empty @[] / @{} literal to these pointer variables rather than
++ * to the objects above; the visible symbols are __NSArray0__struct and
++ * __NSDictionary0__struct. Keep both names pointing at the same singletons. */
++id __NSArray0__struct, __NSDictionary0__struct;
+ 
+ #if !defined (__cplusplus)
+ static const CFRuntimeClass __CFNotATypeClass = {
+@@ -1171,6 +1175,8 @@ void __CFInitialize(void) {
+         selInit = sel_registerName("init");
+         __NSDictionary0__ = objc_msgSend(objc_msgSend(clsDict, selAlloc), selInit);
+         __NSArray0__ = objc_msgSend(objc_msgSend(clsArray, selAlloc), selInit);
++        __NSDictionary0__struct = __NSDictionary0__;
++        __NSArray0__struct = __NSArray0__;
+ 
+         __CFInitializing = 0;
+         __CFInitialized = 1;
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 27864ad..e5cf047 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -123,6 +123,7 @@ set(cf_sources
+ 	NSCache.m
+ 	NSCalendar.m
+ 	NSCFType.m
++	NSConstantCollections.m
+ 	NSConstantString.m
+ 	NSData.m
+ 	NSDateComponents.m
+diff --git a/NSConstantCollections.m b/NSConstantCollections.m
+new file mode 100644
+index 0000000..fe29dc5
+--- /dev/null
++++ b/NSConstantCollections.m
+@@ -0,0 +1,177 @@
++//
++//  NSConstantCollections.m
++//  CoreFoundation
++//
++//  The collection literals clang emits when it knows their contents at compile
++//  time. When a translation unit is built for a macOS 11 or newer runtime,
++//  clang turns `@[a, b]` into a statically allocated struct whose first word is
++//  the class and whose remaining words are the count and the object pointers,
++//  and it binds that class to NSConstantArray. An empty `@[]` is a reference to
++//  the pointer variable __NSArray0__struct instead. Dictionaries work the same
++//  way with NSConstantDictionary and __NSDictionary0__struct.
++//
++//  Darling only provided __NSArray0__ / __NSDictionary0__, so an application
++//  built with such a compiler failed to bind at launch:
++//
++//      dyld: Symbol not found: _OBJC_CLASS_$_NSConstantIntegerNumber
++//      dyld: Symbol not found: ___NSArray0__struct
++//
++//  The instance layouts below are exactly the ones clang emits (see
++//  CGObjCMac.cpp, GenerateConstantNSArray / GenerateConstantNSDictionary):
++//
++//      struct { Class isa; NSUInteger count; id const *objects; }
++//      struct { Class isa; NSUInteger hashOptions; NSUInteger count;
++//               id const *keys; id const *objects; }
++//
++//  The instances live in the calling image's read-only data, are never
++//  deallocated and can be retained from anywhere, so the memory-management
++//  methods are no-ops and copying returns the same object.
++
++#import <Foundation/NSArray.h>
++#import <Foundation/NSDictionary.h>
++#import <Foundation/NSEnumerator.h>
++#import <Foundation/NSException.h>
++#import <Foundation/NSObjCRuntime.h>
++
++#import "NSObjectInternal.h"
++
++/* clang references these as pointer variables (CGM.CreateRuntimeVariable with
++ * the default pointer type), so they hold the singleton objects rather than
++ * being the objects themselves. They are defined next to the singletons in
++ * CFRuntime.c, which points them at __NSArray0__ and __NSDictionary0__ once
++ * those exist. */
++
++@interface NSConstantArray : NSArray {
++    NSUInteger _count;
++    id const *_objects;
++}
++@end
++
++@interface NSConstantDictionary : NSDictionary {
++    NSUInteger _hashOptions;
++    NSUInteger _count;
++    id const *_keys;
++    id const *_objects;
++}
++@end
++
++@implementation NSConstantArray
++
++- (NSUInteger)count
++{
++    return _count;
++}
++
++- (id)objectAtIndex:(NSUInteger)idx
++{
++    if (idx >= _count)
++    {
++        [NSException raise:NSRangeException
++                    format:@"index %lu beyond bounds of constant array (count %lu)",
++                           (unsigned long)idx, (unsigned long)_count];
++    }
++    return _objects[idx];
++}
++
++- (void)getObjects:(id __unsafe_unretained [])objects range:(NSRange)range
++{
++    if (range.location + range.length > _count)
++    {
++        [NSException raise:NSRangeException
++                    format:@"range {%lu, %lu} beyond bounds of constant array (count %lu)",
++                           (unsigned long)range.location, (unsigned long)range.length,
++                           (unsigned long)_count];
++    }
++    for (NSUInteger i = 0; i < range.length; ++i)
++    {
++        objects[i] = _objects[range.location + i];
++    }
++}
++
++- (id)copyWithZone:(NSZone *)zone
++{
++    return self;
++}
++
++- (id)retain
++{
++    return self;
++}
++
++- (oneway void)release
++{
++}
++
++- (id)autorelease
++{
++    return self;
++}
++
++- (NSUInteger)retainCount
++{
++    return NSUIntegerMax;
++}
++
++- (void)dealloc
++{
++}
++
++@end
++
++@implementation NSConstantDictionary
++
++- (NSUInteger)count
++{
++    return _count;
++}
++
++- (id)objectForKey:(id)key
++{
++    if (key == nil)
++    {
++        return nil;
++    }
++    for (NSUInteger i = 0; i < _count; ++i)
++    {
++        if (_keys[i] == key || [_keys[i] isEqual:key])
++        {
++            return _objects[i];
++        }
++    }
++    return nil;
++}
++
++- (NSEnumerator *)keyEnumerator
++{
++    return [[[NSArray alloc] initWithObjects:_keys count:_count] objectEnumerator];
++}
++
++- (id)copyWithZone:(NSZone *)zone
++{
++    return self;
++}
++
++- (id)retain
++{
++    return self;
++}
++
++- (oneway void)release
++{
++}
++
++- (id)autorelease
++{
++    return self;
++}
++
++- (NSUInteger)retainCount
++{
++    return NSUIntegerMax;
++}
++
++- (void)dealloc
++{
++}
++
++@end
+diff --git a/NSNumber.m b/NSNumber.m
+index 7f15af6..230d316 100644
+--- a/NSNumber.m
++++ b/NSNumber.m
+@@ -16,6 +16,60 @@ CF_EXPORT CFNumberType _CFNumberGetType(CFNumberRef num);
+ CF_EXPORT CFNumberType _CFNumberGetType2(CFNumberRef number);
+ CF_EXPORT CFStringRef __CFNumberCreateFormattingDescription(CFAllocatorRef allocator, CFTypeRef cf, CFDictionaryRef formatOptions);
+ 
++/* CFNumberCompare reads the CFNumber header of its arguments. A constant number
++ * literal (Foundation's NSConstantIntegerNumber and friends) is an ordinary
++ * NSNumber subclass with a plain object header, so hand those comparisons to the
++ * NSNumber accessors instead of letting `__NSCFNumber -compare:` treat it as a
++ * CFNumber. Without this, comparing a created number against a literal reported
++ * an arbitrary order, so `[@42 isEqual:@42]` from either side was false. */
++static BOOL _NSTypeIsFloating(const char *type)
++{
++    return type != NULL && (*type == _C_FLT || *type == _C_DBL);
++}
++
++static BOOL _NSTypeIsUnsigned(const char *type)
++{
++    switch (type ? *type : '\0')
++    {
++        case _C_UCHR:
++        case _C_USHT:
++        case _C_UINT:
++        case _C_ULNG:
++        case _C_ULNG_LNG:
++            return YES;
++        default:
++            return NO;
++    }
++}
++
++static NSComparisonResult _NSCompareNonCFNumber(id self, id other)
++{
++    const char *type = [self objCType];
++    const char *otherType = [other objCType];
++
++    if (_NSTypeIsFloating(type) || _NSTypeIsFloating(otherType))
++    {
++        double value = [self doubleValue];
++        double otherValue = [other doubleValue];
++        if (value < otherValue) return NSOrderedAscending;
++        if (value > otherValue) return NSOrderedDescending;
++        return NSOrderedSame;
++    }
++    if (_NSTypeIsUnsigned(type) && _NSTypeIsUnsigned(otherType))
++    {
++        unsigned long long value = [self unsignedLongLongValue];
++        unsigned long long otherValue = [other unsignedLongLongValue];
++        if (value < otherValue) return NSOrderedAscending;
++        if (value > otherValue) return NSOrderedDescending;
++        return NSOrderedSame;
++    }
++    long long value = [self longLongValue];
++    long long otherValue = [other longLongValue];
++    if (value < otherValue) return NSOrderedAscending;
++    if (value > otherValue) return NSOrderedDescending;
++    return NSOrderedSame;
++}
++
+ CF_PRIVATE
+ @interface __NSCFNumber : __NSCFType
+ @end
+@@ -39,12 +93,28 @@ CF_PRIVATE
+         @throw [NSException exceptionWithName:NSInvalidArgumentException reason:@"nil argument" userInfo:nil];
+         return NSOrderedSame;
+     }
++    if (!_CFIsCFObject(other))
++    {
++        return _NSCompareNonCFNumber(self, other);
++    }
+     return (NSComparisonResult)CFNumberCompare((CFNumberRef)self, (CFNumberRef)other, NULL);
+ }
+ 
+ - (NSComparisonResult)_reverseCompare:(id)other
+ {
+-    CFComparisonResult result = CFNumberCompare((CFNumberRef)self, (CFNumberRef)other, NULL);
++    CFComparisonResult result;
++    if (!_CFIsCFObject(other))
++    {
++        switch (_NSCompareNonCFNumber(self, other)) {
++            case NSOrderedAscending:
++                return NSOrderedDescending;
++            case NSOrderedDescending:
++                return NSOrderedAscending;
++            default:
++                return NSOrderedSame;
++        }
++    }
++    result = CFNumberCompare((CFNumberRef)self, (CFNumberRef)other, NULL);
+     switch (result) {
+         case kCFCompareLessThan:
+             return NSOrderedDescending;
+@@ -388,6 +458,14 @@ CF_PRIVATE
+     {
+         return NSOrderedAscending;
+     }
++    else if (!_CFIsCFObject(other))
++    {
++        double value = self == (id)kCFBooleanTrue ? 1.0 : 0.0;
++        double otherValue = [other doubleValue];
++        if (value < otherValue) return NSOrderedDescending;
++        if (value > otherValue) return NSOrderedAscending;
++        return NSOrderedSame;
++    }
+     else
+     {
+         CFComparisonResult result = CFNumberCompare((CFNumberRef)self, (CFNumberRef)other, NULL);
+@@ -401,6 +479,7 @@ CF_PRIVATE
+                 return NSOrderedSame;
+         }
+     }
++    return NSOrderedSame;
+ }
+ 
+ - (BOOL)_getValue:(void *)val forType:(CFNumberType)type
