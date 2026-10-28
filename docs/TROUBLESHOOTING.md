@@ -1031,3 +1031,14 @@ instead of failing later at a client's launch. The check must run with the
 overlay in `DYLD_FRAMEWORK_PATH`, which it sets itself. It is not part of
 `scripts/validate.py`: it needs a prepared tree, an installed prefix and a
 running Darling.
+
+**Current state.** With the stubs, the constant classes and the AppKit/CoreText
+additions above, 142 resolves every dyld import, starts the Electron main
+process, starts its static server, reads settings and feature flags, creates its
+window and a CGL context, then stops with `SIGTRAP` on a libdispatch worker
+thread right after the browser process enumerates three font faces. The trap is
+`int3` with no Chromium log line, so it is not a `CHECK` failure that prints; no
+C++ exception is raised near it. 141 (`42E1358C87FB3ABC`) still runs with the
+same runtime, so the remaining fault is specific to what Chromium 150 does in
+the browser process. `tools/riot-client-pin.py --restore
+~/darling-backups/42E1358C87FB3ABC` puts 141 back.
