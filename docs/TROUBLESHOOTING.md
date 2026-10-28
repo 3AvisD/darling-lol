@@ -949,3 +949,85 @@ fails, include the exception and whether a host overlay was enabled; redact
 account tokens from logs.
 
 Upstream source: [MangoHud 0.8.4 fdinfo scan](https://github.com/flightlessmango/MangoHud/blob/v0.8.4/src/gpu_fdinfo.cpp#L9).
+
+## Riot Client 142 fails to launch: Electron 43 frameworks and constant literals
+
+Riot Client 142 (`142.0.1.5150`, Electron 43, Chromium 150) needs two things
+Darling did not provide at the time. Either one stops the process in dyld before
+the first window, with the client's own crash handler reporting the reason:
+
+```
+dyld: Symbol not found: _OBJC_CLASS_$_QLPreviewPanel         (QuickLookUI)
+dyld: Symbol not found: _OBJC_CLASS_$_NSConstantIntegerNumber (Foundation)
+dyld: Symbol not found: ___NSArray0__struct                  (CoreFoundation)
+```
+
+The framed symbols are non-weak imports: the Electron Framework binds them
+whether the feature is used or not, so they cannot be left absent
+(ScreenCaptureKit and QuickLookThumbnailing are weak imports, and Chromium
+disables those features when they are missing).
+
+**Framework stubs.** `tools/build-riot-electron43-frameworks.py` builds and can
+install QuickLookUI, MediaPlayer, CoreML, CoreHaptics and Accessibility into the
+guest `RuntimeFrameworks` overlay, using the AppKit target's configured flags.
+Each source implements only the classes and constants the Electron Framework
+binds, with local state and no backing service: a media key does nothing, a
+haptic pattern never plays, CoreML refuses to load a model, and the Quick Look
+panel is empty.
+
+```sh
+python3 tools/build-riot-electron43-frameworks.py --install
+python3 tools/build-riot-electron43-frameworks.py \
+  --check '/path/to/Riot Client.app/Contents/Frameworks/Electron Framework.framework/Electron Framework'
+```
+
+`--check` lists every non-weak import of the given Mach-O that the stubs do not
+define and exits non-zero, so a later Electron update surfaces missing symbols as
+a build failure instead of a dyld abort. Replacing the stubs with real
+implementations would need a window server, a media pipeline and GPU compute;
+none of that is in scope here.
+
+**Constant literals.** Clang targeting macOS 11 or newer compiles `@42` and
+`@[@"a"]` into statically allocated objects rather than calls. Numbers bind to
+`NSConstantIntegerNumber`, `NSConstantDoubleNumber` or `NSConstantFloatNumber`;
+collections bind to `NSConstantArray` or `NSConstantDictionary`, and an empty
+`@[]`/`@{}` is a reference to the pointer variable `__NSArray0__struct` or
+`__NSDictionary0__struct`. Darling only had `__NSArray0__`/`__NSDictionary0__`,
+so the classes and variables are added by `patches/foundation.patch` and
+`patches/corefoundation.patch`.
+
+The instance layouts are exactly what clang emits (see `CGObjCMac.cpp`,
+`GenerateConstantNSArray`/`GenerateConstantNSDictionary`), so the classes need no
+special magic: they are ordinary `NSArray`, `NSDictionary` and `NSNumber`
+subclasses reading their own `_count`/`_objects`/`_encoding`/`_value` fields.
+The instances live in the calling image's read-only data for the lifetime of the
+process, so `retain`/`release` are no-ops, `copy` returns the same object, and
+`dealloc` never runs.
+
+A created number must also compare equal to a literal from either side.
+`__NSCFNumber -compare:` used to hand every argument to `CFNumberCompare`, which
+reads a CF runtime header; a constant literal has a plain object header, so the
+comparison returned an arbitrary order and `[NSNumber numberWithLongLong:42]
+isEqualToNumber:@42]` was false while the reverse was true. Non-CF numbers now
+compare through the `NSNumber` accessors (double, unsigned or signed as the
+encodings require), and the constant classes implement `_reverseCompare:`.
+
+Rebuild and install both overlays, then exit any guest process so the new
+libraries are mapped:
+
+```sh
+python3 build/runtime/tools/build-riot-corefoundation-runtime.py
+python3 build/runtime/tools/build-riot-foundation-runtime.py
+python3 tools/install-riot-foundation-runtime.py
+sh tools/install-riot-gpu-runtime.sh   # installs build/riot-CoreFoundation
+python3 tools/check-riot-constant-literals.py
+```
+
+The last command builds `tools/riot-electron43-frameworks/constant-literal-check.m`,
+checks that the installed overlay exports the constant classes, and runs the
+check inside the guest. It prints one `ok` line per property, then
+`PASS constant literals`; a missing class prints the overlay path and the symbol
+instead of failing later at a client's launch. The check must run with the
+overlay in `DYLD_FRAMEWORK_PATH`, which it sets itself. It is not part of
+`scripts/validate.py`: it needs a prepared tree, an installed prefix and a
+running Darling.

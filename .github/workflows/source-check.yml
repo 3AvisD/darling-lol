@@ -35,6 +35,7 @@ jobs:
       - run: python -m unittest discover -s tests -p 'test_metal_device_info.py'
       - run: python -m unittest discover -s tests -p 'test_indium_address_shadow.py' -v
       - run: python -m unittest discover -s tests -p 'test_exec_guest.py'
+      - run: python -m unittest discover -s tests -p 'test_riot_electron43_frameworks.py'
       - run: python -m unittest discover -s tests -p 'test_close_league_client_in_game.py'
       - run: python -m unittest discover -s tests -p 'test_recover_stale_client.py'
       - run: python -m unittest discover -s tests -p 'test_launchd_orphan_reaping.py'
