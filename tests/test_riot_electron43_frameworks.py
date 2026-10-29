@@ -8,6 +8,11 @@ literals the patches add must be the ones the guest check exercises.
 import importlib.util
 from pathlib import Path
 import unittest
+import tempfile
+import re
+import shutil
+import subprocess
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location(
@@ -20,6 +25,93 @@ CONSTANT_CLASSES = ('NSConstantIntegerNumber', 'NSConstantDoubleNumber',
 
 
 class FrameworkStubTests(unittest.TestCase):
+    def test_versioned_layout_resolves_and_repairs_old_links(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = Path(tmp) / 'QuickLookUI.framework'
+            version = bundle / 'Versions/A'
+            version.mkdir(parents=True)
+            binary = bundle / 'QuickLookUI'
+            binary.write_bytes(b'framework fixture')
+            (version / 'QuickLookUI').symlink_to('../../../QuickLookUI')
+            frameworks.link_versions(bundle, 'QuickLookUI')
+            frameworks.link_versions(bundle, 'QuickLookUI')
+            self.assertEqual((bundle / 'Versions/Current/QuickLookUI').read_bytes(),
+                             binary.read_bytes())
+
+    def test_install_creates_layout_even_for_unchanged_binaries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / 'output'
+            home = root / 'home'
+            for name in frameworks.FRAMEWORKS:
+                bundle = output / (name + '.framework')
+                bundle.mkdir(parents=True)
+                (bundle / name).write_bytes(b'framework fixture')
+            with patch.object(frameworks, 'OUTPUT', output), patch.object(
+                    frameworks, 'guest_home', return_value=home):
+                frameworks.install(root / 'backups')
+                # Recreate the flat layout left by the old installer.
+                for name in frameworks.FRAMEWORKS:
+                    (home / 'RuntimeFrameworks' / (name + '.framework') /
+                     'Versions/A' / name).unlink()
+                frameworks.install(root / 'backups')
+            for name in frameworks.FRAMEWORKS:
+                bundle = home / 'RuntimeFrameworks' / (name + '.framework')
+                self.assertEqual((bundle / 'Versions/Current' / name).read_bytes(),
+                                 b'framework fixture')
+                self.assertTrue((bundle / 'Resources/Info.plist').is_file())
+
+    @unittest.skipUnless(shutil.which('c++'), 'C++ compiler required')
+    def test_number_comparison_handles_mixed_integer_signedness(self):
+        # Compile the shipped comparison helper with host accessor stand-ins.
+        # The guest check separately exercises the Objective-C dispatch path.
+        patch_text = (ROOT / 'patches/corefoundation.patch').read_text()
+        section = patch_text.split('diff --git a/NSNumber.m ', 1)[1]
+        added = '\n'.join(line[1:] for line in section.splitlines()
+                          if line.startswith('+') and not line.startswith('+++'))
+        helper = added[added.index('static BOOL _NSTypeIsFloating'):]
+        helper = helper.split('\n    if (!_CFIsCFObject', 1)[0]
+        helper = re.sub(r'\[(\w+) (objCType|doubleValue|longLongValue|unsignedLongLongValue)\]',
+                        r'\1->\2()', helper)
+        preamble = r"""
+#include <cassert>
+#include <climits>
+#include <cstddef>
+using BOOL = bool;
+constexpr bool YES = true, NO = false;
+enum NSComparisonResult { NSOrderedAscending=-1, NSOrderedSame=0, NSOrderedDescending=1 };
+constexpr char _C_FLT='f', _C_DBL='d', _C_UCHR='C', _C_USHT='S',
+               _C_UINT='I', _C_ULNG='L', _C_ULNG_LNG='Q';
+struct Number {
+    const char *type;
+    unsigned long long value;
+    const char *objCType() { return type; }
+    long long longLongValue() { return static_cast<long long>(value); }
+    unsigned long long unsignedLongLongValue() { return value; }
+    double doubleValue() { return type[0]=='Q' ? double(value) : double(longLongValue()); }
+};
+using id = Number *;
+"""
+        cases = r"""
+int main() {
+    Number maximum{"Q", ULLONG_MAX}, negative{"q", ULLONG_MAX},
+           zero{"q", 0}, positive{"q", 42}, unsignedPositive{"Q", 42};
+    assert(_NSCompareNonCFNumber(&maximum, &negative) == NSOrderedDescending);
+    assert(_NSCompareNonCFNumber(&negative, &maximum) == NSOrderedAscending);
+    assert(_NSCompareNonCFNumber(&maximum, &zero) == NSOrderedDescending);
+    assert(_NSCompareNonCFNumber(&zero, &maximum) == NSOrderedAscending);
+    assert(_NSCompareNonCFNumber(&positive, &unsignedPositive) == NSOrderedSame);
+    assert(_NSCompareNonCFNumber(&unsignedPositive, &positive) == NSOrderedSame);
+}
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / 'compare.cpp'
+            binary = Path(tmp) / 'compare'
+            source.write_text(preamble + helper + cases)
+            subprocess.run(['c++', '-std=c++11', str(source), '-o', str(binary)],
+                           check=True, capture_output=True, text=True)
+            subprocess.run([str(binary)], check=True)
+
     def test_every_framework_has_a_source_and_symbol_list(self):
         for name, (_, required) in frameworks.FRAMEWORKS.items():
             with self.subTest(framework=name):

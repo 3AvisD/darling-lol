@@ -33,6 +33,17 @@ int main(void)
         expect_ok("integer survives retain/release",
               ([[constant retain] autorelease] == constant));
 
+        struct const_int maximum = { objc_getClass("NSConstantIntegerNumber"), "Q", -1LL };
+        NSNumber *unsignedConstant = (NSNumber *)&maximum;
+        NSNumber *negative = [NSNumber numberWithLongLong:-1];
+        NSNumber *zero = [NSNumber numberWithLongLong:0];
+        expect_ok("signed negative is below unsigned maximum",
+                  [negative compare:unsignedConstant] == NSOrderedAscending);
+        expect_ok("signed zero is below unsigned maximum",
+                  [zero compare:unsignedConstant] == NSOrderedAscending);
+        expect_ok("unsigned maximum is not signed negative",
+                  ![negative isEqualToNumber:unsignedConstant]);
+
         struct const_dbl d = { objc_getClass("NSConstantDoubleNumber"), 1.5 };
         NSNumber *dbl = (NSNumber *)&d;
         expect_ok("double value", [dbl doubleValue] == 1.5);

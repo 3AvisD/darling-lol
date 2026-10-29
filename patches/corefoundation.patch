@@ -544,7 +544,7 @@ diff --git a/NSNumber.m b/NSNumber.m
 index 7f15af6..230d316 100644
 --- a/NSNumber.m
 +++ b/NSNumber.m
-@@ -16,6 +16,60 @@ CF_EXPORT CFNumberType _CFNumberGetType(CFNumberRef num);
+@@ -16,6 +16,74 @@ CF_EXPORT CFNumberType _CFNumberGetType(CFNumberRef num);
  CF_EXPORT CFNumberType _CFNumberGetType2(CFNumberRef number);
  CF_EXPORT CFStringRef __CFNumberCreateFormattingDescription(CFAllocatorRef allocator, CFTypeRef cf, CFDictionaryRef formatOptions);
  
@@ -595,6 +595,20 @@ index 7f15af6..230d316 100644
 +        if (value > otherValue) return NSOrderedDescending;
 +        return NSOrderedSame;
 +    }
++    if (_NSTypeIsUnsigned(type) != _NSTypeIsUnsigned(otherType))
++    {
++        BOOL selfUnsigned = _NSTypeIsUnsigned(type);
++        id signedNumber = selfUnsigned ? other : self;
++        if ([signedNumber longLongValue] < 0)
++            return selfUnsigned ? NSOrderedDescending : NSOrderedAscending;
++        unsigned long long value = [self unsignedLongLongValue];
++        unsigned long long otherValue = [other unsignedLongLongValue];
++        if (value < otherValue) return NSOrderedAscending;
++        if (value > otherValue) return NSOrderedDescending;
++        return NSOrderedSame;
++    }
++
++    /* Both remaining operands are signed. */
 +    long long value = [self longLongValue];
 +    long long otherValue = [other longLongValue];
 +    if (value < otherValue) return NSOrderedAscending;
@@ -605,7 +619,7 @@ index 7f15af6..230d316 100644
  CF_PRIVATE
  @interface __NSCFNumber : __NSCFType
  @end
-@@ -39,12 +93,28 @@ CF_PRIVATE
+@@ -39,12 +107,28 @@ CF_PRIVATE
          @throw [NSException exceptionWithName:NSInvalidArgumentException reason:@"nil argument" userInfo:nil];
          return NSOrderedSame;
      }
@@ -635,7 +649,7 @@ index 7f15af6..230d316 100644
      switch (result) {
          case kCFCompareLessThan:
              return NSOrderedDescending;
-@@ -388,6 +458,14 @@ CF_PRIVATE
+@@ -388,6 +472,14 @@ CF_PRIVATE
      {
          return NSOrderedAscending;
      }
@@ -650,7 +664,7 @@ index 7f15af6..230d316 100644
      else
      {
          CFComparisonResult result = CFNumberCompare((CFNumberRef)self, (CFNumberRef)other, NULL);
-@@ -401,6 +479,7 @@ CF_PRIVATE
+@@ -401,6 +493,7 @@ CF_PRIVATE
                  return NSOrderedSame;
          }
      }

@@ -136,8 +136,10 @@ def link_versions(bundle, name):
     if not current.is_symlink():
         current.symlink_to('A')
     target = versioned / name
-    if not target.is_symlink():
-        target.symlink_to(f'../../../{name}')
+    if target.is_symlink() and os.readlink(target) != f'../../{name}':
+        target.unlink()
+    if not target.exists():
+        target.symlink_to(f'../../{name}')
     (bundle / 'Resources').mkdir(exist_ok=True)
     (bundle / 'Resources/Info.plist').write_text(
         '<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -202,6 +204,7 @@ def install(backup):
         final = destination / name
         digest = hashlib.sha256(source.read_bytes()).hexdigest()
         if final.exists() and hashlib.sha256(final.read_bytes()).hexdigest() == digest:
+            link_versions(destination, name)
             installed.append({'framework': name, 'path': str(final), 'already_current': True})
             continue
         kept = None
@@ -212,6 +215,7 @@ def install(backup):
         staged = final.with_name(final.name + '.new')
         shutil.copy2(source, staged)
         os.replace(staged, final)
+        link_versions(destination, name)
         installed.append({'framework': name, 'path': str(final),
                           'backup': str(kept) if kept else None})
     print(json.dumps({'installed': installed, 'activation':
