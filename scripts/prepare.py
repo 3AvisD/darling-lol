@@ -16,13 +16,25 @@ LFS_URL='lfs.url=https://github.com/darlinghq/darling-swift.git/info/lfs'
 # Without these, a checkout writes Git LFS pointer text where a real dylib belongs, which links but crashes.
 LFS_FILTERS=['-c','filter.lfs.required=true','-c','filter.lfs.smudge=git-lfs smudge -- %f',
              '-c','filter.lfs.process=git-lfs filter-process','-c','filter.lfs.clean=git-lfs clean -- %f']
+LFS_POINTER=b'version https://git-lfs.github.com/spec/v1\n'
 def submodules(checkout):
     out=subprocess.run(['git','-C',str(checkout),'submodule','status','--recursive'],text=True,capture_output=True,check=True).stdout
     return [checkout/line.split()[1] for line in out.splitlines() if len(line.split())>1]
 def pointers(repo):
-    """Tracked files still checked out as LFS pointer text instead of their real content."""
-    out=subprocess.run(['git','-C',str(repo),'lfs','ls-files'],text=True,capture_output=True,check=True).stdout
-    return [f for f in (line.split(maxsplit=2) for line in out.splitlines()) if len(f)==3 and f[1]=='-']
+    """Tracked files still checked out as LFS pointer text instead of their real content.
+
+    The marker from `git lfs ls-files` is not enough: it reports * (object present)
+    when the pointer text happens to be the same size as the object.
+    """
+    out=subprocess.run(['git','-C',str(repo),'lfs','ls-files','--name-only'],text=True,capture_output=True,check=True).stdout
+    found=[]
+    for name in out.splitlines():
+        try:
+            with open(Path(repo,name),'rb') as handle:head=handle.read(200)
+        except OSError:
+            continue
+        if head.startswith(LFS_POINTER) and b'\nsize ' in head:found.append(name)
+    return found
 def repair(checkout):
     """An interrupted fetch leaves a submodule with a wiped index or pointer text and 'submodule update'
     treats both as up to date, so check every worktree before this checkout becomes the source tree."""
