@@ -4,7 +4,7 @@
 Clang turns `@42` and `@[@"a"]` into statically allocated objects when the
 translation unit targets a macOS 11 or newer runtime, and binds them to
 NSConstantIntegerNumber / NSConstantArray and friends. Before this support,
-Darling had none of those classes or the empty-collection pointer variables, so
+Darling had none of those classes or the empty-collection objects, so
 a client built that way failed to bind at launch with
 
     dyld: Symbol not found: _OBJC_CLASS_$_NSConstantIntegerNumber

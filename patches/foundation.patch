@@ -58,7 +58,7 @@ index 80c92bc..2a80df6 100644
 +
 +FOUNDATION_EXPORT NSString *const NSUserActivityTypeBrowsingWeb;
 diff --git a/src/NSAppleEventManager.m b/src/NSAppleEventManager.m
-index 194c5d0..bb5ac5a 100644
+index 194c5d0..6399cf8 100644
 --- a/src/NSAppleEventManager.m
 +++ b/src/NSAppleEventManager.m
 @@ -1,6 +1,7 @@
@@ -69,12 +69,18 @@ index 194c5d0..bb5ac5a 100644
  
  static NSAppleEventManager* instance = nil;
  
-@@ -22,6 +23,42 @@ static NSAppleEventManager* instance = nil;
+@@ -17,11 +18,47 @@ static NSAppleEventManager* instance = nil;
+ }
+ 
+ - (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector {
+-    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
+ }
  
  - (void)forwardInvocation:(NSInvocation *)anInvocation {
      NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
 +
-+    /* The generic signature above claims a void return, but callers of an
++    /* The generic signature above reserves an object return slot; callers of an
 +     * unimplemented method still read the return slot. Leaving it untouched
 +     * hands them stack garbage: Chromium read `currentAppleEvent` as an object
 +     * pointer and crashed in objc_msgSend. Zero the return value so every
@@ -114,10 +120,10 @@ index 194c5d0..bb5ac5a 100644
  - (void) setEventHandler: (id) handler
 diff --git a/src/NSConstantNumber.m b/src/NSConstantNumber.m
 new file mode 100644
-index 0000000..b25e866
+index 0000000..dfaae60
 --- /dev/null
 +++ b/src/NSConstantNumber.m
-@@ -0,0 +1,266 @@
+@@ -0,0 +1,287 @@
 +//
 +//  NSConstantNumber.m
 +//  Foundation
@@ -209,6 +215,13 @@ index 0000000..b25e866
 +
 +@implementation NSConstantIntegerNumber
 +
++- (NSNumber *)boxedValue { return encodingIsUnsigned(_encoding) ? [NSNumber numberWithUnsignedLongLong:(unsigned long long)_value] : [NSNumber numberWithLongLong:_value]; }
++- (NSComparisonResult)compare:(NSNumber *)other
++{
++    return [[self boxedValue] compare:other];
++}
++- (NSUInteger)hash { return [[self boxedValue] hash]; }
++
 +/* CFNumberCompare on the other side of a comparison expects a CFNumber; these
 + * objects are ordinary NSNumber subclasses, so compare through the accessors. */
 +- (NSComparisonResult)_reverseCompare:(id)other
@@ -245,8 +258,8 @@ index 0000000..b25e866
 +- (unsigned long)unsignedLongValue { return (unsigned long)_value; }
 +- (long long)longLongValue { return _value; }
 +- (unsigned long long)unsignedLongLongValue { return (unsigned long long)_value; }
-+- (float)floatValue { return (float)_value; }
-+- (double)doubleValue { return (double)_value; }
++- (float)floatValue { return (float)[self doubleValue]; }
++- (double)doubleValue { return encodingIsUnsigned(_encoding) ? (double)(unsigned long long)_value : (double)_value; }
 +- (BOOL)boolValue { return _value != 0; }
 +- (NSInteger)integerValue { return (NSInteger)_value; }
 +- (NSUInteger)unsignedIntegerValue { return (NSUInteger)_value; }
@@ -278,6 +291,13 @@ index 0000000..b25e866
 +@end
 +
 +@implementation NSConstantDoubleNumber
++
++- (NSNumber *)boxedValue { return [NSNumber numberWithDouble:_value]; }
++- (NSComparisonResult)compare:(NSNumber *)other
++{
++    return [[self boxedValue] compare:other];
++}
++- (NSUInteger)hash { return [[self boxedValue] hash]; }
 +
 +/* CFNumberCompare on the other side of a comparison expects a CFNumber; these
 + * objects are ordinary NSNumber subclasses, so compare through the accessors. */
@@ -333,6 +353,13 @@ index 0000000..b25e866
 +
 +@implementation NSConstantFloatNumber
 +
++- (NSNumber *)boxedValue { return [NSNumber numberWithFloat:_value]; }
++- (NSComparisonResult)compare:(NSNumber *)other
++{
++    return [[self boxedValue] compare:other];
++}
++- (NSUInteger)hash { return [[self boxedValue] hash]; }
++
 +/* CFNumberCompare on the other side of a comparison expects a CFNumber; these
 + * objects are ordinary NSNumber subclasses, so compare through the accessors. */
 +- (NSComparisonResult)_reverseCompare:(id)other
@@ -385,10 +412,10 @@ index 0000000..b25e866
 +
 +@end
 diff --git a/src/NSNotificationCenter.m b/src/NSNotificationCenter.m
-index 0034834..8fb1380 100644
+index 0034834..77695f9 100644
 --- a/src/NSNotificationCenter.m
 +++ b/src/NSNotificationCenter.m
-@@ -12,6 +12,8 @@
+@@ -12,10 +12,13 @@
  #import "NSNotificationInternal.h"
  #import <dispatch/dispatch.h>
  #import <pthread.h>
@@ -397,7 +424,20 @@ index 0034834..8fb1380 100644
  
  @interface _NSNotificationObserver : NSObject
  {
-@@ -35,7 +37,6 @@
+ 	id _observer;
++    const void *_observerIdentity;
+ 	SEL _selector;
+ 	NSString* _name;
+ 	id _object;
+@@ -23,6 +26,7 @@
+ 	void (^_block)(NSNotification *note);
+ }
+ 
++- (BOOL)matchesObserver:(id)observer;
+ @property (nonatomic, readonly) id observer;
+ @property (nonatomic, readonly) SEL selector;
+ @property (nonatomic, readonly) NSString *name;
+@@ -35,7 +39,6 @@
  
  @implementation _NSNotificationObserver
  
@@ -405,7 +445,7 @@ index 0034834..8fb1380 100644
  @synthesize selector = _selector;
  @synthesize name = _name;
  @synthesize object = _object;
-@@ -47,7 +48,11 @@
+@@ -47,7 +50,12 @@
      self = [super init];
      if (self)
      {
@@ -414,14 +454,22 @@ index 0034834..8fb1380 100644
 +         * message an observer that has been deallocated without removing
 +         * itself: the center holds a zeroing weak reference. A raw pointer
 +         * here crashed Chromium, which relies on that guarantee. */
++        _observerIdentity = (const void *)observer;
 +        objc_storeWeak(&_observer, observer);
          _selector = selector;
          _name = [name copy];
          _object = object;
-@@ -57,8 +62,16 @@
+@@ -57,8 +65,23 @@
      return self;
  }
  
++- (BOOL)matchesObserver:(id)observer
++{
++    /* Loading a weak reference returns nil once deallocation starts. */
++    return observer != nil ? _observerIdentity == (const void *)observer
++                           : objc_loadWeak(&_observer) == nil;
++}
++
 +- (id)observer
 +{
 +    /* _observer is a zeroing weak reference; read it through the runtime so a
@@ -435,7 +483,7 @@ index 0034834..8fb1380 100644
      [_name release];
      [_queue release];
      [_block release];
-@@ -81,9 +94,16 @@
+@@ -81,9 +104,16 @@
      {
          _block(notif);
      }
@@ -454,6 +502,24 @@ index 0034834..8fb1380 100644
      }
  }
  
+@@ -173,7 +203,7 @@
+     NSIndexSet *indicies = [_observers indexesOfObjectsPassingTest:^BOOL(_NSNotificationObserver *notifObserver, NSUInteger idx, BOOL *stop) {
+         // observer may be a user controlled object, or an instance of _NSNotificationObserver if the block version of 
+         // addObserverForName was used
+-        return notifObserver == observer || notifObserver.observer == observer;
++        return notifObserver == observer || [notifObserver matchesObserver:observer];
+     }];
+     [_observers removeObjectsAtIndexes:indicies];
+     pthread_mutex_unlock(&_observersLock);
+@@ -188,7 +218,7 @@
+         {
+             matchesObject = notifObserver.object == anObject;
+         }
+-        return notifObserver.observer == observer && matchesObject && [notifObserver.name isEqualToString:aName];
++        return [notifObserver matchesObserver:observer] && matchesObject && [notifObserver.name isEqualToString:aName];
+     }];
+     [_observers removeObjectsAtIndexes:indicies];
+     pthread_mutex_unlock(&_observersLock);
 diff --git a/src/NSProcessInfo.m b/src/NSProcessInfo.m
 index 1c21f17..420955a 100644
 --- a/src/NSProcessInfo.m

@@ -11,6 +11,9 @@ struct const_dbl { Class isa; double value; };
 struct const_arr { Class isa; unsigned long count; const id *objects; };
 struct const_dict { Class isa; unsigned long hashOptions; unsigned long count; const id *keys; const id *objects; };
 
+extern struct const_arr __NSArray0__struct;
+extern struct const_dict __NSDictionary0__struct;
+
 static int failures;
 
 static void expect_ok(const char *what, int ok)
@@ -43,6 +46,15 @@ int main(void)
                   [zero compare:unsignedConstant] == NSOrderedAscending);
         expect_ok("unsigned maximum is not signed negative",
                   ![negative isEqualToNumber:unsignedConstant]);
+
+        struct const_int same = { objc_getClass("NSConstantIntegerNumber"), "q", 42 };
+        expect_ok("constant equality", [constant isEqualToNumber:(NSNumber *)&same]);
+        expect_ok("constant hash matches built", [constant hash] == [built hash]);
+        expect_ok("unsigned maximum orders above signed negative",
+                  [unsignedConstant compare:negative] == NSOrderedDescending);
+        expect_ok("unsigned maximum converts to positive double", [unsignedConstant doubleValue] > 0);
+        expect_ok("empty array singleton layout", [(NSArray *)&__NSArray0__struct count] == 0);
+        expect_ok("empty dictionary singleton layout", [(NSDictionary *)&__NSDictionary0__struct count] == 0);
 
         struct const_dbl d = { objc_getClass("NSConstantDoubleNumber"), 1.5 };
         NSNumber *dbl = (NSNumber *)&d;

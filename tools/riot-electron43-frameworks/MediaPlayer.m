@@ -33,7 +33,7 @@ typedef NS_ENUM(NSInteger, MPNowPlayingPlaybackState) {
 {
 	NSMutableArray *_targets;
 }
-- (MPRemoteCommandHandlerStatus)addTargetWithHandler:(id)handler;
+- (id)addTargetWithHandler:(id)handler;
 - (void)removeTarget:(id)target;
 - (void)removeTarget:(id)target action:(SEL)action;
 - (BOOL)isEnabled;
@@ -96,18 +96,21 @@ typedef NS_ENUM(NSInteger, MPNowPlayingPlaybackState) {
 		_targets = [NSMutableArray new];
 	return self;
 }
-- (MPRemoteCommandHandlerStatus)addTargetWithHandler:(id)handler
+- (id)addTargetWithHandler:(id)handler
 {
-	/* Remembering the handler keeps a repeated add from growing without bound,
-	 * but nothing ever fires: there is no Now Playing service to send events. */
-	if (handler && ![_targets containsObject:handler])
-		[_targets addObject:handler];
-	return MPRemoteCommandHandlerStatusSuccess;
+    // A copied block is the opaque token returned to removeTarget:.
+    if (!handler)
+        return nil;
+    id token = [handler copy];
+    [_targets addObject:token];
+    return token;
 }
 - (void)removeTarget:(id)target
 {
 	if (target)
-		[_targets removeObject:target];
+		[_targets removeObjectIdenticalTo:target];
+    else
+        [_targets removeAllObjects];
 }
 - (void)removeTarget:(id)target action:(SEL)action { [self removeTarget:target]; }
 - (BOOL)isEnabled { return YES; }
@@ -180,7 +183,7 @@ typedef NS_ENUM(NSInteger, MPNowPlayingPlaybackState) {
 	if ((self = [super init]))
 	{
 		_boundsSize = boundsSize;
-		_requestHandler = handler;
+		_requestHandler = [handler copy];
 	}
 	return self;
 }

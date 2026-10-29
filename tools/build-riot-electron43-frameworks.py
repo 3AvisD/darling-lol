@@ -27,6 +27,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shlex
 import shutil
@@ -89,7 +90,7 @@ def compiled_flags():
             name, value = line.split(' = ', 1)
             # The saved flags name the clang resource directory of the compiler
             # that configured the tree; follow the installed one.
-            flags[name] = [part.replace('/usr/lib/clang/22/include', resource + '/include')
+            flags[name] = [re.sub(r'/usr/lib/clang/[^/]+/include', resource + '/include', part)
                            for part in shlex.split(value)]
     flags['C_DEFINES'] = [item for item in flags['C_DEFINES'] if not item.endswith('AppKit_EXPORTS')]
     return flags
@@ -112,7 +113,7 @@ def build():
         obj = ROOT / f'build/riot-{name}.o'
         subprocess.run([
             'clang', *flags['C_DEFINES'], *flags['C_INCLUDES'], *flags['C_FLAGS'],
-            '-O2', '-c', str(source), '-o', str(obj),
+            '-fobjc-arc', '-fblocks', '-O2', '-c', str(source), '-o', str(obj),
         ], check=True)
         subprocess.run([
             'clang', '-target', 'x86_64-apple-darwin20', '-fuse-ld=lld', '-nostdlib',
@@ -171,7 +172,7 @@ def imports(binary, framework):
                          capture_output=True, text=True, check=True).stdout
     found = []
     for line in out.splitlines():
-        if '(weak' in line or f'(from {framework})' not in line:
+        if re.search(r'\bweak\b', line.split('(from', 1)[0]) or f'(from {framework})' not in line:
             continue
         found.append(line.split()[-3])
     return found

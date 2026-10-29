@@ -112,6 +112,16 @@ int main() {
                            check=True, capture_output=True, text=True)
             subprocess.run([str(binary)], check=True)
 
+    def test_imports_exclude_weak_symbols_from_llvm_nm_output(self):
+        output = """                 (undefined) external _required (from CoreML)
+                 (undefined) weak external _optional (from CoreML)
+                 (undefined) weak external _optional_other (from Foundation)
+                 (undefined) external _unrelated (from Foundation)
+"""
+        with patch.object(frameworks.subprocess, 'run', return_value=
+                          subprocess.CompletedProcess([], 0, output, '')):
+            self.assertEqual(frameworks.imports('fixture', 'CoreML'), ['_required'])
+
     def test_every_framework_has_a_source_and_symbol_list(self):
         for name, (_, required) in frameworks.FRAMEWORKS.items():
             with self.subTest(framework=name):

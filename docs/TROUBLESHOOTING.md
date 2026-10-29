@@ -1017,9 +1017,9 @@ none of that is in scope here.
 `@[@"a"]` into statically allocated objects rather than calls. Numbers bind to
 `NSConstantIntegerNumber`, `NSConstantDoubleNumber` or `NSConstantFloatNumber`;
 collections bind to `NSConstantArray` or `NSConstantDictionary`, and an empty
-`@[]`/`@{}` is a reference to the pointer variable `__NSArray0__struct` or
+`@[]`/`@{}` is a reference to the object `__NSArray0__struct` or
 `__NSDictionary0__struct`. Darling only had `__NSArray0__`/`__NSDictionary0__`,
-so the classes and variables are added by `patches/foundation.patch` and
+so the classes and objects are added by `patches/foundation.patch` and
 `patches/corefoundation.patch`.
 
 The instance layouts are exactly what clang emits (see `CGObjCMac.cpp`,
