@@ -108,6 +108,32 @@ The old kernel library returned success for Darwin allocator free/reuse hints wi
 
 Build/install the kernel library using [the incremental update steps](SETUP.md#updating-an-existing-runtime), then perform the manual restart when finished playing. Linux 5.14+ is required. Do not kill client helpers as an attempted memory optimization during play.
 
+## Guest resource limits differ from macOS (#154)
+
+Linux reports an unlimited resource as `~0ULL`, while Darwin uses
+`0x7FFFFFFFFFFFFFFF` (`RLIM_INFINITY` in `<sys/resource.h>`). The kernel library
+passed the Linux value straight through, so a guest that compares a limit
+against its own `RLIM_INFINITY` never matched, and any guest that casts the
+value to a signed 64-bit integer saw `-1`: Chromium's
+`gin::IsolateHolder::getDefaultIsolateParams` does `checked_cast<int64_t>` on
+`rlim_cur`, which traps with `SIGILL` during image initialization. The Riot
+Client 142 Electron build dies there before its first window, every launch.
+
+`getrlimit`/`setrlimit` now translate both directions, keep the descriptor-count
+adjustment below a representable value (an unlimited `RLIMIT_NOFILE` used to be
+decremented into `0x7FFFFFFFFFFFFFFE`), and refuse a guest request above
+Darwin's maximum with `EINVAL` instead of silently truncating it.
+
+`python3 tools/build-riot-rlimit-check.py` compiles the shipped `getrlimit.c`,
+`setrlimit.c` and `errno.c` for the host with the syscall trampoline shimmed to
+`prlimit64`, and asserts the conversions without starting a guest. It needs the
+prepared source tree; the run prints one line per case and `PASS rlimit
+conversion`.
+
+Rebuild and install the kernel library using [the incremental update
+steps](SETUP.md#updating-an-existing-runtime); guest processes must restart
+before the new library is mapped.
+
 ## Shaders are recompiled on every start
 
 Mesa resolves its shader disk cache below `$HOME`. Inside the guest, `$HOME` is

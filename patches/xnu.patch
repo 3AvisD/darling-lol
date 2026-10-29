@@ -6294,3 +6294,98 @@ index f890ab2..8969577 100644
  	}
  	return IOCTL_PASS;
  }
+diff --git a/darling/src/libsystem_kernel/emulation/include/conversion/misc/getrlimit.h b/darling/src/libsystem_kernel/emulation/include/conversion/misc/getrlimit.h
+index 24a5f01..f92c575 100644
+--- a/darling/src/libsystem_kernel/emulation/include/conversion/misc/getrlimit.h
++++ b/darling/src/libsystem_kernel/emulation/include/conversion/misc/getrlimit.h
+@@ -8,6 +8,28 @@ struct xnu_rlimit
+ 	long _dummy[20];
+ };
+ 
++/* Darwin reports an unlimited resource as 0x7FFFFFFFFFFFFFFF (RLIM_INFINITY in
++ * <sys/resource.h>), while Linux uses ~0ULL. Passing the Linux value through
++ * makes every guest comparison against RLIM_INFINITY fail and turns a
++ * checked_cast<int64_t> of it into -1, which traps: Chromium does exactly that
++ * on rlim_cur and dies with SIGILL before its main process starts. */
++#define XNU_RLIM_INFINITY 0x7FFFFFFFFFFFFFFFULL
++#define LINUX_RLIM_INFINITY (~0ULL)
++
++/* Linux value as the guest must see it; anything above Darwin's own maximum can
++ * only mean "unlimited". */
++static inline unsigned long long rlimit_from_linux(unsigned long long value)
++{
++	return value > XNU_RLIM_INFINITY ? XNU_RLIM_INFINITY : value;
++}
++
++/* Whether a Darwin limit means "unlimited"; used to skip the descriptor-count
++ * adjustment, which would otherwise turn 0x7FFFFFFFFFFFFFFF into ...FFFE. */
++static inline int rlimit_is_infinity(unsigned long long value)
++{
++	return value == XNU_RLIM_INFINITY;
++}
++
+ enum {
+ 	LINUX_RLIMIT_CPU = 0,
+ 	LINUX_RLIMIT_FSIZE,
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/getrlimit.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/getrlimit.c
+index 01d4670..2fccfce 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/getrlimit.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/getrlimit.c
+@@ -16,12 +16,22 @@ long sys_getrlimit(unsigned int which, struct xnu_rlimit* rlp)
+ 
+ 	ret = LINUX_SYSCALL(__NR_prlimit64, 0, which, 0, rlp);
+ 	if (ret < 0)
++	{
+ 		ret = errno_linux_to_bsd(ret);
++		return ret;
++	}
++
++	/* Report Darwin's infinity, not Linux's ~0ULL, and keep the descriptor
++	 * adjustment below a representable value. */
++	rlp->rlim_cur = rlimit_from_linux(rlp->rlim_cur);
++	rlp->rlim_max = rlimit_from_linux(rlp->rlim_max);
+ 
+ 	if (which == LINUX_RLIMIT_NOFILE)
+ 	{
+-		rlp->rlim_cur--;
+-		rlp->rlim_max--;
++		if (!rlimit_is_infinity(rlp->rlim_cur))
++			rlp->rlim_cur--;
++		if (!rlimit_is_infinity(rlp->rlim_max))
++			rlp->rlim_max--;
+ 	}
+ 
+ 	return ret;
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/setrlimit.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/setrlimit.c
+index 352c739..31a7fc2 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/setrlimit.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/setrlimit.c
+@@ -9,16 +9,25 @@
+ long sys_setrlimit(unsigned int which, const struct xnu_rlimit* rlp)
+ {
+ 	int ret;
+-	struct xnu_rlimit lim = { rlp->rlim_cur, rlp->rlim_max };
++	struct xnu_rlimit lim;
+ 
+ 	which = rlimit_bsd_to_linux(which);
+ 	if (which == -1)
+ 		return -EINVAL;
+ 
++	/* A guest cannot ask for more than Darwin's own RLIM_INFINITY. */
++	if (rlp->rlim_cur > XNU_RLIM_INFINITY || rlp->rlim_max > XNU_RLIM_INFINITY)
++		return -EINVAL;
++
++	lim.rlim_cur = rlimit_is_infinity(rlp->rlim_cur) ? LINUX_RLIM_INFINITY : rlp->rlim_cur;
++	lim.rlim_max = rlimit_is_infinity(rlp->rlim_max) ? LINUX_RLIM_INFINITY : rlp->rlim_max;
++
+ 	if (which == LINUX_RLIMIT_NOFILE)
+ 	{
+-		lim.rlim_cur++;
+-		lim.rlim_max++;
++		if (lim.rlim_cur != LINUX_RLIM_INFINITY)
++			lim.rlim_cur++;
++		if (lim.rlim_max != LINUX_RLIM_INFINITY)
++			lim.rlim_max++;
+ 	}
+ 
+ 	ret = LINUX_SYSCALL(__NR_prlimit64, 0, which, &lim, 0);
