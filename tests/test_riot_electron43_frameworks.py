@@ -136,7 +136,11 @@ int main() {
                 # constant simply loses the leading underscore in C.
                 identifier = symbol.split('$_')[-1] if '$_' in symbol else symbol.lstrip('_')
                 with self.subTest(framework=name, symbol=symbol):
-                    self.assertIn(identifier, source)
+                    if '$_' in symbol:
+                        pattern = rf'@implementation\s+{re.escape(identifier)}\b'
+                    else:
+                        pattern = rf'\b{re.escape(identifier)}\b\s*(?:=|\([^;{{}}]*\)\s*\{{)'
+                    self.assertRegex(source, pattern)
 
     def test_guest_check_covers_every_constant_class(self):
         check = (frameworks.SOURCES / 'constant-literal-check.m').read_text()

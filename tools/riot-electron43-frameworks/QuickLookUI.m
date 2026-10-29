@@ -23,11 +23,12 @@
 - (void)close;
 @end
 
+static QLPreviewPanel *panel;
+
 @implementation QLPreviewPanel
 
 + (QLPreviewPanel *)sharedPreviewPanel
 {
-	static QLPreviewPanel *panel;
 	if (!panel)
 		panel = [[QLPreviewPanel alloc] initWithContentRect:NSMakeRect(0, 0, 640, 480)
 		                                         styleMask:NSWindowStyleMaskTitled
@@ -38,7 +39,7 @@
 
 + (BOOL)sharedPreviewPanelExists
 {
-	return YES;
+	return panel != nil;
 }
 
 - (void)setDataSource:(id)dataSource { _qlDataSource = dataSource; }
