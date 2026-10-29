@@ -120,7 +120,7 @@ index 194c5d0..6399cf8 100644
  - (void) setEventHandler: (id) handler
 diff --git a/src/NSConstantNumber.m b/src/NSConstantNumber.m
 new file mode 100644
-index 0000000..dfaae60
+index 0000000..26ced08
 --- /dev/null
 +++ b/src/NSConstantNumber.m
 @@ -0,0 +1,287 @@
@@ -329,7 +329,7 @@ index 0000000..dfaae60
 +
 +- (NSString *)stringValue
 +{
-+    return [NSString stringWithFormat:@"%g", _value];
++    return [[self boxedValue] stringValue];
 +}
 +
 +- (NSString *)description
@@ -390,7 +390,7 @@ index 0000000..dfaae60
 +
 +- (NSString *)stringValue
 +{
-+    return [NSString stringWithFormat:@"%g", (double)_value];
++    return [[self boxedValue] stringValue];
 +}
 +
 +- (NSString *)description
@@ -412,10 +412,10 @@ index 0000000..dfaae60
 +
 +@end
 diff --git a/src/NSNotificationCenter.m b/src/NSNotificationCenter.m
-index 0034834..77695f9 100644
+index 0034834..05eaeba 100644
 --- a/src/NSNotificationCenter.m
 +++ b/src/NSNotificationCenter.m
-@@ -12,10 +12,13 @@
+@@ -12,10 +12,14 @@
  #import "NSNotificationInternal.h"
  #import <dispatch/dispatch.h>
  #import <pthread.h>
@@ -426,10 +426,11 @@ index 0034834..77695f9 100644
  {
  	id _observer;
 +    const void *_observerIdentity;
++    BOOL _observerIsUnsafe;
  	SEL _selector;
  	NSString* _name;
  	id _object;
-@@ -23,6 +26,7 @@
+@@ -23,6 +27,7 @@
  	void (^_block)(NSNotification *note);
  }
  
@@ -437,7 +438,7 @@ index 0034834..77695f9 100644
  @property (nonatomic, readonly) id observer;
  @property (nonatomic, readonly) SEL selector;
  @property (nonatomic, readonly) NSString *name;
-@@ -35,7 +39,6 @@
+@@ -35,7 +40,6 @@
  
  @implementation _NSNotificationObserver
  
@@ -445,7 +446,7 @@ index 0034834..77695f9 100644
  @synthesize selector = _selector;
  @synthesize name = _name;
  @synthesize object = _object;
-@@ -47,7 +50,12 @@
+@@ -47,7 +51,16 @@
      self = [super init];
      if (self)
      {
@@ -455,11 +456,15 @@ index 0034834..77695f9 100644
 +         * itself: the center holds a zeroing weak reference. A raw pointer
 +         * here crashed Chromium, which relies on that guarantee. */
 +        _observerIdentity = (const void *)observer;
-+        objc_storeWeak(&_observer, observer);
++        // Some custom retain/release classes reject weak references. Preserve
++        // their previous unretained registration contract without a fatal store.
++        _observerIsUnsafe = observer != nil && objc_storeWeakOrNil(&_observer, observer) == nil;
++        if (_observerIsUnsafe)
++            _observer = observer;
          _selector = selector;
          _name = [name copy];
          _object = object;
-@@ -57,8 +65,23 @@
+@@ -57,8 +70,24 @@
      return self;
  }
  
@@ -467,23 +472,24 @@ index 0034834..77695f9 100644
 +{
 +    /* Loading a weak reference returns nil once deallocation starts. */
 +    return observer != nil ? _observerIdentity == (const void *)observer
-+                           : objc_loadWeak(&_observer) == nil;
++                           : [self observer] == nil;
 +}
 +
 +- (id)observer
 +{
 +    /* _observer is a zeroing weak reference; read it through the runtime so a
 +     * deallocated observer reads as nil instead of a dangling pointer. */
-+    return objc_loadWeak(&_observer);
++    return _observerIsUnsafe ? _observer : objc_loadWeak(&_observer);
 +}
 +
  - (void)dealloc
  {
-+    objc_storeWeak(&_observer, nil);
++    if (!_observerIsUnsafe)
++        objc_storeWeak(&_observer, nil);
      [_name release];
      [_queue release];
      [_block release];
-@@ -81,9 +104,16 @@
+@@ -81,9 +110,17 @@
      {
          _block(notif);
      }
@@ -493,16 +499,17 @@ index 0034834..77695f9 100644
 -        [_observer performSelector:_selector withObject:notif];
 +        /* Keep the observer alive for the duration of the callback; it may
 +         * release itself (and the center's weak reference) from inside it. */
-+        id observer = objc_loadWeakRetained(&_observer);
++        id observer = _observerIsUnsafe ? _observer : objc_loadWeakRetained(&_observer);
 +        if (observer != nil)
 +        {
 +            [observer performSelector:_selector withObject:notif];
-+            [observer release];
++            if (!_observerIsUnsafe)
++                [observer release];
 +        }
      }
  }
  
-@@ -173,7 +203,7 @@
+@@ -173,7 +210,7 @@
      NSIndexSet *indicies = [_observers indexesOfObjectsPassingTest:^BOOL(_NSNotificationObserver *notifObserver, NSUInteger idx, BOOL *stop) {
          // observer may be a user controlled object, or an instance of _NSNotificationObserver if the block version of 
          // addObserverForName was used
@@ -511,7 +518,7 @@ index 0034834..77695f9 100644
      }];
      [_observers removeObjectsAtIndexes:indicies];
      pthread_mutex_unlock(&_observersLock);
-@@ -188,7 +218,7 @@
+@@ -188,7 +225,7 @@
          {
              matchesObject = notifObserver.object == anObject;
          }

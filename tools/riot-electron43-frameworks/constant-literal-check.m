@@ -8,6 +8,7 @@
  * feature (which the Linux toolchain does not implement). */
 struct const_int { Class isa; const char *encoding; long long value; };
 struct const_dbl { Class isa; double value; };
+struct const_flt { Class isa; float value; };
 struct const_arr { Class isa; unsigned long count; const id *objects; };
 struct const_dict { Class isa; unsigned long hashOptions; unsigned long count; const id *keys; const id *objects; };
 
@@ -61,6 +62,17 @@ int main(void)
         expect_ok("double value", [dbl doubleValue] == 1.5);
         expect_ok("double compares", [dbl compare:[NSNumber numberWithDouble:2.0]] == NSOrderedAscending);
         expect_ok("double not equal to 42", ![dbl isEqualToNumber:built]);
+
+        struct const_dbl precise = { objc_getClass("NSConstantDoubleNumber"), 3.14159265 };
+        NSNumber *preciseConstant = (NSNumber *)&precise;
+        NSNumber *preciseBuilt = [NSNumber numberWithDouble:precise.value];
+        expect_ok("double formatting matches built", [[preciseConstant stringValue]
+                  isEqualToString:[preciseBuilt stringValue]]);
+        expect_ok("double description matches built", [[preciseConstant description]
+                  isEqualToString:[preciseBuilt description]]);
+        struct const_flt preciseFloat = { objc_getClass("NSConstantFloatNumber"), 1234567.0f };
+        expect_ok("float formatting matches built", [[(NSNumber *)&preciseFloat stringValue]
+                  isEqualToString:[[NSNumber numberWithFloat:preciseFloat.value] stringValue]]);
 
         NSString *first = @"first";
         NSString *second = @"second";
